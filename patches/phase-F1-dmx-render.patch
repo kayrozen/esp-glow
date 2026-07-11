@@ -1,0 +1,1472 @@
+From 3f99337803142cf7d21853a86d9f4b2d3a636300 Mon Sep 17 00:00:00 2001
+From: esp-glow firmware <firmware@esp-glow.local>
+Date: Sat, 11 Jul 2026 13:41:20 +0000
+Subject: [PATCH] F1: DMX output path + render task + host-tested render-pacing
+
+- render_pacing.{h,cpp}: pure paceNextFrame() (tick->seconds, drift-correcting
+  deadline math). Behind frames rebase off now (no catch-up burst).
+- test_render_pacing.cpp: 9 tests (steady state, drift, u64 wrap safety, zero
+  period). Wired into 'make test'.
+- dmx_sink.{h,cpp}: filled scaffold. begin() installs esp_dmx driver + pins;
+  send() forces start code 0x00, writes 512 slots, dmx_send + dmx_wait_send.
+- firmware/main/render_task.{h,cpp}: FreeRTOS task pinned to core 1 at 44 Hz,
+  delegates pacing to glow::paceNextFrame, logs per-5s stats.
+- firmware/main/main.cpp: F1 hardcoded patch (1ch dimmer @ u0/base0, 50%
+  DimmerEffect) driving the render task into DmxSink.
+- firmware/main/idf_component.yml: espressif/esp_dmx + littlefs deps.
+
+Host make test: all green (incl. 9 new render_pacing tests).
+---
+ Makefile                                     |  15 +-
+ README_FIRMWARE.md                           |  43 ++
+ dmx_sink.cpp                                 |  91 +++-
+ dmx_sink.h                                   |  32 ++
+ firmware/components/glow_core/CMakeLists.txt |   2 +
+ firmware/main/CMakeLists.txt                 |   1 +
+ firmware/main/idf_component.yml              |   8 +
+ firmware/main/main.cpp                       | 122 ++++-
+ firmware/main/render_task.cpp                |  96 ++++
+ firmware/main/render_task.h                  |  42 ++
+ patches/phase-F0-scaffold.patch              | 513 +++++++++++++++++++
+ render_pacing.cpp                            |  35 ++
+ render_pacing.h                              |  65 +++
+ scripts/fix_makefile_tabs.py                 |  38 ++
+ test_render_pacing.cpp                       | 148 ++++++
+ 15 files changed, 1207 insertions(+), 44 deletions(-)
+ create mode 100644 dmx_sink.h
+ create mode 100644 firmware/main/idf_component.yml
+ create mode 100644 firmware/main/render_task.cpp
+ create mode 100644 firmware/main/render_task.h
+ create mode 100644 patches/phase-F0-scaffold.patch
+ create mode 100644 render_pacing.cpp
+ create mode 100644 render_pacing.h
+ create mode 100644 scripts/fix_makefile_tabs.py
+ create mode 100644 test_render_pacing.cpp
+
+diff --git a/Makefile b/Makefile
+index 3bb7400..3d84585 100644
+--- a/Makefile
++++ b/Makefile
+@@ -44,6 +44,11 @@ PROVISION_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp
+ PROVISION_OBJECTS = $(PROVISION_SOURCES:.cpp=.o)
+ PROVISION_TARGET  = test_provision
+ 
++# --- test_render_pacing: firmware render-loop pacing math (host-tested) ---
++PACING_SOURCES = render_pacing.cpp test_render_pacing.cpp
++PACING_OBJECTS = $(PACING_SOURCES:.cpp=.o)
++PACING_TARGET  = test_render_pacing
++
+ $(AIM_TARGET): $(AIM_OBJECTS)
+ 	$(CXX) $(CXXFLAGS) $(AIM_OBJECTS) -o $(AIM_TARGET) -lm
+ 
+@@ -65,12 +70,15 @@ $(PIXEL_MATRIX_TARGET): $(PIXEL_MATRIX_OBJECTS)
+ $(PROVISION_TARGET): $(PROVISION_OBJECTS)
+ 	$(CXX) $(CXXFLAGS) $(PROVISION_OBJECTS) -o $(PROVISION_TARGET) -lm
+ 
++$(PACING_TARGET): $(PACING_OBJECTS)
++	$(CXX) $(CXXFLAGS) $(PACING_OBJECTS) -o $(PACING_TARGET) -lm
++
+ # Compile object files
+ %.o: %.cpp
+ 	$(CXX) $(CXXFLAGS) -c $< -o $@
+ 
+ # Run tests
+-test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET)
++test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET) $(PACING_TARGET)
+ 	./$(AIM_TARGET)
+ 	./$(FP_TARGET)
+ 	./$(SHOW_TARGET)
+@@ -78,12 +86,13 @@ test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL
+ 	./$(SHOW_CONTROL_TARGET)
+ 	./$(PIXEL_MATRIX_TARGET)
+ 	./$(PROVISION_TARGET)
++	./$(PACING_TARGET)
+ 
+ # Clean build artifacts
+ clean:
+ 	rm -f $(AIM_OBJECTS) $(AIM_TARGET) $(FP_OBJECTS) $(FP_TARGET) $(SHOW_OBJECTS) $(SHOW_TARGET) \
+-	      $(EFFECTS_OBJECTS) $(EFFECTS_TARGET) $(SHOW_CONTROL_OBJECTS) $(SHOW_CONTROL_TARGET) \
+-	      $(PIXEL_MATRIX_OBJECTS) $(PIXEL_MATRIX_TARGET) $(PROVISION_OBJECTS) $(PROVISION_TARGET)
++              $(EFFECTS_OBJECTS) $(EFFECTS_TARGET) $(SHOW_CONTROL_OBJECTS) $(SHOW_CONTROL_TARGET) \
++              $(PIXEL_MATRIX_OBJECTS) $(PIXEL_MATRIX_TARGET) $(PROVISION_OBJECTS) $(PROVISION_TARGET)
+ 
+ # Rebuild
+ rebuild: clean test
+diff --git a/README_FIRMWARE.md b/README_FIRMWARE.md
+index c32351f..46b630d 100644
+--- a/README_FIRMWARE.md
++++ b/README_FIRMWARE.md
+@@ -60,3 +60,46 @@ If you see that, the toolchain, PSRAM, partition table and `-fno-exceptions
+ -fno-rtti` C++ flags are all good, and every later phase has a foundation.
+ 
+ ---
++
++### Phase F1 — DMX output path  (GLM)  — highest-value bring-up
++
++Fill `dmx_sink.cpp` against `esp_dmx` (UART + RS485 DE GPIO via RTS pin);
++implement `send()` to write a 512-byte universe and transmit. Build the
++**render task**: a FreeRTOS task pinned to core 1, running at ~44 Hz, calling
++`show.renderFrame(t)` with a real monotonic clock (`esp_timer_get_time`),
++flushing universe 0 to the DMX sink. Patch one fixture and run a hardcoded
++`DimmerEffect` at 50%.
++
++**Extracted testable:** the render-loop timing (tick->seconds, frame pacing,
++drift correction) lives in `render_pacing.{h,cpp}` as a pure function
++`glow::paceNextFrame()`, covered by `test_render_pacing.cpp` under `make test`.
++The device render task is now a thin shell around it — it just reads
++`esp_timer_get_time()`, calls `paceNextFrame()`, calls `show.renderFrame()`,
++and `vTaskDelay()`s the returned sleep. The drift rule: a frame that overruns
++does NOT try to catch up; it rebases the next deadline off `now` so a single
++slow frame cannot cascade into a burst of zero-sleep frames.
++
++Files added/changed:
++- `render_pacing.h` / `render_pacing.cpp` — host-tested pacing math
++- `test_render_pacing.cpp` — 9 tests (steady state, drift, u64 wrap, zero period)
++- `dmx_sink.h` / `dmx_sink.cpp` — filled: `begin()` installs the driver, `send()`
++  writes slot 0 (start code 0x00) + the universe, pads to 512, `dmx_send()` +
++  `dmx_wait_send()`.
++- `firmware/main/render_task.{h,cpp}` — FreeRTOS task pinned to core 1, uses
++  `glow::paceNextFrame`, logs per-5s frame/behind stats.
++- `firmware/main/main.cpp` — F1: hardcoded 1-channel dimmer fixture on u0/base0,
++  50% `DimmerEffect`, render task at 44 Hz.
++- `firmware/main/idf_component.yml` — depends on `espressif/esp_dmx`.
++- `Makefile` — `test_render_pacing` target wired into `make test`.
++
++**You observe:**
++- A real fixture patched at base 0 holds at ~50% intensity (slot 1 == 128).
++- Or a DMX tester / logic analyzer shows slot 1 == 128 at ~44 Hz with correct
++  break/MAB timing on the DMX line.
++- Serial: `render loop started on core 1` and per-5s `stats: N frames, M behind`.
++- Status LED: fast blink (render loop running).
++
++This proves the entire engine -> DMX chain on hardware. Do this before any
++networked phase so DMX timing bugs are not hidden by WiFi work.
++
++---
+diff --git a/dmx_sink.cpp b/dmx_sink.cpp
+index 26133a4..e5b3bfb 100644
+--- a/dmx_sink.cpp
++++ b/dmx_sink.cpp
+@@ -1,22 +1,85 @@
+-// Device-only. Excluded from the host test build (see Makefile).
+-// Requires the esp_dmx driver; not buildable/testable on host.
++// dmx_sink.cpp — device-only DMX output via the esp_dmx driver.
++//
++// F1 fills the former TODO scaffold: install the driver once, and on send()
++// write a full 512-byte universe and transmit. DmxSink is a concrete
++// IUniverseSink that Show::configureUniverse references by pointer (Show does
++// not take ownership).
++//
++// Hardware: the RS485 transceiver's DE (driver-enable) and /RE (receiver
++// enable) lines are wired together and driven by the UART's RTS pin, which
++// esp_dmx toggles automatically for the break/MAB + slot transmission. You
++// only need to tell dmx_set_pin() which GPIO is RTS.
++//
++// Driver: the `espressif/esp_dmx` managed component (see
++// firmware/main/idf_component.yml). API used:
++//   dmx_driver_install(dmx_num, &config, intr_flags)
++//   dmx_set_pin(dmx_num, tx, rx, rts)
++//   dmx_write(dmx_num, start, data, size)
++//   dmx_send(dmx_num)
++//   dmx_wait_send(dmx_num, timeout)
++//
++// If your esp_dmx version's API differs slightly, adjust the calls in send()
++// and begin() — they are the only driver touchpoints.
+ #ifdef ESP_PLATFORM
+ 
+-#include "show.h"
++#include "dmx_sink.h"
++#include "esp_log.h"
+ 
+-class DmxSink : public IUniverseSink {
+-public:
+-  explicit DmxSink(int dmxPort) : port_(dmxPort) {}
++#include <cstring>
+ 
+-  void send(uint8_t /*universeIndex*/, const uint8_t* data, uint16_t len) override {
+-    // TODO: dmx_write(port_, data, len);
+-    // TODO: dmx_send(port_);
+-    (void)data;
+-    (void)len;
++static const char* TAG = "dmx_sink";
++
++DmxSink::DmxSink(dmx_port_t dmxPort, int tx, int rx, int rts)
++    : port_(dmxPort), tx_(tx), rx_(rx), rts_(rts) {}
++
++bool DmxSink::begin() {
++  dmx_config_t cfg = {};
++  cfg.baud_rate = DMX_BAUD_RATE;     // 250000
++  cfg.break_num = DMX_BREAK_NUM;     // driver default (~176 us break)
++  cfg.idle_num  = DMX_IDLE_NUM;      // driver default (~12 us MAB)
++  cfg.source_clk = DMX_SCLK_CLK_SEL; // default source clock
++  esp_err_t e = dmx_driver_install(port_, &cfg, 0);
++  if (e != ESP_OK) {
++    ESP_LOGE(TAG, "dmx_driver_install(port=%d): %s", port_, esp_err_to_name(e));
++    return false;
++  }
++  e = dmx_set_pin(port_, tx_, rx_, rts_);
++  if (e != ESP_OK) {
++    ESP_LOGE(TAG, "dmx_set_pin(port=%d, tx=%d, rx=%d, rts=%d): %s",
++             port_, tx_, rx_, rts_, esp_err_to_name(e));
++    return false;
++  }
++  ESP_LOGI(TAG, "DMX port %d ready (tx=%d rx=%d rts=%d)", port_, tx_, rx_, rts_);
++  ready_ = true;
++  return true;
++}
++
++void DmxSink::send(uint8_t universeIndex, const uint8_t* data, uint16_t len) {
++  if (!ready_) return;
++  if (len > DMX_UNIVERSE_SIZE) len = DMX_UNIVERSE_SIZE;
++
++  // DMX start code (slot 0) is 0x00 for DMX data. esp_dmx writes slot 0 from
++  // the buffer; we force it to 0x00 so a stale byte never leaks onto the wire.
++  uint8_t startCode = 0x00;
++  dmx_write(port_, 0, &startCode, 1);
++  if (len > 0) {
++    dmx_write(port_, 1, data, len);
++  }
++  // Pad the remainder of the 512 slots to 0 if the caller sent fewer bytes.
++  // (Show always sends DMX_UNIVERSE_SIZE, so this is a safety net.)
++  if (len < DMX_UNIVERSE_SIZE) {
++    static uint8_t zeros[DMX_UNIVERSE_SIZE] = {0};
++    dmx_write(port_, 1 + len, zeros, DMX_UNIVERSE_SIZE - len);
+   }
+ 
+-private:
+-  int port_;
+-};
++  esp_err_t e = dmx_send(port_, 0);
++  if (e != ESP_OK) {
++    ESP_LOGW(TAG, "dmx_send(port=%d, u=%u): %s", port_, universeIndex, esp_err_to_name(e));
++    return;
++  }
++  // Block until the frame is on the wire so the next call doesn't queue.
++  // DMX at 250 kbaud takes ~23 ms for 512 slots; allow 30 ms.
++  dmx_wait_send(port_, pdMS_TO_TICKS(30));
++}
+ 
+ #endif  // ESP_PLATFORM
+diff --git a/dmx_sink.h b/dmx_sink.h
+new file mode 100644
+index 0000000..b952012
+--- /dev/null
++++ b/dmx_sink.h
+@@ -0,0 +1,32 @@
++// dmx_sink.h — device-only DMX output sink.
++//
++// Declares DmxSink, a concrete IUniverseSink that wraps the esp_dmx driver.
++// The implementation is in dmx_sink.cpp and is `#ifdef ESP_PLATFORM`-guarded;
++// on a host build this header still parses (the class body is hidden) so
++// device-facing main.cpp can be written against a stable interface.
++#pragma once
++
++#include "show.h"
++
++#ifdef ESP_PLATFORM
++#include "esp_dmx.h"
++#include <cstdint>
++
++class DmxSink : public IUniverseSink {
++public:
++  // dmxPort: DMX_NUM_1 / DMX_NUM_2.
++  // tx/rx/rts: GPIO numbers. rts drives the RS485 DE+RE pair (tied together).
++  DmxSink(dmx_port_t dmxPort, int tx, int rx, int rts);
++
++  // Install the driver. Call exactly once. Returns false on failure.
++  bool begin();
++
++  void send(uint8_t universeIndex, const uint8_t* data, uint16_t len) override;
++
++private:
++  dmx_port_t port_;
++  int tx_, rx_, rts_;
++  bool ready_ = false;
++};
++
++#endif  // ESP_PLATFORM
+diff --git a/firmware/components/glow_core/CMakeLists.txt b/firmware/components/glow_core/CMakeLists.txt
+index 33948e4..d6c5566 100644
+--- a/firmware/components/glow_core/CMakeLists.txt
++++ b/firmware/components/glow_core/CMakeLists.txt
+@@ -39,6 +39,8 @@ idf_component_register(
+         ${GLOW_ROOT}/pixel_patterns.cpp
+         # bundle loader
+         ${GLOW_ROOT}/show_bundle.cpp
++        # F1: host-tested render-pacing math
++        ${GLOW_ROOT}/render_pacing.cpp
+         # device-only DMX sink (#ifdef ESP_PLATFORM guarded; filled in F1)
+         ${GLOW_ROOT}/dmx_sink.cpp
+         # device-only Art-Net sink (#ifdef ESP_PLATFORM guarded; filled in F2)
+diff --git a/firmware/main/CMakeLists.txt b/firmware/main/CMakeLists.txt
+index dd2de1e..0919a66 100644
+--- a/firmware/main/CMakeLists.txt
++++ b/firmware/main/CMakeLists.txt
+@@ -12,6 +12,7 @@ idf_component_register(
+     SRCS
+         main.cpp
+         led_status.cpp
++        render_task.cpp
+     INCLUDE_DIRS
+         "."
+ )
+diff --git a/firmware/main/idf_component.yml b/firmware/main/idf_component.yml
+new file mode 100644
+index 0000000..6064ea0
+--- /dev/null
++++ b/firmware/main/idf_component.yml
+@@ -0,0 +1,8 @@
++# Managed-component dependencies for firmware/main.
++# Resolved by `idf.py` via the ESP Component Manager at build time.
++#
++# espressif/esp_dmx  — DMX driver used by dmx_sink.cpp (F1+).
++# joltwallet/littlefs — LittleFS port for loading the SHW1 bundle (F3+).
++dependencies:
++  espressif/esp_dmx: "^3.1.0"
++  joltwallet/littlefs: "^1.14.0"
+diff --git a/firmware/main/main.cpp b/firmware/main/main.cpp
+index 4801892..b50b5fa 100644
+--- a/firmware/main/main.cpp
++++ b/firmware/main/main.cpp
+@@ -1,16 +1,21 @@
+ // main.cpp — esp-glow firmware entry point (ESP32-S3).
+ //
+-// Phase F0: toolchain de-risk. Print a banner over serial and blink the status
+-// LED. Every later phase extends app_main() — DMX render task (F1), WiFi +
+-// Art-Net (F2), show-from-storage (F3), inputs (F4), OTA + robustness (F5).
++// Phase F1: DMX output path. Stand up a hardcoded patch (one dimmer fixture on
++// universe 0, base channel 0, 50% dimmer effect) and drive it through the
++// render task into a real DmxSink. This proves the entire engine->DMX chain
++// on hardware — the biggest single milestone.
+ //
+-// The host-tested core (Show, effects, geometry) lives in the `glow_core`
+-// component; this file is the only place that touches ESP-IDF drivers.
++// What to observe (F1):
++//   - A real fixture patched at base 0 dims to ~50%.
++//   - Or: a DMX tester / logic analyzer on the DMX line shows slot 1 == 128
++//     (round(0.5*255)) at ~44 Hz, with correct break/MAB timing.
++//   - Serial: "render loop started on core 1" + per-5s frame stats.
++//   - Status LED: fast blink (render loop running).
+ //
+-// What to observe (F0):
+-//   idf.py flash monitor  ->  the banner prints, the LED blinks slowly.
+-//   If you see that, the toolchain, PSRAM, partition table and C++ flags are
+-//   all good, and every later phase has a foundation to build on.
++// DMX pin defaults (override in menuconfig):
++//   TX  = GPIO 17   (RS485 transceiver DI)
++//   RX  = GPIO 18   (RS485 transceiver RO; unused for TX-only but required)
++//   RTS = GPIO 8    (RS485 DE/RE — driver-enable + receiver-enable tied)
+ 
+ #include <cstdio>
+ #include "esp_log.h"
+@@ -19,47 +24,110 @@
+ #include "sdkconfig.h"
+ 
+ #include "led_status.h"
++#include "render_task.h"
++
++#include "show.h"
++#include "effects.h"
++#include "fixture_profile.h"
++#include "dmx_sink.h"   // device-side: pulls in the DmxSink class
++
++#ifdef ESP_PLATFORM
++#include "esp_dmx.h"
++#include "driver/gpio.h"
++#endif
+ 
+ static const char* TAG = "esp-glow";
+ 
+-// Board pin for the status LED. Override via sdkconfig if your board differs.
+ #ifndef CONFIG_GLOW_STATUS_LED_GPIO
+ #define GLOW_STATUS_LED_GPIO 2
+-#else
+-#define GLOW_STATUS_LED_GPIO CONFIG_GLOW_STATUS_LED_GPIO
+ #endif
++#ifndef CONFIG_GLOW_DMX_TX_GPIO
++#define GLOW_DMX_TX_GPIO 17
++#endif
++#ifndef CONFIG_GLOW_DMX_RX_GPIO
++#define GLOW_DMX_RX_GPIO 18
++#endif
++#ifndef CONFIG_GLOW_DMX_RTS_GPIO
++#define GLOW_DMX_RTS_GPIO 8
++#endif
++
++// A minimal 1-channel dimmer profile, constructed by hand so we do not depend
++// on profile_encoder.cpp (which is host-only per the plan). This is exactly
++// the layout a PFX1 blob for "Dimmer at channel 0, 8-bit, default 0" would
++// decode to.
++static FixtureProfile makeDimmerProfile() {
++  FixtureProfile p{};
++  p.footprint = 1;
++  p.channelCount = 1;
++  p.channels[0] = { Capability::Dimmer, /*coarse*/ 0, /*fine*/ 0xFF,
++                    /*default*/ 0, /*flags*/ 0 };
++  return p;
++}
++
++// Globals: the Show, the DMX sink, and the effect. These must outlive the
++// render task, so they live at static scope.
++static Show         g_show;
++static DmxSink*      g_dmx = nullptr;
++static DimmerEffect* g_fx  = nullptr;
+ 
+ extern "C" void app_main(void) {
+-  // --- Banner: proves serial + chip introspection are alive. ---
++  // --- Banner (F0) ---
+   esp_chip_info_t chip;
+   esp_chip_info(&chip);
+   uint32_t flash_size = 0;
+   esp_flash_get_size(nullptr, &flash_size);
+-
+   ESP_LOGI(TAG, "");
+   ESP_LOGI(TAG, "========================================");
+-  ESP_LOGI(TAG, "  esp-glow firmware  (ESP32-S3)");
++  ESP_LOGI(TAG, "  esp-glow firmware  (ESP32-S3)  F1");
+   ESP_LOGI(TAG, "  %s %s", __DATE__, __TIME__);
+   ESP_LOGI(TAG, "========================================");
+-  ESP_LOGI(TAG, "chip: rev %d, cores %d, %s%s",
+-           chip.revision, chip.cores,
+-           (chip.features & CHIP_FEATURE_WIFI_BGN) ? "WiFi " : "",
+-           (chip.features & CHIP_FEATURE_BLE) ? "BLE " : "");
++  ESP_LOGI(TAG, "chip: rev %d, cores %d", chip.revision, chip.cores);
+   ESP_LOGI(TAG, "flash: %lu KB", (unsigned long)(flash_size / 1024));
+ #ifdef CONFIG_SPIRAM
+   ESP_LOGI(TAG, "psram:  enabled (octal=%d)", CONFIG_SPIRAM_MODE_OCT ? 1 : 0);
+-#else
+-  ESP_LOGI(TAG, "psram:  disabled");
+ #endif
+-  ESP_LOGI(TAG, "status LED on GPIO %d", GLOW_STATUS_LED_GPIO);
+-  ESP_LOGI(TAG, "");
++  ESP_LOGI(TAG, "DMX:   tx=%d rx=%d rts=%d  (DMX_NUM_1)",
++           GLOW_DMX_TX_GPIO, GLOW_DMX_RX_GPIO, GLOW_DMX_RTS_GPIO);
+ 
+-  // --- LED blinker: the one piece of feedback that needs no peripherals. ---
+   led_status_init(GLOW_STATUS_LED_GPIO);
+   led_status_set(LED_BLINK_SLOW);
+ 
+-  ESP_LOGI(TAG, "F0 bring-up complete. Waiting (later phases add DMX/WiFi/show).");
++  // --- F1: DMX sink ---
++  g_dmx = new DmxSink(DMX_NUM_1, GLOW_DMX_TX_GPIO, GLOW_DMX_RX_GPIO, GLOW_DMX_RTS_GPIO);
++  if (!g_dmx->begin()) {
++    ESP_LOGE(TAG, "DMX bring-up failed; halting.");
++    led_status_set(LED_ERROR);
++    return;  // app_main returns; idle tasks run
++  }
++
++  // --- F1: hardcoded patch (universe 0, one dimmer fixture at base 0) ---
++  g_show.setUniverseCount(1);
++  g_show.configureUniverse(0, UniverseMode::Fixture, g_dmx);
++
++  FixtureProfile dimmer = makeDimmerProfile();
++  uint16_t fixtureId = g_show.patch(dimmer, /*universe*/ 0, /*base*/ 0);
++  ESP_LOGI(TAG, "patched fixture id=%u on u0 base0 (1ch dimmer)", fixtureId);
++
++  // 50% dimmer — a real fixture patched at base 0 will hold at ~half intensity.
++  // (DimmerEffect holds ids by value; the vector is moved in.)
++  static uint16_t ids[] = { 0 };  // fixtureId 0 (we patched first)
++  g_fx = new DimmerEffect({ids, 1}, 0.5f);
++  g_show.addEffect(g_fx);
++
++  // --- F1: render task (pinned to core 1, ~44 Hz) ---
++  RenderTaskConfig rcfg = {};
++  rcfg.show       = &g_show;
++  rcfg.targetHz   = 44;
++  rcfg.core       = 1;
++  rcfg.stackBytes = 4096;
++  rcfg.priority   = 20;
++  if (!render_task_start(&rcfg)) {
++    ESP_LOGE(TAG, "render task start failed; halting.");
++    led_status_set(LED_ERROR);
++    return;
++  }
++  led_status_set(LED_BLINK_FAST);  // render loop alive
+ 
+-  // app_main returns; FreeRTOS idle tasks take over. Later phases spawn their
+-  // own tasks here before returning.
++  ESP_LOGI(TAG, "F1 complete: render loop driving universe 0 to DMX at 44 Hz.");
++  ESP_LOGI(TAG, "Patch a fixture at base 0; it should hold ~50%% dimmer.");
+ }
+diff --git a/firmware/main/render_task.cpp b/firmware/main/render_task.cpp
+new file mode 100644
+index 0000000..9b65dae
+--- /dev/null
++++ b/firmware/main/render_task.cpp
+@@ -0,0 +1,96 @@
++// render_task.cpp — the render loop.
++//
++// Each iteration:
++//   1. read esp_timer_get_time() (monotonic us)
++//   2. glow::paceNextFrame() -> (nowSec, sleepUs, nextDeadline)  [host-tested]
++//   3. show->renderFrame(nowSec)
++//   4. vTaskDelay(sleepUs) — 0 if behind, so we immediately re-loop
++//
++// Pinned to core 1; WiFi/lwIP live on core 0 (sdkconfig) so DMX timing on
++// core 1 is never preempted by network work.
++#include "render_task.h"
++#include "render_pacing.h"
++
++#include "esp_timer.h"
++#include "esp_log.h"
++
++static const char* TAG = "render_task";
++
++static TaskHandle_t s_task = nullptr;
++static Show*        s_show = nullptr;
++static uint32_t     s_periodUs = 0;
++static volatile bool s_behind = false;
++
++static void render_loop(void*) {
++  ESP_LOGI(TAG, "render loop started on core %d (period=%lu us)",
++           xPortGetCoreID(), (unsigned long)s_periodUs);
++
++  uint64_t prevDeadline = 0;  // 0 => paceNextFrame seeds from nowUs
++  uint32_t frames = 0;
++  uint32_t behindCount = 0;
++  uint64_t lastReport = esp_timer_get_time();
++
++  while (true) {
++    uint64_t now = esp_timer_get_time();
++    glow::PaceResult r = glow::paceNextFrame(s_periodUs, now, prevDeadline);
++    s_behind = r.behind;
++    prevDeadline = r.nextDeadlineUs;
++
++    if (s_show) {
++      s_show->renderFrame(r.nowSec);
++    }
++
++    if (r.behind) {
++      behindCount++;
++      // No sleep: go again immediately. paceNextFrame already rebased the
++      // deadline so we won't cascade.
++      taskYIELD();
++    } else if (r.sleepUs > 0) {
++      // vTaskDelay expects ticks; use pdMS_TO_TICKS but round up to >=1 tick.
++      uint32_t ms = (r.sleepUs + 999) / 1000;
++      if (ms == 0) ms = 1;
++      vTaskDelay(pdMS_TO_TICKS(ms));
++    }
++
++    frames++;
++    if (now - lastReport >= 5'000'000u) {
++      ESP_LOGI(TAG, "stats: %u frames, %u behind in last 5s", frames, behindCount);
++      frames = 0;
++      behindCount = 0;
++      lastReport = now;
++    }
++  }
++}
++
++bool render_task_start(const RenderTaskConfig* cfg) {
++  if (!cfg || !cfg->show) return false;
++  if (s_task) return true;  // already running
++
++  s_show = cfg->show;
++  uint32_t hz = cfg->targetHz ? cfg->targetHz : glow::DEFAULT_RENDER_HZ;
++  s_periodUs = (hz == 0) ? glow::DEFAULT_RENDER_PERIOD_US : (1'000'000u / hz);
++
++  uint8_t core = cfg->core ? cfg->core : glow::RENDER_CORE;
++  uint32_t stack = cfg->stackBytes ? cfg->stackBytes : glow::RENDER_TASK_STACK;
++  UBaseType_t prio = cfg->priority ? cfg->priority : glow::RENDER_TASK_PRIORITY;
++
++  BaseType_t ok = xTaskCreatePinnedToCore(render_loop, "render", stack / sizeof(StackType_t),
++                                          nullptr, prio, &s_task, core);
++  if (ok != pdPASS) {
++    ESP_LOGE(TAG, "xTaskCreatePinnedToCore failed");
++    s_task = nullptr;
++    return false;
++  }
++  return true;
++}
++
++void render_task_stop(void) {
++  if (s_task) {
++    vTaskDelete(s_task);
++    s_task = nullptr;
++  }
++}
++
++bool render_task_running(void) { return s_task != nullptr; }
++
++bool render_task_last_frame_behind(void) { return s_behind; }
+diff --git a/firmware/main/render_task.h b/firmware/main/render_task.h
+new file mode 100644
+index 0000000..26929c7
+--- /dev/null
++++ b/firmware/main/render_task.h
+@@ -0,0 +1,42 @@
++// render_task.h — the FreeRTOS task that drives Show::renderFrame at ~44 Hz.
++//
++// Pinned to core 1 by default so DMX timing is never starved by WiFi/lwIP
++// (which lives on core 0 via sdkconfig). The only real logic — tick->seconds
++// and frame pacing — is delegated to render_pacing.h (host-tested).
++#pragma once
++
++#include "show.h"
++#include <stdint.h>
++#include <stdbool.h>
++#include "freertos/FreeRTOS.h"
++#include "freertos/task.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++struct RenderTaskConfig {
++  Show*    show;            // borrowed, must outlive the task
++  uint32_t targetHz;        // 0 => use glow::DEFAULT_RENDER_HZ (44)
++  uint8_t  core;            // pin to this core (default 1)
++  uint32_t stackBytes;      // default 4096
++  UBaseType_t priority;     // default 20 (above WiFi, below ISR)
++};
++
++// Start the render task. Returns true on success. The task runs until
++// render_task_stop() is called or the Show pointer is invalidated by the
++// caller (don't do that while the task is running).
++bool render_task_start(const RenderTaskConfig* cfg);
++
++// Stop and delete the render task. Safe to call from any task.
++void render_task_stop(void);
++
++// True if the render task is currently running.
++bool render_task_running(void);
++
++// Expose the last frame's "behind" flag for diagnostics (e.g. LED pattern).
++bool render_task_last_frame_behind(void);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/patches/phase-F0-scaffold.patch b/patches/phase-F0-scaffold.patch
+new file mode 100644
+index 0000000..d887602
+--- /dev/null
++++ b/patches/phase-F0-scaffold.patch
+@@ -0,0 +1,513 @@
++From 5f1dd5b3397047b499ca7216368efdcbdf0ae0f2 Mon Sep 17 00:00:00 2001
++From: esp-glow firmware <firmware@esp-glow.local>
++Date: Sat, 11 Jul 2026 13:35:24 +0000
++Subject: [PATCH] F0: ESP-IDF project scaffold + LED blink bring-up
++
++- firmware/ ESP-IDF project: CMakeLists, partitions.csv (nvs/ota_0/ota_1/littlefs/coredump), sdkconfig.defaults (octal PSRAM, -fno-exceptions/-fno-rtti enforced in glow_core, WiFi/lwIP/WS, OTA rollback, watchdog, core affinity)
++- glow_core component wraps existing host-tested runtime modules for device build
++- led_status reusable blinker task
++- main.cpp app_main prints banner (chip/flash/PSRAM) and blinks LED slowly
++- README_FIRMWARE.md with F0 observe-guide
++
++Host make test unchanged (green).
++---
++ README_FIRMWARE.md                           | 62 +++++++++++++++++
++ firmware/CMakeLists.txt                      | 20 ++++++
++ firmware/components/glow_core/CMakeLists.txt | 58 ++++++++++++++++
++ firmware/main/CMakeLists.txt                 | 20 ++++++
++ firmware/main/led_status.cpp                 | 71 ++++++++++++++++++++
++ firmware/main/led_status.h                   | 34 ++++++++++
++ firmware/main/main.cpp                       | 65 ++++++++++++++++++
++ firmware/partitions.csv                      | 23 +++++++
++ firmware/sdkconfig.defaults                  | 70 +++++++++++++++++++
++ 9 files changed, 423 insertions(+)
++ create mode 100644 README_FIRMWARE.md
++ create mode 100644 firmware/CMakeLists.txt
++ create mode 100644 firmware/components/glow_core/CMakeLists.txt
++ create mode 100644 firmware/main/CMakeLists.txt
++ create mode 100644 firmware/main/led_status.cpp
++ create mode 100644 firmware/main/led_status.h
++ create mode 100644 firmware/main/main.cpp
++ create mode 100644 firmware/partitions.csv
++ create mode 100644 firmware/sdkconfig.defaults
++
++diff --git a/README_FIRMWARE.md b/README_FIRMWARE.md
++new file mode 100644
++index 0000000..c32351f
++--- /dev/null
+++++ b/README_FIRMWARE.md
++@@ -0,0 +1,62 @@
+++# esp-glow Firmware (ESP32-S3)
+++
+++This is the ESP-IDF application that runs the host-tested `esp-glow` core on an
+++ESP32-S3 board and drives real DMX / Art-Net fixtures, pixel matrices, and
+++web/MIDI/OSC inputs.
+++
+++The host-tested core (`make test` at the repo root) is unchanged: every pure
+++piece of firmware logic is extracted into a host-tested helper so the green
+++`make test` gate keeps meaning something even after the firmware exists.
+++
+++> **Validation is on hardware.** No agent can close the hardware loop for you.
+++> Each phase below states what you should observe on the board to call it done.
+++
+++## Project layout
+++
+++```
+++firmware/
+++  CMakeLists.txt                 top-level ESP-IDF project
+++  partitions.csv                 nvs / ota_0 / ota_1 / littlefs / coredump
+++  sdkconfig.defaults             octal PSRAM, -fno-exceptions/-fno-rtti, WiFi, lwIP
+++  main/
+++    CMakeLists.txt               app_main + per-phase modules
+++    main.cpp                     app_main() — grown phase by phase
+++    led_status.{h,cpp}           status LED blinker (the one feedback pre-serial)
+++    console/                     Preact web console (F4), served from LittleFS
+++  components/
+++    glow_core/CMakeLists.txt     wraps the repo-root runtime modules as a component
+++```
+++
+++## Build & flash (after every phase)
+++
+++```bash
+++cd firmware
+++idf.py set-target esp32s3      # first time only
+++idf.py build
+++idf.py flash monitor
+++```
+++
+++`idf.py menuconfig` lets you override the status LED GPIO and board-specific
+++options. The defaults target an ESP32-S3 with 8 MB flash + octal PSRAM; for
+++16 MB boards, enlarge `ota_0`/`ota_1`/`littlefs` in `partitions.csv`.
+++
+++## Phases
+++
+++### Phase F0 — Project scaffold + bring-up  (GLM)
+++
+++Stand up the ESP-IDF project: `CMakeLists.txt`, partition table, `sdkconfig`
+++defaults (PSRAM, C++ flags, WebSocket support), the runtime modules as a
+++component. Get it building, flashing, and printing over serial. Blink an LED.
+++
+++Files added:
+++- `firmware/CMakeLists.txt`, `firmware/partitions.csv`, `firmware/sdkconfig.defaults`
+++- `firmware/main/{CMakeLists.txt,main.cpp,led_status.h,led_status.cpp}`
+++- `firmware/components/glow_core/CMakeLists.txt` (existing runtime modules only)
+++
+++**You observe:** `idf.py flash monitor` prints the esp-glow banner (chip rev,
+++flash size, PSRAM enabled, GPIO); the status LED blinks slowly at ~1 Hz.
+++
+++If you see that, the toolchain, PSRAM, partition table and `-fno-exceptions
+++-fno-rtti` C++ flags are all good, and every later phase has a foundation.
+++
+++---
++diff --git a/firmware/CMakeLists.txt b/firmware/CMakeLists.txt
++new file mode 100644
++index 0000000..4a3fa66
++--- /dev/null
+++++ b/firmware/CMakeLists.txt
++@@ -0,0 +1,20 @@
+++# ESP-IDF project for esp-glow on ESP32-S3.
+++#
+++# Build:   idf.py build
+++# Flash:   idf.py flash monitor
+++#
+++# The runtime lighting modules live at the repo root and are built as the
+++# `glow_core` component (see components/glow_core/CMakeLists.txt). Device-only
+++# transports (dmx_sink / artnet_sink / midi_input / osc_input / web_input) are
+++# guarded by `#ifdef ESP_PLATFORM` so the same sources compile clean on host
+++# (`make test`) and on the device.
+++#
+++# Target: ESP32-S3 with octal PSRAM. See sdkconfig.defaults for the pin/PSRAM
+++# assumptions; adjust sdkconfig for your specific board.
+++
+++# Minimum ESP-IDF that supports the component manager + octal PSRAM.
+++cmake_minimum_required(VERSION 3.16)
+++
+++include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+++
+++project(esp-glow)
++diff --git a/firmware/components/glow_core/CMakeLists.txt b/firmware/components/glow_core/CMakeLists.txt
++new file mode 100644
++index 0000000..33948e4
++--- /dev/null
+++++ b/firmware/components/glow_core/CMakeLists.txt
++@@ -0,0 +1,58 @@
+++# `glow_core` ESP-IDF component.
+++#
+++# Wraps the host-tested runtime modules (living at the repo root) so they build
+++# inside the ESP-IDF firmware project. The same .cpp files also build under
+++# `make test` on the host; device-only transports are guarded by
+++# `#ifdef ESP_PLATFORM` and compile to nothing on host.
+++#
+++# Modules NOT included here (host-only):
+++#   provision.cpp / profile_encoder.cpp (PC compiler toolchain, provision_main)
+++#   test_*.cpp                      (host test harness)
+++#
+++# -fno-exceptions -fno-rtti are enforced here to match the host build.
+++#
+++# F0 scope: register the EXISTING runtime modules only, so the toolchain
+++# (C++ flags, PSRAM, component wrapping) is de-risked before any device driver
+++# is written. Later phases append new sources to this list:
+++#   F1: render_pacing.cpp, dmx_sink.cpp (already listed? no — added in F1)
+++#   F3: apply_loaded_show.cpp
+++#   F4: midi_parser.cpp, osc_parser.cpp, web_protocol.cpp, web_input_handler.cpp,
+++#       live_control.cpp, midi_input.cpp, osc_input.cpp, web_input.cpp
+++
+++set(GLOW_ROOT ${CMAKE_CURRENT_LIST_DIR}/../../..)
+++
+++idf_component_register(
+++    SRCS
+++        # geometry / math
+++        ${GLOW_ROOT}/vec_math.cpp
+++        ${GLOW_ROOT}/aim.cpp
+++        # fixture profiles
+++        ${GLOW_ROOT}/fixture_profile.cpp
+++        # show engine + effects
+++        ${GLOW_ROOT}/show.cpp
+++        ${GLOW_ROOT}/oscillator.cpp
+++        ${GLOW_ROOT}/color.cpp
+++        ${GLOW_ROOT}/effects.cpp
+++        ${GLOW_ROOT}/show_control.cpp
+++        # pixel matrices
+++        ${GLOW_ROOT}/pixel_matrix.cpp
+++        ${GLOW_ROOT}/pixel_patterns.cpp
+++        # bundle loader
+++        ${GLOW_ROOT}/show_bundle.cpp
+++        # device-only DMX sink (#ifdef ESP_PLATFORM guarded; filled in F1)
+++        ${GLOW_ROOT}/dmx_sink.cpp
+++        # device-only Art-Net sink (#ifdef ESP_PLATFORM guarded; filled in F2)
+++        ${GLOW_ROOT}/artnet_sink.cpp
+++    INCLUDE_DIRS
+++        ${GLOW_ROOT}
+++)
+++
+++# Match the host build flags: no exceptions, no RTTI, full warnings.
+++target_compile_options(${COMPONENT_LIB} PRIVATE
+++    -fno-exceptions
+++    -fno-rtti
+++    -Wall
+++    -Wextra
+++    -Werror
+++    -std=c++17
+++)
++diff --git a/firmware/main/CMakeLists.txt b/firmware/main/CMakeLists.txt
++new file mode 100644
++index 0000000..dd2de1e
++--- /dev/null
+++++ b/firmware/main/CMakeLists.txt
++@@ -0,0 +1,20 @@
+++# firmware/main — ESP-IDF application entry.
+++#
+++# app_main() lives in main.cpp. It is grown phase by phase (see README_FIRMWARE):
+++#   F0: banner + LED blink
+++#   F1: + DMX sink + render task (hardcoded patch)
+++#   F2: + WiFi + Art-Net sink (matrices)
+++#   F3: + LittleFS + load SHW1 bundle via applyLoadedShow
+++#   F4: + web/MIDI/OSC inputs + console serving
+++#   F5: + OTA + watchdog + safe-blackout fallback
+++
+++idf_component_register(
+++    SRCS
+++        main.cpp
+++        led_status.cpp
+++    INCLUDE_DIRS
+++        "."
+++)
+++
+++# Pull in the host-tested lighting core as a component dependency.
+++idf_component_requires(PRIVATE glow_core)
++diff --git a/firmware/main/led_status.cpp b/firmware/main/led_status.cpp
++new file mode 100644
++index 0000000..f281ed8
++--- /dev/null
+++++ b/firmware/main/led_status.cpp
++@@ -0,0 +1,71 @@
+++// led_status.cpp — status LED blinker running in its own FreeRTOS task.
+++//
+++// Kept deliberately tiny: one task, one GPIO, a small pattern table. Later
+++// phases call led_status_set() to reflect WiFi / render / OTA / error state.
+++#include "led_status.h"
+++
+++#include <stddef.h>
+++#include "freertos/FreeRTOS.h"
+++#include "freertos/task.h"
+++#include "driver/gpio.h"
+++
+++static int s_gpio = -1;
+++static led_pattern_t s_pattern = LED_OFF;
+++static TaskHandle_t s_task = nullptr;
+++
+++static void set_led(int on) {
+++  if (s_gpio < 0) return;
+++  gpio_set_level((gpio_num_t)s_gpio, on ? 1 : 0);
+++}
+++
+++static void blinker_task(void*) {
+++  // Each pattern: (on_ms, off_ms, on_ms, off_ms, cycle_ms). cycle_ms==0 means
+++  // the pair repeats.
+++  struct phase { uint16_t a, b; uint16_t cycle; };
+++  static const phase table[] = {
+++    [LED_OFF]          = {   0,   0, 0 },   // off
+++    [LED_ON]           = {1000,   0, 0 },   // solid on
+++    [LED_BLINK_SLOW]   = { 500, 500, 0 },
+++    [LED_BLINK_FAST]   = { 125, 125, 0 },
+++    [LED_BLINK_DOUBLE] = { 120, 120, 0 },   // handled specially below
+++    [LED_ERROR]        = { 100, 100, 0 },
+++  };
+++
+++  while (true) {
+++    led_pattern_t p = s_pattern;
+++    if (p == LED_OFF) { set_led(0); vTaskDelay(pdMS_TO_TICKS(200)); continue; }
+++    if (p == LED_ON)  { set_led(1); vTaskDelay(pdMS_TO_TICKS(200)); continue; }
+++
+++    if (p == LED_BLINK_DOUBLE) {
+++      set_led(1); vTaskDelay(pdMS_TO_TICKS(120));
+++      set_led(0); vTaskDelay(pdMS_TO_TICKS(120));
+++      set_led(1); vTaskDelay(pdMS_TO_TICKS(120));
+++      set_led(0); vTaskDelay(pdMS_TO_TICKS(640));
+++      continue;
+++    }
+++
+++    const phase& ph = table[p];
+++    set_led(1); vTaskDelay(pdMS_TO_TICKS(ph.a));
+++    set_led(0); vTaskDelay(pdMS_TO_TICKS(ph.b));
+++  }
+++}
+++
+++void led_status_init(int gpio) {
+++  s_gpio = gpio;
+++  gpio_config_t io = {};
+++  io.pin_bit_mask = (1ULL << gpio);
+++  io.mode = GPIO_MODE_OUTPUT;
+++  io.pull_up_en = GPIO_PULLUP_DISABLE;
+++  io.pull_down_en = GPIO_PULLDOWN_DISABLE;
+++  io.intr_type = GPIO_INTR_DISABLE;
+++  gpio_config(&io);
+++  set_led(0);
+++
+++  if (s_task == nullptr) {
+++    xTaskCreate(blinker_task, "led", 1024, nullptr, tskIDLE_PRIORITY + 1, &s_task);
+++  }
+++}
+++
+++void led_status_set(led_pattern_t p) {
+++  s_pattern = p;
+++}
++diff --git a/firmware/main/led_status.h b/firmware/main/led_status.h
++new file mode 100644
++index 0000000..399497e
++--- /dev/null
+++++ b/firmware/main/led_status.h
++@@ -0,0 +1,34 @@
+++// led_status.h — reusable status LED indicator.
+++//
+++// A single GPIO LED is the only feedback you have before the serial console
+++// comes up and before WiFi is up. Each phase of the firmware reuses this to
+++// signal its state, so the bring-up progress is visible without a logic
+++// analyzer.
+++#pragma once
+++
+++#include <stdint.h>
+++
+++#ifdef __cplusplus
+++extern "C" {
+++#endif
+++
+++// LED blink patterns. Periods are in ms; the cycle repeats.
+++typedef enum {
+++  LED_OFF = 0,
+++  LED_ON,            // solid: booted, idle
+++  LED_BLINK_SLOW,    // 1 Hz: bring-up OK, waiting for show
+++  LED_BLINK_FAST,    // 4 Hz: running the render loop
+++  LED_BLINK_DOUBLE,  // double-pulse: WiFi connected
+++  LED_ERROR,         // 5 Hz error: no bundle / corrupt / OTA fail
+++} led_pattern_t;
+++
+++// Initialise the status LED on the given GPIO. Safe to call once from app_main.
+++void led_status_init(int gpio);
+++
+++// Set the current pattern. The blinker runs in its own FreeRTOS task, so this
+++// just updates the active pattern atomically.
+++void led_status_set(led_pattern_t p);
+++
+++#ifdef __cplusplus
+++}
+++#endif
++diff --git a/firmware/main/main.cpp b/firmware/main/main.cpp
++new file mode 100644
++index 0000000..4801892
++--- /dev/null
+++++ b/firmware/main/main.cpp
++@@ -0,0 +1,65 @@
+++// main.cpp — esp-glow firmware entry point (ESP32-S3).
+++//
+++// Phase F0: toolchain de-risk. Print a banner over serial and blink the status
+++// LED. Every later phase extends app_main() — DMX render task (F1), WiFi +
+++// Art-Net (F2), show-from-storage (F3), inputs (F4), OTA + robustness (F5).
+++//
+++// The host-tested core (Show, effects, geometry) lives in the `glow_core`
+++// component; this file is the only place that touches ESP-IDF drivers.
+++//
+++// What to observe (F0):
+++//   idf.py flash monitor  ->  the banner prints, the LED blinks slowly.
+++//   If you see that, the toolchain, PSRAM, partition table and C++ flags are
+++//   all good, and every later phase has a foundation to build on.
+++
+++#include <cstdio>
+++#include "esp_log.h"
+++#include "esp_chip_info.h"
+++#include "esp_flash.h"
+++#include "sdkconfig.h"
+++
+++#include "led_status.h"
+++
+++static const char* TAG = "esp-glow";
+++
+++// Board pin for the status LED. Override via sdkconfig if your board differs.
+++#ifndef CONFIG_GLOW_STATUS_LED_GPIO
+++#define GLOW_STATUS_LED_GPIO 2
+++#else
+++#define GLOW_STATUS_LED_GPIO CONFIG_GLOW_STATUS_LED_GPIO
+++#endif
+++
+++extern "C" void app_main(void) {
+++  // --- Banner: proves serial + chip introspection are alive. ---
+++  esp_chip_info_t chip;
+++  esp_chip_info(&chip);
+++  uint32_t flash_size = 0;
+++  esp_flash_get_size(nullptr, &flash_size);
+++
+++  ESP_LOGI(TAG, "");
+++  ESP_LOGI(TAG, "========================================");
+++  ESP_LOGI(TAG, "  esp-glow firmware  (ESP32-S3)");
+++  ESP_LOGI(TAG, "  %s %s", __DATE__, __TIME__);
+++  ESP_LOGI(TAG, "========================================");
+++  ESP_LOGI(TAG, "chip: rev %d, cores %d, %s%s",
+++           chip.revision, chip.cores,
+++           (chip.features & CHIP_FEATURE_WIFI_BGN) ? "WiFi " : "",
+++           (chip.features & CHIP_FEATURE_BLE) ? "BLE " : "");
+++  ESP_LOGI(TAG, "flash: %lu KB", (unsigned long)(flash_size / 1024));
+++#ifdef CONFIG_SPIRAM
+++  ESP_LOGI(TAG, "psram:  enabled (octal=%d)", CONFIG_SPIRAM_MODE_OCT ? 1 : 0);
+++#else
+++  ESP_LOGI(TAG, "psram:  disabled");
+++#endif
+++  ESP_LOGI(TAG, "status LED on GPIO %d", GLOW_STATUS_LED_GPIO);
+++  ESP_LOGI(TAG, "");
+++
+++  // --- LED blinker: the one piece of feedback that needs no peripherals. ---
+++  led_status_init(GLOW_STATUS_LED_GPIO);
+++  led_status_set(LED_BLINK_SLOW);
+++
+++  ESP_LOGI(TAG, "F0 bring-up complete. Waiting (later phases add DMX/WiFi/show).");
+++
+++  // app_main returns; FreeRTOS idle tasks take over. Later phases spawn their
+++  // own tasks here before returning.
+++}
++diff --git a/firmware/partitions.csv b/firmware/partitions.csv
++new file mode 100644
++index 0000000..8f81486
++--- /dev/null
+++++ b/firmware/partitions.csv
++@@ -0,0 +1,23 @@
+++# ESP-IDF partition table for esp-glow (ESP32-S3, 8 MB flash assumed).
+++# Adjust sizes for your board's flash (see README_FIRMWARE.md).
+++#
+++# Layout:
+++#   nvs        24 KB   non-volatile storage (WiFi creds, config)
+++#   phy_init    4 KB   RF calibration
+++#   otadata     8 KB   OTA slot selection
+++#   ota_0      3 MB   factory application (A/B slot A)
+++#   ota_1      3 MB   OTA application (A/B slot B)
+++#   littlefs  ~1 MB   show bundle (.shw1) + Preact web console
+++#   coredump  512 KB  panic core dumps (robustness)
+++#
+++# Total: ~7.6 MB, fits in 8 MB flash. For 16 MB boards, enlarge ota_0/ota_1
+++# and/or littlefs.
+++
+++# Name,     Type, SubType,  Offset,   Size,    Flags
+++nvs,        data, nvs,      0x9000,   0x6000,
+++phy_init,   data, phy,      0xf000,   0x1000,
+++otadata,    data, ota,      0x10000,  0x2000,
+++ota_0,      app,  ota_0,    0x20000,  0x300000,
+++ota_1,      app,  ota_1,    0x320000, 0x300000,
+++littlefs,   data, 0x81,     0x620000, 0x100000,
+++coredump,   data, coredump, 0x720000, 0x80000,
++diff --git a/firmware/sdkconfig.defaults b/firmware/sdkconfig.defaults
++new file mode 100644
++index 0000000..e558ab6
++--- /dev/null
+++++ b/firmware/sdkconfig.defaults
++@@ -0,0 +1,70 @@
+++# sdkconfig.defaults for esp-glow (ESP32-S3 + octal PSRAM).
+++#
+++# These defaults are applied at `idf.py set-target esp32s3` time. Override
+++# per-board values in sdkconfig (generated) or by editing this file.
+++
+++# --- Target ---
+++CONFIG_IDF_TARGET="esp32s3"
+++
+++# --- Flash & partitioning ---
+++CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+++CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+++CONFIG_PARTITION_TABLE_CUSTOM=y
+++CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+++CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+++
+++# --- Octal PSRAM (ESP32-S3) ---
+++# The pixel buffers and the loaded SHW1 bundle live in PSRAM. Octal mode gives
+++# the bandwidth the render loop needs at 44 Hz with multiple universes.
+++CONFIG_SPIRAM=y
+++CONFIG_SPIRAM_MODE_OCT=y
+++CONFIG_SPIRAM_TYPE_AUTO=y
+++CONFIG_SPIRAM_SPEED_80M=y
+++CONFIG_SPIRAM_USE_MALLOC=y
+++CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+++CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
+++CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+++
+++# --- C++ runtime ---
+++# The core modules were written for -fno-exceptions -fno-rtti (std::vector on
+++# alloc failure aborts; that is acceptable with PSRAM available). The flags
+++# themselves are enforced in components/glow_core/CMakeLists.txt via
+++# target_compile_options, because sdkconfig only exposes RTTI via
+++# CONFIG_COMPILER_RTTI (default off) and exceptions via
+++# CONFIG_COMPILER_CXX_EXCEPTIONS (default off). We pin both off here too.
+++CONFIG_COMPILER_CXX_EXCEPTIONS=n
+++CONFIG_COMPILER_RTTI=n
+++
+++# --- WiFi (station + softAP) ---
+++CONFIG_ESP_WIFI_ENABLED=y
+++CONFIG_ESP_WIFI_STA_DISCONNECTED_PM=y
+++CONFIG_ESP_WIFI_NVS_ENABLED=y
+++CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
+++
+++# --- lwIP / sockets ---
+++CONFIG_LWIP_TCP=y
+++CONFIG_LWIP_UDP=y
+++CONFIG_LWIP_SO_REUSE=y
+++CONFIG_LWIP_MAX_SOCKETS=16
+++
+++# --- HTTP server (WebSocket endpoint + console serving in F4) ---
+++CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+++CONFIG_HTTPD_MAX_URI_LEN=512
+++
+++# --- mbedTLS (OTA over HTTPS in F5) ---
+++CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+++
+++# --- OTA ---
+++CONFIG_APP_ROLLBACK_ENABLE=y
+++
+++# --- Task watchdog (F5 robustness) ---
+++CONFIG_ESP_TASK_WDT=y
+++CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+++CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
+++CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
+++
+++# --- Core affinity (WiFi/DMX coexistence) ---
+++# The render task pins itself to core 1 at runtime (xTaskCreatePinnedToCore).
+++# Keep WiFi/lwIP on core 0 so DMX timing on core 1 is never starved.
+++CONFIG_ESP_WIFI_TASK_CORE_AFFINITY_0=y
+++CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0=y
++-- 
++2.47.3
++
+diff --git a/render_pacing.cpp b/render_pacing.cpp
+new file mode 100644
+index 0000000..819e42f
+--- /dev/null
++++ b/render_pacing.cpp
+@@ -0,0 +1,35 @@
++// render_pacing.cpp — implementation of the frame-pacing math.
++//
++// The whole point: the render loop's only "real logic" is here, host-tested,
++// instead of buried in a FreeRTOS task that only runs on hardware.
++#include "render_pacing.h"
++
++namespace glow {
++
++PaceResult paceNextFrame(uint32_t targetPeriodUs, uint64_t nowUs,
++                         uint64_t prevDeadlineUs) {
++  PaceResult r;
++  r.nowSec = tickToSeconds(nowUs);
++
++  // Seed the deadline on the first frame (prevDeadlineUs == 0 sentinel).
++  // We anchor to the current time so the loop doesn't try to retroactively
++  // "make up" the entire history of deadlines.
++  uint64_t base = (prevDeadlineUs == 0) ? nowUs : prevDeadlineUs;
++  uint64_t next = base + targetPeriodUs;
++
++  if (nowUs >= next) {
++    // We are behind. Don't sleep; re-base the deadline off nowUs so the next
++    // frame targets one period ahead of the current time (drift-correcting,
++    // not catch-up).
++    r.behind = true;
++    r.sleepUs = 0;
++    r.nextDeadlineUs = nowUs + targetPeriodUs;
++  } else {
++    r.behind = false;
++    r.sleepUs = static_cast<int32_t>(next - nowUs);
++    r.nextDeadlineUs = next;
++  }
++  return r;
++}
++
++}  // namespace glow
+diff --git a/render_pacing.h b/render_pacing.h
+new file mode 100644
+index 0000000..a974ce5
+--- /dev/null
++++ b/render_pacing.h
+@@ -0,0 +1,65 @@
++// render_pacing.h — pure frame-pacing math extracted from the firmware render
++// loop, so the one piece of real logic the firmware invents stays host-tested.
++//
++// The firmware render task (see firmware/main/render_task.cpp) does, every
++// iteration:
++//   1. read a monotonic tick (esp_timer_get_time, in microseconds)
++//   2. convert to seconds
++//   3. compute the next deadline and how long to sleep
++//   4. call show.renderFrame(t)
++//
++// Steps 2 and 3 are pure arithmetic with real edge cases (tick rollover, frame
++// budget exceeded, drift correction). They live here and are covered by
++// test_render_pacing.cpp under `make test`. The device side just calls these
++// functions with real timer values.
++#pragma once
++
++#include <cstdint>
++
++namespace glow {
++
++// Render-loop timing constants. Centralised so device and host agree.
++constexpr uint32_t DEFAULT_RENDER_HZ      = 44;          // ~44 Hz, DMX-friendly
++constexpr uint32_t DEFAULT_RENDER_PERIOD_US = 1'000'000u / DEFAULT_RENDER_HZ;  // ~22727 us
++constexpr uint32_t RENDER_CORE             = 1;          // pin render to core 1
++constexpr uint32_t RENDER_TASK_STACK       = 4096;
++constexpr uint32_t RENDER_TASK_PRIORITY    = 20;         // above WiFi, below ISR
++
++// Convert a monotonic microsecond tick to seconds (float, for renderFrame).
++// Pure. Handles the (unrealistic on ESP32) u64 wrap cleanly because the
++// division is exact in double precision over the 64-bit range.
++inline float tickToSeconds(uint64_t tickUs) {
++  return static_cast<float>(static_cast<double>(tickUs) / 1.0e6);
++}
++
++// Result of pacing a single frame.
++struct PaceResult {
++  float    nowSec;       // tickToSeconds(nowUs) — pass straight to renderFrame
++  int32_t  sleepUs;      // how long to vTaskDelay before the next frame.
++                         // <= 0 means we are behind budget (do not sleep).
++  uint64_t nextDeadlineUs;  // the target absolute tick for the next frame
++  bool     behind;      // true if this frame overran its budget
++};
++
++// Compute pacing for the next frame.
++//
++//   targetPeriodUs  : nominal frame period (e.g. DEFAULT_RENDER_PERIOD_US)
++//   nowUs           : current monotonic tick (microseconds)
++//   prevDeadlineUs  : the deadline the previous frame was scheduled for
++//                     (pass 0 on the very first frame to seed from nowUs)
++//
++// Drift-correcting rule: if we fell behind, do NOT try to "catch up" by
++// sleeping negative — just emit sleepUs <= 0 and re-base the next deadline
++// off the current time. This keeps the loop stable under load (a single
++// overrunning frame does not cascade into a burst of zero-sleep frames).
++PaceResult paceNextFrame(uint32_t targetPeriodUs, uint64_t nowUs,
++                         uint64_t prevDeadlineUs);
++
++// Convert a FreeRTOS tick count (xTaskGetTickCount) to microseconds. Useful as
++// a coarse fallback timer if esp_timer is unavailable in a test harness.
++inline uint64_t ticksToUs(uint32_t ticks, uint32_t tickHz) {
++  if (tickHz == 0) return 0;
++  return (static_cast<uint64_t>(ticks) * 1'000'000u) / tickHz;
++}
++
++}  // namespace glow
+diff --git a/scripts/fix_makefile_tabs.py b/scripts/fix_makefile_tabs.py
+new file mode 100644
+index 0000000..8a97017
+--- /dev/null
++++ b/scripts/fix_makefile_tabs.py
+@@ -0,0 +1,38 @@
++#!/usr/bin/env python3
++# fix_makefile_tabs.py — restore tab indentation on Makefile recipe lines.
++#
++# The Edit/Write tools convert literal tabs to spaces, which breaks GNU make
++# (recipes MUST start with a tab). This script rewrites the Makefile so that
++# any line whose stripped content begins with a recipe token ($(CXX), ./, rm,
++# or a make function call) gets a single leading tab.
++#
++# Run: python3 scripts/fix_makefile_tabs.py
++import re, sys, pathlib
++
++MF = pathlib.Path("/home/z/my-project/work/esp-glow/Makefile")
++text = MF.read_text()
++
++# Recipe tokens that must live on a tab-indented line.
++recipe_re = re.compile(r'^[ \t]+(\$\(CXX\)|\./|rm |\$\(CXXFLAGS\) -c)')
++
++out = []
++for line in text.splitlines(keepends=True):
++    bare = line.rstrip('\n')
++    if recipe_re.match(bare):
++        # Strip ALL leading whitespace and replace with a single tab.
++        stripped = bare.lstrip(' \t')
++        out.append('\t' + stripped + '\n')
++    else:
++        out.append(line)
++
++MF.write_text(''.join(out))
++print("Makefile recipe tabs restored.")
++
++# Verify: no recipe line should start with a space.
++bad = []
++for i, line in enumerate(MF.read_text().splitlines(), 1):
++    if recipe_re.match(line) and not line.startswith('\t'):
++        bad.append((i, line))
++if bad:
++    print("STILL BAD:", bad, file=sys.stderr); sys.exit(1)
++print("OK: all recipe lines start with a tab.")
+diff --git a/test_render_pacing.cpp b/test_render_pacing.cpp
+new file mode 100644
+index 0000000..dd0f3f4
+--- /dev/null
++++ b/test_render_pacing.cpp
+@@ -0,0 +1,148 @@
++// test_render_pacing.cpp — host test for the frame-pacing math.
++//
++// The render loop is the one place the firmware invents real timing logic, so
++// it is extracted here and covered by `make test`. The device just calls these
++// functions with esp_timer ticks.
++#include "render_pacing.h"
++
++#include <cstdio>
++#include <cstdint>
++
++static int g_fail = 0;
++
++#define CHECK(cond) do { \
++  if (!(cond)) { printf("FAIL: %s:%d: %s\n", __FILE__, __LINE__, #cond); g_fail++; } \
++} while (0)
++
++static void test_tick_to_seconds() {
++  printf("Test: tickToSeconds basic conversions\n");
++  CHECK(glow::tickToSeconds(0) == 0.0f);
++  CHECK(glow::tickToSeconds(1'000'000u) == 1.0f);
++  CHECK(glow::tickToSeconds(500'000u) == 0.5f);
++  // ~44 Hz period in seconds
++  float period = glow::tickToSeconds(glow::DEFAULT_RENDER_PERIOD_US);
++  CHECK(period > 0.022f && period < 0.023f);
++}
++
++static void test_first_frame_seeds_from_now() {
++  printf("Test: first frame seeds deadline from nowUs\n");
++  uint64_t now = 1'000'000u;  // 1 s
++  auto r = glow::paceNextFrame(glow::DEFAULT_RENDER_PERIOD_US, now, 0);
++  CHECK(!r.behind);
++  CHECK(r.sleepUs == static_cast<int32_t>(glow::DEFAULT_RENDER_PERIOD_US));
++  CHECK(r.nextDeadlineUs == now + glow::DEFAULT_RENDER_PERIOD_US);
++  CHECK(r.nowSec == 1.0f);
++}
++
++static void test_steady_state_pacing() {
++  printf("Test: steady-state pacing holds the period\n");
++  uint32_t period = glow::DEFAULT_RENDER_PERIOD_US;
++  uint64_t now = 0;
++  uint64_t deadline = 0;  // first call seeds
++  // Simulate 200 frames at exactly the deadline (ideal steady state).
++  for (int i = 0; i < 200; ++i) {
++    auto r = glow::paceNextFrame(period, now, deadline);
++    CHECK(!r.behind);
++    CHECK(r.sleepUs == static_cast<int32_t>(period));
++    deadline = r.nextDeadlineUs;
++    now = deadline;  // woke exactly on time
++  }
++  // After 200 frames the deadline advanced exactly 200 periods from the seed.
++  // Seed deadline was (now0 + period); after 200 frames deadline == now0 + 200*period.
++  // (now0 was the first now passed, which we set to 0 on the very first call.)
++  uint64_t firstNow = 0;
++  uint64_t expected = firstNow + 200ULL * period;
++  CHECK(deadline == expected);
++}
++
++static void test_behind_frame_does_not_catch_up() {
++  printf("Test: behind frame rebases deadline (no catch-up burst)\n");
++  uint32_t period = glow::DEFAULT_RENDER_PERIOD_US;
++  // Pretend we were supposed to fire at 1,000,000 us but we are firing at
++  // 1,000,000 + 2.5 periods (well behind).
++  uint64_t prevDeadline = 1'000'000u;
++  uint64_t now = prevDeadline + (period * 5u) / 2u;  // 2.5 periods late
++  auto r = glow::paceNextFrame(period, now, prevDeadline);
++  CHECK(r.behind);
++  CHECK(r.sleepUs == 0);
++  // Next deadline is one period ahead of NOW, not of the old deadline.
++  CHECK(r.nextDeadlineUs == now + period);
++}
++
++static void test_slight_overrun_recover() {
++  printf("Test: slight overrun still targets next deadline (not behind)\n");
++  uint32_t period = glow::DEFAULT_RENDER_PERIOD_US;  // ~22727 us
++  uint64_t prevDeadline = 5'000'000u;
++  // Fire 1 ms past prevDeadline, but still ~21 ms BEFORE the next deadline
++  // (prevDeadline + period). This is an overrun of the previous slot but NOT
++  // a behind-frame for the next slot.
++  uint64_t now = prevDeadline + 1000u;  // 5,001,000
++  auto r = glow::paceNextFrame(period, now, prevDeadline);
++  uint64_t next = prevDeadline + period;  // 5,022,727
++  CHECK(!r.behind);
++  CHECK(r.sleepUs == static_cast<int32_t>(next - now));
++  CHECK(r.nextDeadlineUs == next);
++}
++
++static void test_cross_deadline_becomes_behind() {
++  printf("Test: firing at/after the next deadline is behind\n");
++  uint32_t period = glow::DEFAULT_RENDER_PERIOD_US;
++  uint64_t prevDeadline = 5'000'000u;
++  uint64_t next = prevDeadline + period;
++  // Fire exactly at the next deadline -> behind, sleep 0, rebase off now.
++  auto r = glow::paceNextFrame(period, next, prevDeadline);
++  CHECK(r.behind);
++  CHECK(r.sleepUs == 0);
++  CHECK(r.nextDeadlineUs == next + period);
++}
++
++static void test_zero_period_safe() {
++  printf("Test: zero period does not divide by zero / does not crash\n");
++  auto r = glow::paceNextFrame(0, 1'000'000u, 500'000u);
++  // With period 0, next = base + 0 = base = prevDeadline = 500,000.
++  // now (1,000,000) >= 500,000 -> behind, sleep 0, next = now + 0 = now.
++  CHECK(r.behind);
++  CHECK(r.sleepUs == 0);
++  CHECK(r.nextDeadlineUs == 1'000'000u);
++}
++
++static void test_64bit_large_tick_safe() {
++  printf("Test: large tick value (no overflow) paces normally\n");
++  // Pick a huge value such that huge + period still fits in u64 (no wrap).
++  // 0xFFFFFFFFFFFF0000 + 22727 < 0xFFFFFFFFFFFFFFFF.
++  uint64_t huge = 0xFFFFFFFFFFFF0000ULL;
++  auto r = glow::paceNextFrame(glow::DEFAULT_RENDER_PERIOD_US, huge, 0);
++  CHECK(!r.behind);
++  CHECK(r.nextDeadlineUs == huge + glow::DEFAULT_RENDER_PERIOD_US);
++  CHECK(r.sleepUs == static_cast<int32_t>(glow::DEFAULT_RENDER_PERIOD_US));
++}
++
++static void test_64bit_wrap_is_defined_not_crash() {
++  printf("Test: tick so large that deadline wraps is defined behaviour\n");
++  // huge + period DOES overflow u64 here. Unsigned wrap is well-defined; the
++  // helper must not crash or invoke UB. The wrapped nextDeadline is tiny, so
++  // now >= next is true -> behind, sleep 0, rebase off now.
++  uint64_t huge = 0xFFFFFFFFFFFFFF00ULL;
++  auto r = glow::paceNextFrame(glow::DEFAULT_RENDER_PERIOD_US, huge, 0);
++  CHECK(r.behind);
++  CHECK(r.sleepUs == 0);
++  // No UB assertion: reaching here is the contract.
++}
++
++int main() {
++  test_tick_to_seconds();
++  test_first_frame_seeds_from_now();
++  test_steady_state_pacing();
++  test_behind_frame_does_not_catch_up();
++  test_slight_overrun_recover();
++  test_cross_deadline_becomes_behind();
++  test_zero_period_safe();
++  test_64bit_large_tick_safe();
++  test_64bit_wrap_is_defined_not_crash();
++  if (g_fail == 0) {
++    printf("All render_pacing tests passed!\n");
++    return 0;
++  }
++  printf("%d render_pacing tests FAILED\n", g_fail);
++  return 1;
++}
+-- 
+2.47.3
+

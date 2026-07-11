@@ -103,3 +103,41 @@ This proves the entire engine -> DMX chain on hardware. Do this before any
 networked phase so DMX timing bugs are not hidden by WiFi work.
 
 ---
+
+### Phase F2 — WiFi + Art-Net output (matrices)  (GLM)
+
+Bring up WiFi (STA with auto-reconnect and bounded backoff). Fill
+`artnet_sink.cpp`: a connected UDP socket to the bridge IP:6454, real Art-Net
+DMX packets with per-sink sequence numbering (wraps at 255 per spec), even-
+length padding, and a 5 ms `SO_SNDTIMEO` so a slow bridge cannot stall the
+core-1 render loop. One `ArtNetSink` instance serves multiple universes —
+`send()` stamps the universe index into each packet.
+
+Drive `pixel_matrix`: a 16x8 RGB matrix on universes 1+2 (Raw mode). The
+render task gained a `pre_render` hook that, each frame, renders the
+`RainbowScrollPattern` into the canvas and `writeRawUniverse`s each matrix
+universe into the Show before `renderFrame` flushes them via Art-Net.
+
+**Coexistence** is the load-bearing detail here: WiFi/lwIP run on core 0
+(`CONFIG_ESP_WIFI_TASK_CORE_AFFINITY_0` in sdkconfig), the render task is
+pinned to core 1, and the Art-Net send is non-blocking with a short timeout.
+DMX timing on core 1 is never preempted by network work.
+
+Files added/changed:
+- `artnet_sink.h` / `artnet_sink.cpp` — filled: connected UDP socket, sequence
+  numbering, even-length padding, broadcast support, 5 ms send timeout.
+- `firmware/main/wifi_manager.{h,cpp}` — STA bring-up + reconnect task with
+  bounded backoff (1s -> 15s).
+- `firmware/main/render_task.h` — added `pre_render` hook + `pre_render_ctx`.
+- `firmware/main/main.cpp` — F2: NVS init, WiFi STA, ArtNetSink for the matrix
+  universes, 16x8 RainbowScrollPattern, render task with the pre_render hook.
+- `firmware/main/Kconfig.projbuild` — menuconfig for GPIO/WiFi/bridge-IP.
+
+**You observe:**
+- Serial: `got ip: ...` then `Art-Net -> ...:6454 (ready)`.
+- Your existing Art-Net bridge lights the 16x8 matrix with a scrolling rainbow.
+- Wireshark: Art-Net OpDmx for universes 1 and 2 at ~44 Hz (sequence numbers
+  incrementing); DMX on universe 0 still holds the F1 dimmer at 50%.
+- Status LED: double-pulse when WiFi is up, fast blink while connecting.
+
+---
