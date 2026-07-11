@@ -1,28 +1,38 @@
 .PHONY: test clean
 
 # Compiler flags: C++17, warnings, sanitizer
-CXXFLAGS = -std=c++17 -Wall -Wextra -Werror -fsanitize=undefined -g
+CXXFLAGS = -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -g
 
-# Source files
-SOURCES = vec_math.cpp aim.cpp test_aim.cpp
-OBJECTS = $(SOURCES:.cpp=.o)
-TARGET = test_aim
+# --- test_aim: aim/vec_math geometry tests ---
+AIM_SOURCES = vec_math.cpp aim.cpp test_aim.cpp
+AIM_OBJECTS = $(AIM_SOURCES:.cpp=.o)
+AIM_TARGET = test_aim
 
-# Build the test executable
-$(TARGET): $(OBJECTS)
-	$(CXX) $(CXXFLAGS) $(OBJECTS) -o $(TARGET) -lm
+# --- test_show: render loop + show integration tests ---
+# Core + tests only; device sinks (dmx_sink.cpp, artnet_sink.cpp) are
+# device-only and excluded from the host build.
+SHOW_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp show.cpp test_show.cpp
+SHOW_OBJECTS = $(SHOW_SOURCES:.cpp=.o)
+SHOW_TARGET = test_show
+
+$(AIM_TARGET): $(AIM_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(AIM_OBJECTS) -o $(AIM_TARGET) -lm
+
+$(SHOW_TARGET): $(SHOW_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(SHOW_OBJECTS) -o $(SHOW_TARGET) -lm
 
 # Compile object files
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Run tests
-test: $(TARGET)
-	./$(TARGET)
+test: $(AIM_TARGET) $(SHOW_TARGET)
+	./$(AIM_TARGET)
+	./$(SHOW_TARGET)
 
 # Clean build artifacts
 clean:
-	rm -f $(OBJECTS) $(TARGET)
+	rm -f $(AIM_OBJECTS) $(AIM_TARGET) $(SHOW_OBJECTS) $(SHOW_TARGET)
 
 # Rebuild
 rebuild: clean test
