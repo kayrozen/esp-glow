@@ -1,0 +1,376 @@
+/* esp-glow console — venue-ready dark theme.
+ *
+ * Design goals (Phase 2 brief):
+ *   - Dark theme, high contrast, legible in low light.
+ *   - Large touch targets: every interactive element >= 64px on its short
+ *     side. No double-fire risk: pointer-capture on the buttons, no
+ *     300ms tap delay (touch-action: none), no hover-only states.
+ *   - Clear pressed/latched states: active cues glow in their bound color;
+ *     inactive cues are dim outlines.
+ *   - Responsive from phone (~360px) to tablet (~1024px). The cue grid
+ *     auto-flows; on wide tablets it shows 6-8 columns, on phones 2-3.
+ *   - No external assets (system fonts only), so the bundle stays
+ *     flash-friendly.
+ */
+
+:root {
+  --bg:           #0a0c12;
+  --bg-elev:      #12151d;
+  --bg-elev-2:   #1a1e29;
+  --border:      #2a3040;
+  --text:        #e8ebf2;
+  --text-dim:    #8a93a6;
+  --text-faint:  #565d72;
+  --accent:      #4d8cff;
+  --accent-warm: #ffb454;
+  --ok:          #2ecc71;
+  --warn:        #ffb454;
+  --err:         #ff5470;
+
+  --cue-radius: 14px;
+  --gap:        10px;
+  --target-min: 64px;
+
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+               "Helvetica Neue", Arial, sans-serif;
+  font-size: 16px;
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+  user-select: none;
+}
+
+#app { min-height: 100%; }
+
+.console {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  padding: max(env(safe-area-inset-top), 8px) 12px
+           max(env(safe-area-inset-bottom), 8px);
+  min-height: 100%;
+}
+
+/* --- header / status -------------------------------------------------- */
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  flex-shrink: 0;
+}
+.status-open       { background: var(--ok);    box-shadow: 0 0 8px var(--ok); }
+.status-connecting { background: var(--warn);  animation: pulse 1.2s infinite; }
+.status-closed     { background: var(--text-faint); }
+.status-error      { background: var(--err);   animation: pulse 0.8s infinite; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+
+.status-label {
+  font-size: 13px;
+  color: var(--text-dim);
+  letter-spacing: 0.02em;
+}
+
+.brand {
+  margin-left: auto;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-faint);
+  letter-spacing: 0.06em;
+}
+
+/* --- empty state ------------------------------------------------------ */
+
+.empty {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  color: var(--text-dim);
+  font-size: 15px;
+  padding: 40px 16px;
+  text-align: center;
+}
+
+/* --- section titles --------------------------------------------------- */
+
+.section-title {
+  margin: 4px 4px 6px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-faint);
+}
+
+/* --- cue grid --------------------------------------------------------- */
+
+.cue-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(140px, 100%), 1fr));
+  gap: var(--gap);
+}
+
+.empty-cues {
+  grid-template-columns: none;
+  display: block;
+  padding: 16px;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.cue-btn {
+  --cue-color: #3060ff;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 6px;
+  min-height: var(--target-min);
+  padding: 12px 12px 8px;
+  border-radius: var(--cue-radius);
+  border: 1px solid color-mix(in srgb, var(--cue-color) 35%, var(--border));
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--cue-color) 8%, transparent) 0%,
+      var(--bg-elev) 100%);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  touch-action: none;        /* no tap delay, no scroll hijack */
+  -webkit-user-select: none;
+  user-select: none;
+  transition: border-color 80ms ease, background 80ms ease,
+              box-shadow 80ms ease, transform 60ms ease;
+}
+
+.cue-btn:active {
+  transform: scale(0.985);
+}
+
+.cue-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.cue-swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  background: var(--cue-color);
+  opacity: 0.55;
+  transition: opacity 80ms ease, box-shadow 80ms ease;
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.04) inset;
+}
+
+.cue-label {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: 0.01em;
+  word-break: break-word;
+  flex: 1;
+}
+
+.cue-mode {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--text-faint);
+  font-weight: 700;
+}
+
+/* Flash cues go bright while held. */
+.cue-flash.cue-active {
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--cue-color) 55%, transparent) 0%,
+      color-mix(in srgb, var(--cue-color) 18%, var(--bg-elev)) 100%);
+  border-color: var(--cue-color);
+  box-shadow:
+    0 0 0 1px var(--cue-color) inset,
+    0 0 22px color-mix(in srgb, var(--cue-color) 60%, transparent);
+}
+.cue-flash.cue-active .cue-swatch { opacity: 1; }
+.cue-flash.cue-active .cue-mode   { color: var(--text); }
+
+/* Toggle cues show a persistent latched indicator (a left rail) so the
+ * operator can tell latched-on from held-on at a glance. */
+.cue-toggle.cue-active {
+  background:
+    linear-gradient(90deg,
+      color-mix(in srgb, var(--cue-color) 35%, transparent) 0%,
+      var(--bg-elev) 30%);
+  border-color: var(--cue-color);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--cue-color) 40%, transparent);
+}
+.cue-toggle.cue-active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 4px;
+  border-radius: 0 4px 4px 0;
+  background: var(--cue-color);
+  box-shadow: 0 0 8px var(--cue-color);
+}
+.cue-toggle.cue-active .cue-swatch { opacity: 1; }
+
+/* --- scene row -------------------------------------------------------- */
+
+.scene-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.scene-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap);
+}
+
+.scene-btn {
+  min-height: var(--target-min);
+  min-width: 96px;
+  padding: 12px 20px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  touch-action: none;
+  transition: background 80ms ease, border-color 80ms ease,
+              box-shadow 80ms ease, transform 60ms ease;
+}
+.scene-btn:active              { transform: scale(0.985); }
+.scene-btn:focus-visible       { outline: 2px solid var(--accent); outline-offset: 2px; }
+.scene-btn.scene-active {
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-elev));
+  border-color: var(--accent);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* --- master fader ----------------------------------------------------- */
+
+.master { display: flex; flex-direction: column; gap: 4px; }
+
+.master-row {
+  display: flex;
+  align-items: stretch;
+}
+
+.master-track {
+  position: relative;
+  flex: 1;
+  height: 72px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  cursor: ew-resize;
+  touch-action: none;
+  overflow: hidden;
+}
+
+.master-track:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.master-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background:
+    linear-gradient(90deg,
+      color-mix(in srgb, var(--accent) 25%, transparent) 0%,
+      color-mix(in srgb, var(--accent) 70%, transparent) 100%);
+  border-right: 1px solid color-mix(in srgb, var(--accent) 80%, transparent);
+}
+
+.master-thumb {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  transform: translateX(-2px);
+  background: var(--accent);
+  box-shadow: 0 0 12px var(--accent);
+  pointer-events: none;
+}
+
+.master-value {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-variant-numeric: tabular-nums;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.02em;
+  pointer-events: none;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.6);
+}
+
+/* --- wide screens (tablet landscape) ---------------------------------- */
+
+@media (min-width: 720px) {
+  :root {
+    --target-min: 84px;
+    --cue-radius: 16px;
+  }
+  .cue-grid {
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  }
+  .cue-label { font-size: 16px; }
+  .master-track { height: 88px; }
+  .master-value { font-size: 22px; }
+}
+
+@media (min-width: 1024px) {
+  .console {
+    max-width: 1280px;
+    margin: 0 auto;
+    padding-top: 16px;
+    padding-bottom: 16px;
+  }
+}
+
+/* --- reduced motion --------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .status-connecting, .status-error { animation: none; }
+  .cue-btn, .scene-btn { transition: none; }
+}
