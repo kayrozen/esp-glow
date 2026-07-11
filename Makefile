@@ -55,6 +55,16 @@ WEB_PROTOCOL_SOURCES = web_protocol.cpp test_web_protocol.cpp
 WEB_PROTOCOL_OBJECTS = $(WEB_PROTOCOL_SOURCES:.cpp=.o)
 WEB_PROTOCOL_TARGET  = test_web_protocol
 
+# --- test_control_queue: control-event queue tests (TSan build) ---
+# TSan and ASan cannot be combined in one binary, so this target gets
+# its own compile rule with -fsanitize=thread instead of the default
+# -fsanitize=address,undefined. Sources are compiled in a single
+# command (no .o files) to avoid flag conflicts with the ASan objects.
+CONTROL_QUEUE_CXXFLAGS = -std=c++17 -Wall -Wextra -Werror -fsanitize=thread -g
+CONTROL_QUEUE_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp show.cpp \
+                        show_control.cpp live_control.cpp control_queue.cpp test_control_queue.cpp
+CONTROL_QUEUE_TARGET  = test_control_queue
+
 $(AIM_TARGET): $(AIM_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(AIM_OBJECTS) -o $(AIM_TARGET) -lm
 
@@ -82,12 +92,15 @@ $(LIVE_CONTROL_TARGET): $(LIVE_CONTROL_OBJECTS)
 $(WEB_PROTOCOL_TARGET): $(WEB_PROTOCOL_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(WEB_PROTOCOL_OBJECTS) -o $(WEB_PROTOCOL_TARGET) -lm
 
+$(CONTROL_QUEUE_TARGET): $(CONTROL_QUEUE_SOURCES)
+	$(CXX) $(CONTROL_QUEUE_CXXFLAGS) $(CONTROL_QUEUE_SOURCES) -o $(CONTROL_QUEUE_TARGET) -lm -pthread
+
 # Compile object files
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Run tests
-test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET) $(LIVE_CONTROL_TARGET) $(WEB_PROTOCOL_TARGET)
+test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET) $(LIVE_CONTROL_TARGET) $(WEB_PROTOCOL_TARGET) $(CONTROL_QUEUE_TARGET)
 	./$(AIM_TARGET)
 	./$(FP_TARGET)
 	./$(SHOW_TARGET)
@@ -97,6 +110,7 @@ test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL
 	./$(PROVISION_TARGET)
 	./$(LIVE_CONTROL_TARGET)
 	./$(WEB_PROTOCOL_TARGET)
+	./$(CONTROL_QUEUE_TARGET)
 
 # Clean build artifacts
 clean:
@@ -104,7 +118,8 @@ clean:
 	      $(EFFECTS_OBJECTS) $(EFFECTS_TARGET) $(SHOW_CONTROL_OBJECTS) $(SHOW_CONTROL_TARGET) \
 	      $(PIXEL_MATRIX_OBJECTS) $(PIXEL_MATRIX_TARGET) $(PROVISION_OBJECTS) $(PROVISION_TARGET) \
 	      $(LIVE_CONTROL_OBJECTS) $(LIVE_CONTROL_TARGET) \
-	      $(WEB_PROTOCOL_OBJECTS) $(WEB_PROTOCOL_TARGET)
+	      $(WEB_PROTOCOL_OBJECTS) $(WEB_PROTOCOL_TARGET) \
+	      $(CONTROL_QUEUE_TARGET)
 
 # Rebuild
 rebuild: clean test

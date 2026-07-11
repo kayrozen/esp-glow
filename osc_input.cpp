@@ -1,17 +1,30 @@
 #ifdef ESP_PLATFORM
 
-#include "live_control.h"
+//
+// OSC input — device scaffold.
+//
+// Parses OSC packets into ControlEvents and pushes them to the
+// control-event queue. The render task drains the queue via
+// pumpControlEvents() and dispatches to LiveControl — the transports
+// no longer touch LiveControl/ShowController directly, eliminating the
+// cross-core data race. See control_queue.h for the rationale.
+//
+
+#include "control_queue.h"  // IControlEventQueue, ControlEvent (transitively)
+#include "live_control.h"   // ControlType
+
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 
-static LiveControl* g_liveControl = nullptr;
+static IControlEventQueue* g_queue = nullptr;
 
-void osc_input_init(LiveControl& live) {
-  g_liveControl = &live;
+void osc_input_init(IControlEventQueue& queue) {
+  g_queue = &queue;
 }
 
 void osc_input_handle_packet(const uint8_t* packet, size_t len) {
-  if (g_liveControl == nullptr) return;
+  if (g_queue == nullptr) return;
 
   // Parse OSC packet: address string (null-terminated) + padding + type tag + padding + args
   // This is a minimal parser for address + one float/int argument only.
@@ -58,7 +71,7 @@ void osc_input_handle_packet(const uint8_t* packet, size_t len) {
   }
 
   // TODO: Map address to logical controlId via firmware-provided table
-  // For now, extract controlId from address (e.g., "/cue/1" → id=1)
+  // For now, extract controlId from address (e.g., "/cue/1" -> id=1)
   // This is application-specific and out of scope for this module.
 
   uint16_t controlId = 0;
@@ -76,14 +89,16 @@ void osc_input_handle_packet(const uint8_t* packet, size_t len) {
     return;
   }
 
-  float now = 0.0f;
-  g_liveControl->handle(ev, now);
+  g_queue->push(ev);
 }
 
 void osc_server_task() {
   // TODO: receive UDP OSC packets (hardware-specific)
   // for each packet received:
   //   osc_input_handle_packet(buffer, len);
+  //
+  // The render task calls pumpControlEvents(queue, live, t) at the top
+  // of each frame; the OSC transport just pushes events here.
 }
 
 #endif

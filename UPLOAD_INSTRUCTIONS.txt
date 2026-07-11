@@ -1,0 +1,82 @@
+esp-glow — web console + provisioner + control-event queue
+=========================================================
+
+This zip contains all 35 files that changed vs. main (cccb548).
+Directory structure is preserved — drop them into your clone.
+
+Files marked (M) below modify existing files; the rest are new.
+
+HOW TO UPLOAD
+-------------
+
+1. Clone the repo and create a branch:
+
+     git clone https://github.com/kayrozen/esp-glow.git
+     cd esp-glow
+     git checkout -b claude/web-console-provisioner-q7k3mz
+
+2. Unzip this archive on top of the clone (overwrites modified files,
+   adds new ones):
+
+     unzip -o esp-glow-all-files.zip -d /path/to/esp-glow/
+
+3. Stage, commit, push:
+
+     git add -A
+     git commit -m "Web console + browser provisioner + control-event queue
+
+  - Live control layer (MIDI/OSC/web -> cues)
+  - Phase 3: web_protocol testable core + web_input scaffold rewrite
+  - Phase 1+2: WS client + Preact console UI + mock dev server
+  - Phase 5a: browser-based provisioner (WASM port of provision.cpp +
+    static editor + Pages CI workflow)
+  - Control-event queue: decouple input tasks from render (eliminates
+    cross-core data race, validated under ThreadSanitizer)
+
+  make test: 10/10 binaries pass, zero warnings.
+  Closes #8."
+     git push -u origin claude/web-console-provisioner-q7k3mz
+
+4. Open the PR on GitHub. The PR body is in /home/z/my-project/download/apply-web-console-pr.sh
+   (or just write your own — the commit message above is the summary).
+
+FILES
+-----
+
+Modified (M):
+  .gitignore            — added WASM build artifact ignores
+  Makefile              — added test_live_control, test_web_protocol,
+                          test_control_queue (TSan) targets
+  provision.cpp         — removed unused lineNum; encodeProfile now sets
+                          builder.name (latent bug fix)
+
+New:
+  live_control.{h,cpp}              — binding table + ControlEvent model
+  midi_input.cpp                    — MIDI transport (pushes to queue)
+  osc_input.cpp                     — OSC transport (pushes to queue)
+  web_input.cpp                     — web/WS transport (pushes to queue)
+  web_protocol.{h,cpp}              — JSON protocol testable core
+  control_queue.{h,cpp}             — host mutex-guarded ring + pump
+  control_queue_freertos.cpp        — device scaffold (FreeRTOS queue)
+  test_live_control.cpp             — 14 tests
+  test_web_protocol.cpp             — 30 tests
+  test_control_queue.cpp            — 7 tests (TSan concurrency)
+  README_LIVE_CONTROL.md
+  README_WEB_CONSOLE.md
+  README_CONTROL_QUEUE.md
+  README_PROVISIONER.md
+  web/console/*                     — Phase 2 Preact UI + ws-client.js
+  web/dev-server.js                 — mock device for offline iteration
+  web/provision-wasm/*              — emcc build + embind glue + smoke tests
+  web/provisioner-static/*          — vanilla-JS editor (Pages-deployable)
+  .github/workflows/provisioner.yml — build WASM + deploy to Pages
+
+VERIFY
+------
+
+After unzipping into your clone:
+
+  make test
+
+Should produce 10 binaries, all passing. The test_control_queue binary
+is built with -fsanitize=thread (TSan); the rest use ASan/UBSan.

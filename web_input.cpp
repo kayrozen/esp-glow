@@ -5,54 +5,61 @@
 //
 // The testable JSON core lives in web_protocol.h/.cpp (host-tested, no ESP-IDF
 // dependency). This file is the device-only glue: it owns the WebSocket
-// server, calls parseWebCommand on each incoming frame, feeds the resulting
-// ControlEvent into LiveControl, and pushes `config` (and optionally
+// server, calls parseWebCommand on each incoming frame, pushes the resulting
+// ControlEvent to the control-event queue, and sends `config` (and optionally
 // `state`) messages back to the UI.
 //
-// Hardware wiring (httpd ws endpoint, LittleFS/SPIFFS file serving, the
-// actual `now` clock) is left as `// TODO` for the same reasons as
-// midi_input.cpp and osc_input.cpp: it cannot be verified without hardware.
+// The render task drains the queue via pumpControlEvents() at the top of
+// each frame and dispatches to LiveControl — the web transport no longer
+// touches LiveControl/ShowController directly, eliminating the cross-core
+// data race. See control_queue.h for the rationale.
+//
+// Hardware wiring (httpd ws endpoint, LittleFS/SPIFFS file serving) is left
+// as `// TODO` for the same reasons as midi_input.cpp and osc_input.cpp:
+// it cannot be verified without hardware.
 //
 // Architecture:
-//   - The device's setup code calls web_input_init(live, cues, nCues,
-//     scenes, nScenes, hasMaster) once. The cues/scenes arrays are borrowed
-//     for the lifetime of the server; they back every `config` push.
-//   - web_input_handle_text_frame(json, len, now) is called per inbound
-//     WebSocket text frame. It runs the testable parser, then dispatches:
-//       cue/scene/master -> LiveControl::handle(ev, now)
-//       hello            -> send config back to this client
+//   - The device's setup code calls web_input_init(queue, cues, nCues,
+//     scenes, nScenes, hasMaster) once. The queue and cues/scenes arrays
+//     are borrowed for the lifetime of the server.
+//   - web_input_handle_text_frame(json, len) is called per inbound
+//     WebSocket text frame. It runs the testable parser, then:
+//       cue/scene/master -> queue.push(ev)
+//       hello            -> caller sends config back to this client
 //   - web_server_task() is the FreeRTOS task that owns the httpd ws server.
 //     It calls the helpers above; its body is TODO.
 //
 
 #include "web_protocol.h"
-#include "live_control.h"
+#include "control_queue.h"   // IControlEventQueue, ControlEvent (transitively)
+#include "live_control.h"    // ControlType (for parseWebCommand's out param)
 
 #include <cstdint>
 #include <cstring>
 
 // --- borrowed state set up at init time ----------------------------------
 
-static LiveControl*       g_live       = nullptr;
-static const WebCueInfo*  g_cues       = nullptr;
-static size_t             g_nCues      = 0;
-static const WebSceneInfo* g_scenes    = nullptr;
-static size_t             g_nScenes    = 0;
-static bool               g_hasMaster  = false;
+static IControlEventQueue* g_queue      = nullptr;
+static const WebCueInfo*   g_cues       = nullptr;
+static size_t              g_nCues      = 0;
+static const WebSceneInfo* g_scenes     = nullptr;
+static size_t              g_nScenes    = 0;
+static bool                g_hasMaster  = false;
 
 // TODO: add an httpd_handle_t / socket set here when the real server lands.
 // static httpd_handle_t g_server = nullptr;
 
 extern "C" {
 
-// Initialize the web input layer with the LiveControl instance it dispatches
-// into, plus the cue/scene metadata used to build `config` messages. The
-// cues/scenes arrays are borrowed (not copied); they must outlive the server.
-void web_input_init(LiveControl& live,
+// Initialize the web input layer with the control-event queue it pushes
+// to, plus the cue/scene metadata used to build `config` messages. The
+// queue and cues/scenes arrays are borrowed (not copied); they must
+// outlive the server.
+void web_input_init(IControlEventQueue& queue,
                     const WebCueInfo* cues, size_t nCues,
                     const WebSceneInfo* scenes, size_t nScenes,
                     bool hasMaster) {
-  g_live       = &live;
+  g_queue      = &queue;
   g_cues       = cues;
   g_nCues      = nCues;
   g_scenes     = scenes;
@@ -75,15 +82,14 @@ size_t web_input_build_state(const uint16_t* activeIds, size_t nActive,
   return buildStateJson(activeIds, nActive, buf, bufLen);
 }
 
-// Handle one inbound WebSocket text frame. `now` is the current show time
-// in seconds (the same clock ShowController::evaluate uses).
+// Handle one inbound WebSocket text frame.
 //
 // Returns:
-//   1  - message was a cue/scene/master command; dispatched to LiveControl
+//   1  - message was a cue/scene/master command; pushed to the queue
 //   0  - message was `hello`; caller should respond by sending `config`
 //   -1 - message was malformed or unknown; caller should ignore
-int web_input_handle_text_frame(const char* json, size_t len, float now) {
-  if (g_live == nullptr) return -1;
+int web_input_handle_text_frame(const char* json, size_t len) {
+  if (g_queue == nullptr) return -1;
 
   // Fast path: `hello` is handled here, not by parseWebCommand (the parser
   // is strict and returns false for hello, since hello isn't a ControlEvent).
@@ -98,7 +104,7 @@ int web_input_handle_text_frame(const char* json, size_t len, float now) {
     return -1;
   }
 
-  g_live->handle(ev, now);
+  g_queue->push(ev);
   return 1;
 }
 
@@ -108,8 +114,7 @@ void web_server_task() {
   // TODO: Start an ESP-IDF httpd instance with a WebSocket handler on a
   // known URI (e.g. "/ws"). For each inbound text frame:
   //
-  //   float now = currentShowTimeSeconds();
-  //   int rc = web_input_handle_text_frame(frame, len, now);
+  //   int rc = web_input_handle_text_frame(frame, len);
   //   if (rc == 0) {
   //     // hello: push config back to this client only
   //     char buf[512];
@@ -125,6 +130,12 @@ void web_server_task() {
   // The static files for the Phase-2 console bundle (index.html, app.js,
   // styles.css, vendor/) live in LittleFS/SPIFFS and are served from a
   // separate httpd URI handler that maps "/" -> "/spiffs/index.html" etc.
+  //
+  // The render task (separate from this httpd task) calls
+  //   pumpControlEvents(queue, live, t);
+  //   show.renderFrame(t);
+  // at the top of each frame. The web transport just pushes events here;
+  // it never touches LiveControl or ShowController.
 }
 
 }  // extern "C"

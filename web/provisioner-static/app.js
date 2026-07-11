@@ -1,0 +1,784 @@
+//
+// app.js — esp-glow provisioner (static editor).
+//
+// Plain ESM, no framework. Loads the WASM module from ./wasm/, manages
+// a workspace (one .show + a library of .fdef files), and renders a
+// three-pane editor: sidebar / textarea / preview+diagnostics.
+//
+// Mirrors the React version's behavior: debounced .fdef parse on every
+// edit, explicit Compile button for the .show, download/copy/drag-drop.
+//
+
+import createModule from "./wasm/provision-wasm.js";
+
+// --- tiny DOM helper ----------------------------------------------------
+
+const $ = (sel, root = document) => root.querySelector(sel);
+const el = (tag, attrs = {}, ...children) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") e.className = v;
+    else if (k === "html") e.innerHTML = v;
+    else if (k.startsWith("on") && typeof v === "function") {
+      e.addEventListener(k.slice(2).toLowerCase(), v);
+    } else if (k === "disabled" || k === "checked" || k === "selected") {
+      // Boolean attributes: only set when truthy, otherwise remove.
+      if (v) e.setAttribute(k, "");
+      else e.removeAttribute(k);
+    } else if (v !== null && v !== undefined && v !== false) {
+      e.setAttribute(k, v);
+    }
+  }
+  for (const c of children) {
+    if (c == null || c === false) continue;
+    e.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+  }
+  return e;
+};
+
+// --- capability / transport name maps (mirror fixture_profile.h) -------
+
+const CAP_NAMES = [
+  "Dimmer", "Red", "Green", "Blue", "White", "Amber", "Uv",
+  "Cyan", "Magenta", "Yellow", "Pan", "Tilt",
+  "ShutterStrobe", "Gobo", "Focus", "Zoom", "Fog", "Fan", "Generic",
+];
+const CAP_VALUES = (() => {
+  const m = {};
+  CAP_NAMES.forEach((n, i) => (m[n] = i === 18 ? 255 : i));
+  return m;
+})();
+function capNameFromValue(v) {
+  if (v === 255) return "Generic";
+  return CAP_NAMES[v] ?? "Unknown";
+}
+function transportName(v) {
+  return ["Dmx", "ArtNet", "Sacn", "Unused"][v] ?? "Unused";
+}
+
+// --- vector conversion (emscripten typed-vector → JS array) -----------
+
+function vecToArray(v) {
+  if (v == null) return [];
+  if (Array.isArray(v)) return v;
+  if (typeof v.size === "function" && typeof v.get === "function") {
+    const n = v.size();
+    const out = new Array(n);
+    for (let i = 0; i < n; i++) out[i] = v.get(i);
+    return out;
+  }
+  return Array.from(v);
+}
+function vecToUint8(v) {
+  if (v == null) return new Uint8Array(0);
+  if (v instanceof Uint8Array) return v;
+  if (typeof v.size === "function" && typeof v.get === "function") {
+    const n = v.size();
+    const out = new Uint8Array(n);
+    for (let i = 0; i < n; i++) out[i] = v.get(i);
+    return out;
+  }
+  return new Uint8Array(v);
+}
+
+// --- default workspace -------------------------------------------------
+
+const DEFAULT_WORKSPACE = {
+  show: {
+    name: "my-show.show",
+    text: `# esp-glow show definition
+# Lines starting with # are comments. Tokens are whitespace-separated.
+
+UNIVERSE 0 DMX
+UNIVERSE 1 ARTNET
+
+# Moving head on universe 0, base channel 1
+FIXTURE torrent.fdef 0 1
+POS 1.0 2.0 3.0
+ROT 0 0 0
+
+# Par fixture on universe 0, base channel 20
+FIXTURE par.fdef 0 20
+
+# 16x16 LED matrix on universe 1, starting at channel 0
+MATRIX 1 0 16 16 SERP H GRB
+`,
+  },
+  fdefs: [
+    {
+      name: "torrent.fdef",
+      text: `# 16-channel moving head
+FIXTURE Torrent F1
+FOOTPRINT 16
+HEAD
+PANRANGE 540
+TILTRANGE 270
+CAP Dimmer 0
+CAP Red 1
+CAP Green 2
+CAP Blue 3
+CAP Pan 5 6
+CAP Tilt 7 8
+CAP ShutterStrobe 10 - 8 inv
+`,
+    },
+    {
+      name: "par.fdef",
+      text: `# 5-channel RGB par
+FIXTURE Par 5
+FOOTPRINT 5
+CAP Dimmer 0
+CAP Red 1
+CAP Green 2
+CAP Blue 3
+CAP White 4
+`,
+    },
+  ],
+};
+
+// --- app state ---------------------------------------------------------
+
+const state = {
+  workspace: structuredClone(DEFAULT_WORKSPACE),
+  selection: { kind: "show" },  // {kind:"show"} | {kind:"fdef", name}
+  diagnostics: {
+    show: { ok: false, err: "Not compiled yet", bundleBytes: null, loaded: null },
+    fdefs: {},
+  },
+  wasmReady: false,
+  compiling: false,
+  module: null,
+};
+
+let parseTimer = null;
+
+// --- main entry --------------------------------------------------------
+
+async function main() {
+  try {
+    state.module = await createModule({ locateFile: (p) => "./wasm/" + p });
+    state.wasmReady = true;
+    // Initial parse of all .fdef files.
+    await reparseFdefs();
+    render();
+  } catch (e) {
+    console.error("main() failed:", e);
+    document.getElementById("app").innerHTML =
+      `<div style="padding:24px;color:#f48771;font-family:monospace">Failed to start: ${e.message ?? e}</div>`;
+  }
+}
+
+// --- operations --------------------------------------------------------
+
+async function parseFdef(text) {
+  const r = state.module.parseFixtureDef(text);
+  if (!r.ok) return { ok: false, err: r.err };
+  const capTypes = vecToArray(r.capTypes);
+  const capCoarse = vecToArray(r.capCoarse);
+  const capFine = vecToArray(r.capFine);
+  const capDefault = vecToArray(r.capDefault);
+  const capFlags = vecToArray(r.capFlags);
+  return {
+    ok: true,
+    def: {
+      name: r.name,
+      footprint: r.footprint,
+      isHead: r.isHead,
+      panRangeDeg: r.panRangeDeg,
+      tiltRangeDeg: r.tiltRangeDeg,
+      caps: capTypes.map((_, i) => ({
+        capType: capTypes[i],
+        coarse: capCoarse[i],
+        fine: capFine[i],
+        defaultValue: capDefault[i],
+        inverted: (capFlags[i] & 1) !== 0,
+      })),
+    },
+  };
+}
+
+async function compileShowNow() {
+  if (state.compiling) return;
+  state.compiling = true;
+  render();
+  try {
+    const readFile = (path) => {
+      const norm = path.replace(/^\.\//, "").replace(/^\//, "");
+      const f = state.workspace.fdefs.find((x) => x.name === norm || x.name === path);
+      return f ? f.text : "";
+    };
+    const r = state.module.compileShow(state.workspace.show.text, readFile);
+    if (!r.ok) {
+      state.diagnostics.show = { ok: false, err: r.err, bundleBytes: null, loaded: null };
+      toast("Compile failed", r.err, "err");
+      render();
+      return;
+    }
+    const bundle = vecToUint8(r.bundle);
+    const loaded = state.module.loadShow(bundle);
+    if (!loaded.ok) {
+      state.diagnostics.show = {
+        ok: false,
+        err: `Compiled OK but loader rejected: ${loaded.err}`,
+        bundleBytes: null,
+        loaded: null,
+      };
+      render();
+      return;
+    }
+    const summary = {
+      universeCount: loaded.universeCount,
+      transports: vecToArray(loaded.transports),
+      fixtureCount: loaded.fixtureCount,
+      matrixCount: loaded.matrixCount,
+      fixtures: vecToArray(loaded.fixUniverse).map((universe, i) => ({
+        universe,
+        base: vecToArray(loaded.fixBase)[i],
+        isHead: vecToArray(loaded.fixIsHead)[i],
+      })),
+      matrices: vecToArray(loaded.matWidth).map((width, i) => ({
+        width,
+        height: vecToArray(loaded.matHeight)[i],
+        startUniverse: vecToArray(loaded.matStartUniverse)[i],
+        startChannel: vecToArray(loaded.matStartChannel)[i],
+      })),
+    };
+    state.diagnostics.show = {
+      ok: true,
+      err: "",
+      bundleBytes: bundle.byteLength,
+      loaded: summary,
+    };
+    toast(
+      "Compiled",
+      `${bundle.byteLength}-byte SHW1 bundle (${summary.fixtureCount} fixtures, ${summary.matrixCount} matrices)`,
+      "ok",
+    );
+  } catch (e) {
+    toast("Compile error", String(e), "err");
+  } finally {
+    state.compiling = false;
+    render();
+  }
+}
+
+async function reparseFdefs() {
+  const entries = await Promise.all(
+    state.workspace.fdefs.map(async (f) => [f.name, await parseFdef(f.text)]),
+  );
+  for (const [name, r] of entries) {
+    state.diagnostics.fdefs[name] = r.ok
+      ? { ok: true, err: "", def: r.def }
+      : { ok: false, err: r.err };
+  }
+}
+
+// --- file operations ---------------------------------------------------
+
+function currentText() {
+  if (state.selection.kind === "show") return state.workspace.show.text;
+  const f = state.workspace.fdefs.find((x) => x.name === state.selection.name);
+  return f ? f.text : "";
+}
+function currentName() {
+  return state.selection.kind === "show"
+    ? state.workspace.show.name
+    : state.selection.name;
+}
+
+function setText(text) {
+  if (state.selection.kind === "show") {
+    state.workspace.show.text = text;
+  } else {
+    const f = state.workspace.fdefs.find((x) => x.name === state.selection.name);
+    if (f) f.text = text;
+  }
+  // Debounced re-parse of the edited .fdef.
+  if (state.selection.kind === "fdef") {
+    clearTimeout(parseTimer);
+    parseTimer = setTimeout(async () => {
+      const r = await parseFdef(currentText());
+      state.diagnostics.fdefs[state.selection.name] = r.ok
+        ? { ok: true, err: "", def: r.def }
+        : { ok: false, err: r.err };
+      render();
+    }, 250);
+  }
+}
+
+function downloadBlob(filename, mime, data) {
+  const blob = new Blob(
+    [data instanceof Uint8Array ? data : new TextEncoder().encode(data)],
+    { type: mime },
+  );
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function handleFiles(files) {
+  const arr = Array.from(files);
+  let i = 0;
+  const reader = new FileReader();
+  const next = () => {
+    if (i >= arr.length) {
+      toast("Imported", `${arr.length} file${arr.length === 1 ? "" : "s"}`, "ok");
+      render();
+      return;
+    }
+    const file = arr[i++];
+    reader.onload = () => {
+      const text = typeof reader.result === "string" ? reader.result : "";
+      const lower = file.name.toLowerCase();
+      if (lower.endsWith(".show")) {
+        state.workspace.show = { name: file.name, text };
+      } else if (lower.endsWith(".fdef")) {
+        const others = state.workspace.fdefs.filter((f) => f.name !== file.name);
+        state.workspace.fdefs = [...others, { name: file.name, text }];
+      }
+      next();
+    };
+    reader.readAsText(file);
+  };
+  next();
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("Copied", "", "ok");
+  } catch {
+    toast("Copy failed", "", "err");
+  }
+}
+
+// --- toast -------------------------------------------------------------
+
+let toastTimer = null;
+function toast(title, desc, kind = "") {
+  clearTimeout(toastTimer);
+  const t = $("#toast");
+  if (t) t.remove();
+  const node = el(
+    "div",
+    { id: "toast", class: `toast ${kind}` },
+    el("div", { class: "title" }, title),
+    desc && el("div", { class: "desc" }, desc),
+  );
+  document.body.appendChild(node);
+  toastTimer = setTimeout(() => node.remove(), 3000);
+}
+
+// --- icons (inline SVG) ------------------------------------------------
+
+const ICON = {
+  file: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`,
+  ok: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`,
+  err: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`,
+  copy: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`,
+  download: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`,
+  package: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="16.5" y1="9.4" x2="7.5" y2="4.21"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>`,
+  plus: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`,
+  upload: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`,
+  spin: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="spin"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>`,
+};
+function icon(name, extraClass = "") {
+  return el("span", { class: `icon ${extraClass}`, html: ICON[name] });
+}
+
+// --- render ------------------------------------------------------------
+
+function render() {
+  const app = $("#app");
+  app.innerHTML = "";
+  app.appendChild(renderConsole());
+}
+
+function renderConsole() {
+  return el(
+    "div",
+    { class: "console" },
+    renderTopbar(),
+    el(
+      "div",
+      { class: "body" },
+      renderSidebar(),
+      renderEditorPane(),
+      renderPreviewPane(),
+    ),
+  );
+}
+
+function renderTopbar() {
+  return el(
+    "div",
+    { class: "topbar" },
+    icon("package"),
+    el("span", { class: "title" }, "esp-glow provisioner"),
+    el(
+      "span",
+      { class: `badge ${state.wasmReady ? "badge-ok" : ""}` },
+      state.wasmReady ? "wasm ready" : "loading wasm…",
+    ),
+    el("div", { class: "spacer" }),
+    el(
+      "button",
+      {
+        class: "btn btn-primary",
+        onclick: compileShowNow,
+        disabled: state.compiling || !state.wasmReady,
+      },
+      state.compiling ? icon("spin") : icon("package"),
+      el("span", {}, "Compile"),
+    ),
+    el(
+      "button",
+      { class: "btn", onclick: () => $("#file-input").click() },
+      icon("upload"),
+      el("span", {}, "Import"),
+    ),
+    el("input", {
+      id: "file-input",
+      type: "file",
+      accept: ".show,.fdef",
+      multiple: "",
+      style: "display:none",
+      onchange: (e) => {
+        if (e.target.files.length > 0) handleFiles(e.target.files);
+        e.target.value = "";
+      },
+    }),
+  );
+}
+
+function renderSidebar() {
+  const list = el("div", { class: "sidebar-list" });
+  // Show file row
+  list.appendChild(
+    fileRow(
+      state.workspace.show.name,
+      state.selection.kind === "show",
+      "show",
+      state.diagnostics.show.ok,
+      () => (state.selection = { kind: "show" }, render()),
+      () => downloadBlob(state.workspace.show.name, "text/plain", state.workspace.show.text),
+      () => copyText(state.workspace.show.text),
+      null,
+    ),
+  );
+  // Separator + section header
+  list.appendChild(el("div", { class: "sidebar-section" }, "Fixture library"));
+  // Fdef rows
+  for (const f of state.workspace.fdefs) {
+    const d = state.diagnostics.fdefs[f.name];
+    list.appendChild(
+      fileRow(
+        f.name,
+        state.selection.kind === "fdef" && state.selection.name === f.name,
+        "fdef",
+        d?.ok,
+        () => (state.selection = { kind: "fdef", name: f.name }, render()),
+        () => downloadBlob(f.name, "text/plain", f.text),
+        () => copyText(f.text),
+        () => {
+          state.workspace.fdefs = state.workspace.fdefs.filter((x) => x.name !== f.name);
+          if (state.selection.kind === "fdef" && state.selection.name === f.name) {
+            state.selection = { kind: "show" };
+          }
+          render();
+        },
+      ),
+    );
+  }
+  if (state.workspace.fdefs.length === 0) {
+    list.appendChild(
+      el("div", { style: "padding: 8px 12px; color: var(--text-faint); font-style: italic;" }, "No fixtures. Click + to add one."),
+    );
+  }
+
+  const footer = el("div", { class: "sidebar-footer" });
+  if (state.diagnostics.show.ok && state.diagnostics.show.bundleBytes != null) {
+    footer.appendChild(el("span", { class: "ok" }, `Last bundle: ${state.diagnostics.show.bundleBytes} bytes`));
+  } else {
+    footer.appendChild(el("span", {}, "Click Compile to build the bundle."));
+  }
+
+  return el(
+    "div",
+    { class: "sidebar" },
+    el(
+      "div",
+      { class: "sidebar-header" },
+      el("span", { class: "label" }, "Files"),
+      el(
+        "button",
+        {
+          class: "btn btn-icon",
+          title: "New .fdef",
+          onclick: () => {
+            const name = `fixture-${state.workspace.fdefs.length + 1}.fdef`;
+            state.workspace.fdefs.push({
+              name,
+              text: "FIXTURE New Fixture\nFOOTPRINT 1\nCAP Dimmer 0\n",
+            });
+            state.selection = { kind: "fdef", name };
+            render();
+          },
+        },
+        icon("plus"),
+      ),
+    ),
+    list,
+    footer,
+  );
+}
+
+function fileRow(name, active, badge, ok, onClick, onDownload, onCopy, onDelete) {
+  return el(
+    "div",
+    { class: `file-row ${active ? "active" : ""}`, onclick: onClick },
+    el("span", { class: "file-icon", html: ICON.file }),
+    el("span", { class: "file-name", title: name }, name),
+    ok === true && el("span", { class: "status-icon ok", html: ICON.ok }),
+    ok === false && el("span", { class: "status-icon err", html: ICON.err }),
+    el(
+      "span",
+      { class: "actions" },
+      el("button", { title: "Copy", onclick: (e) => { e.stopPropagation(); onCopy(); } }, icon("copy")),
+      el("button", { title: "Download", onclick: (e) => { e.stopPropagation(); onDownload(); } }, icon("download")),
+      onDelete && el("button", { class: "danger", title: "Delete", onclick: (e) => { e.stopPropagation(); onDelete(); } }, "×"),
+    ),
+    el("span", { class: "badge" }, badge),
+  );
+}
+
+function renderEditorPane() {
+  const header = el(
+    "div",
+    { class: "editor-header" },
+    el("span", { class: "file-icon", html: ICON.file }),
+    el("span", {}, currentName()),
+    el("span", { class: "badge" }, state.selection.kind === "show" ? ".show" : ".fdef"),
+    el("div", { class: "spacer" }),
+    el(
+      "div",
+      { class: "actions" },
+      el("button", { title: "Copy contents", onclick: () => copyText(currentText()) }, icon("copy")),
+      el(
+        "button",
+        {
+          title: "Download file",
+          onclick: () => {
+            if (state.selection.kind === "show") {
+              downloadBlob(state.workspace.show.name, "text/plain", state.workspace.show.text);
+            } else {
+              const f = state.workspace.fdefs.find((x) => x.name === state.selection.name);
+              if (f) downloadBlob(f.name, "text/plain", f.text);
+            }
+          },
+        },
+        icon("download"),
+      ),
+    ),
+  );
+  const textarea = el("textarea", {
+    class: "editor-textarea",
+    spellcheck: "false",
+    oninput: (e) => setText(e.target.value),
+  });
+  textarea.value = currentText();
+  return el("div", { class: "editor-pane" }, header, textarea);
+}
+
+function renderPreviewPane() {
+  const activeTab = state._tab ?? "preview";
+  const tabBtn = (name, label) =>
+    el(
+      "button",
+      {
+        class: `tab ${activeTab === name ? "active" : ""}`,
+        onclick: () => { state._tab = name; render(); },
+      },
+      label,
+    );
+
+  const panel = el("div", { class: "tab-panel" });
+  if (activeTab === "preview") {
+    panel.appendChild(renderPreview());
+  } else {
+    panel.appendChild(renderDiagnostics());
+  }
+
+  const footer = el("div", { class: "preview-footer" });
+  footer.appendChild(
+    el(
+      "button",
+      {
+        class: "btn btn-primary",
+        disabled: !state.wasmReady,
+        onclick: async () => {
+          const readFile = (path) => {
+            const norm = path.replace(/^\.\//, "").replace(/^\//, "");
+            const f = state.workspace.fdefs.find((x) => x.name === norm || x.name === path);
+            return f ? f.text : "";
+          };
+          const r = state.module.compileShow(state.workspace.show.text, readFile);
+          if (!r.ok) {
+            toast("Compile failed", r.err, "err");
+            return;
+          }
+          const bundle = vecToUint8(r.bundle);
+          const baseName = state.workspace.show.name.replace(/\.show$/i, "");
+          downloadBlob(`${baseName}.shw1`, "application/octet-stream", bundle);
+        },
+      },
+      icon("download"),
+      el("span", {}, "Download compiled .shw1"),
+    ),
+  );
+  if (state.diagnostics.show.ok && state.diagnostics.show.bundleBytes != null) {
+    footer.appendChild(
+      el("div", { class: "bundle-info" }, `${state.diagnostics.show.bundleBytes}-byte SHW1 bundle ready`),
+    );
+  }
+
+  return el(
+    "div",
+    { class: "preview-pane" },
+    el("div", { class: "tabs" }, tabBtn("preview", "Preview"), tabBtn("diagnostics", "Diagnostics")),
+    panel,
+    footer,
+  );
+}
+
+function renderPreview() {
+  if (state.selection.kind === "show") {
+    const d = state.diagnostics.show;
+    if (!d.ok) {
+      return errorBlock("Show not compiled", d.err, "Click Compile in the top bar.");
+    }
+    const s = d.loaded;
+    const root = el("div", {});
+    root.appendChild(section("Bundle", [el("div", {}, `${d.bundleBytes} bytes SHW1`)]));
+    root.appendChild(
+      section(`Universes (${s.universeCount})`, s.transports.map((t, i) =>
+        row(`[${i}]`, transportName(t)),
+      )),
+    );
+    root.appendChild(
+      section(`Fixtures (${s.fixtureCount})`, s.fixtures.length === 0
+        ? [el("div", { class: "preview-empty" }, "None")]
+        : s.fixtures.map((f, i) => row(`[${i}]`, `u${f.universe} ch${f.base}${f.isHead ? " (head)" : ""}`)),
+      ),
+    );
+    root.appendChild(
+      section(`Matrices (${s.matrixCount})`, s.matrices.length === 0
+        ? [el("div", { class: "preview-empty" }, "None")]
+        : s.matrices.map((m, i) => row(`[${i}]`, `${m.width}×${m.height} @ u${m.startUniverse} ch${m.startChannel}`)),
+      ),
+    );
+    return root;
+  }
+  // .fdef preview
+  const d = state.diagnostics.fdefs[state.selection.name];
+  if (!d || !d.ok || !d.def) {
+    return errorBlock("Parse error", d?.err ?? "Not parsed yet", "");
+  }
+  const def = d.def;
+  const root = el("div", {});
+  root.appendChild(section("Fixture", [
+    el("div", {}, def.name),
+    el("div", { style: "color: var(--text-dim);" }, `${def.footprint} channels${def.isHead ? " · moving head" : ""}`),
+    def.isHead && el("div", { style: "color: var(--text-dim);" }, `pan ${def.panRangeDeg}° · tilt ${def.tiltRangeDeg}°`),
+  ]));
+  root.appendChild(
+    section(`Capabilities (${def.caps.length})`, def.caps.length === 0
+      ? [el("div", { class: "preview-empty" }, "No caps")]
+      : def.caps.map((c) => row(
+          capNameFromValue(c.capType),
+          `ch${c.coarse}${c.fine !== 0xff ? `+${c.fine}` : ""}${c.defaultValue !== 0 ? ` def=${c.defaultValue}` : ""}${c.inverted ? " inv" : ""}`,
+        )),
+    ),
+  );
+  return root;
+}
+
+function renderDiagnostics() {
+  const root = el("div", {});
+  root.appendChild(diagRow(
+    state.workspace.show.name,
+    state.diagnostics.show.ok,
+    state.diagnostics.show.err,
+    state.diagnostics.show.ok && state.diagnostics.show.bundleBytes != null
+      ? `${state.diagnostics.show.bundleBytes}-byte bundle`
+      : null,
+  ));
+  for (const f of state.workspace.fdefs) {
+    const d = state.diagnostics.fdefs[f.name];
+    root.appendChild(diagRow(
+      f.name,
+      d?.ok,
+      d?.err,
+      d?.ok ? `${d.def.caps.length} caps, footprint ${d.def.footprint}` : null,
+    ));
+  }
+  return root;
+}
+
+function section(title, children) {
+  return el(
+    "div",
+    { class: "preview-section" },
+    el("div", { class: "section-title" }, title),
+    el("div", { class: "section-content" }, ...children),
+  );
+}
+function row(key, val) {
+  return el("div", { class: "preview-row" }, el("span", { class: "key" }, key), el("span", { class: "val" }, val));
+}
+function errorBlock(title, detail, hint) {
+  return el(
+    "div",
+    { class: "preview-error" },
+    el("span", { class: "icon err", html: ICON.err }),
+    el(
+      "div",
+      {},
+      el("div", { class: "title" }, title),
+      el("div", { class: "detail" }, detail),
+      hint && el("div", { class: "hint" }, hint),
+    ),
+  );
+}
+function diagRow(label, ok, err, extra) {
+  return el(
+    "div",
+    { class: "diag-row" },
+    ok === true && el("span", { class: "icon ok", html: ICON.ok }),
+    ok === false && el("span", { class: "icon err", html: ICON.err }),
+    ok === undefined && el("span", { class: "icon" }),
+    el(
+      "div",
+      {},
+      el("div", { class: "label" }, label),
+      ok === false && err && el("div", { class: "detail" }, err),
+      ok === true && extra && el("div", { class: "extra" }, extra),
+    ),
+  );
+}
+
+// --- drag-drop on the whole window ------------------------------------
+
+window.addEventListener("dragover", (e) => e.preventDefault());
+window.addEventListener("drop", (e) => {
+  e.preventDefault();
+  if (e.dataTransfer.files.length > 0) handleFiles(e.dataTransfer.files);
+});
+
+// --- go --------------------------------------------------------------
+
+main();
