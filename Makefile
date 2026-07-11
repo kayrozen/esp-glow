@@ -107,7 +107,15 @@ PACING_TARGET  = test_render_pacing
 $(PACING_TARGET): $(PACING_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(PACING_OBJECTS) -o $(PACING_TARGET) -lm
 
-test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET) $(LIVE_CONTROL_TARGET) $(WEB_PROTOCOL_TARGET) $(CONTROL_QUEUE_TARGET) $(PACING_TARGET)
+# --- test_apply_loaded_show: F3 patch-routing glue (host-tested) ---
+APPLY_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp show.cpp show_bundle.cpp \
+                pixel_matrix.cpp apply_loaded_show.cpp test_apply_loaded_show.cpp
+APPLY_OBJECTS = $(APPLY_SOURCES:.cpp=.o)
+APPLY_TARGET  = test_apply_loaded_show
+$(APPLY_TARGET): $(APPLY_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(APPLY_OBJECTS) -o $(APPLY_TARGET) -lm
+
+test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET) $(LIVE_CONTROL_TARGET) $(WEB_PROTOCOL_TARGET) $(CONTROL_QUEUE_TARGET) $(PACING_TARGET) $(APPLY_TARGET)
 	./$(AIM_TARGET)
 	./$(FP_TARGET)
 	./$(SHOW_TARGET)
@@ -119,6 +127,7 @@ test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL
 	./$(WEB_PROTOCOL_TARGET)
 	./$(CONTROL_QUEUE_TARGET)
 	./$(PACING_TARGET)
+	./$(APPLY_TARGET)
 
 # Clean build artifacts
 clean:

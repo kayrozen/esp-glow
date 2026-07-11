@@ -41,6 +41,8 @@ idf_component_register(
         ${GLOW_ROOT}/show_bundle.cpp
         # F1: host-tested render-pacing math
         ${GLOW_ROOT}/render_pacing.cpp
+        # F3: host-tested patch routing from a LoadedShow
+        ${GLOW_ROOT}/apply_loaded_show.cpp
         # device-only DMX sink (#ifdef ESP_PLATFORM guarded; filled in F1)
         ${GLOW_ROOT}/dmx_sink.cpp
         # device-only Art-Net sink (#ifdef ESP_PLATFORM guarded; filled in F2)
