@@ -20,6 +20,12 @@ SHOW_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp show
 SHOW_OBJECTS = $(SHOW_SOURCES:.cpp=.o)
 SHOW_TARGET = test_show
 
+# --- test_effects: oscillator/color/effects engine tests ---
+EFFECTS_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp show.cpp \
+                   oscillator.cpp color.cpp effects.cpp test_effects.cpp
+EFFECTS_OBJECTS = $(EFFECTS_SOURCES:.cpp=.o)
+EFFECTS_TARGET  = test_effects
+
 $(AIM_TARGET): $(AIM_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(AIM_OBJECTS) -o $(AIM_TARGET) -lm
 
@@ -29,19 +35,24 @@ $(FP_TARGET): $(FP_OBJECTS)
 $(SHOW_TARGET): $(SHOW_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(SHOW_OBJECTS) -o $(SHOW_TARGET) -lm
 
+$(EFFECTS_TARGET): $(EFFECTS_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(EFFECTS_OBJECTS) -o $(EFFECTS_TARGET) -lm
+
 # Compile object files
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Run tests
-test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET)
+test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET)
 	./$(AIM_TARGET)
 	./$(FP_TARGET)
 	./$(SHOW_TARGET)
+	./$(EFFECTS_TARGET)
 
 # Clean build artifacts
 clean:
-	rm -f $(AIM_OBJECTS) $(AIM_TARGET) $(FP_OBJECTS) $(FP_TARGET) $(SHOW_OBJECTS) $(SHOW_TARGET)
+	rm -f $(AIM_OBJECTS) $(AIM_TARGET) $(FP_OBJECTS) $(FP_TARGET) $(SHOW_OBJECTS) $(SHOW_TARGET) \
+	      $(EFFECTS_OBJECTS) $(EFFECTS_TARGET)
 
 # Rebuild
 rebuild: clean test
