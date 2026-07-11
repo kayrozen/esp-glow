@@ -26,6 +26,12 @@ EFFECTS_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp s
 EFFECTS_OBJECTS = $(EFFECTS_SOURCES:.cpp=.o)
 EFFECTS_TARGET  = test_effects
 
+# --- test_show_control: show control layer tests ---
+SHOW_CONTROL_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp show.cpp \
+                        show_control.cpp test_show_control.cpp
+SHOW_CONTROL_OBJECTS = $(SHOW_CONTROL_SOURCES:.cpp=.o)
+SHOW_CONTROL_TARGET  = test_show_control
+
 $(AIM_TARGET): $(AIM_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(AIM_OBJECTS) -o $(AIM_TARGET) -lm
 
@@ -38,21 +44,25 @@ $(SHOW_TARGET): $(SHOW_OBJECTS)
 $(EFFECTS_TARGET): $(EFFECTS_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(EFFECTS_OBJECTS) -o $(EFFECTS_TARGET) -lm
 
+$(SHOW_CONTROL_TARGET): $(SHOW_CONTROL_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(SHOW_CONTROL_OBJECTS) -o $(SHOW_CONTROL_TARGET) -lm
+
 # Compile object files
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Run tests
-test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET)
+test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET)
 	./$(AIM_TARGET)
 	./$(FP_TARGET)
 	./$(SHOW_TARGET)
 	./$(EFFECTS_TARGET)
+	./$(SHOW_CONTROL_TARGET)
 
 # Clean build artifacts
 clean:
 	rm -f $(AIM_OBJECTS) $(AIM_TARGET) $(FP_OBJECTS) $(FP_TARGET) $(SHOW_OBJECTS) $(SHOW_TARGET) \
-	      $(EFFECTS_OBJECTS) $(EFFECTS_TARGET)
+	      $(EFFECTS_OBJECTS) $(EFFECTS_TARGET) $(SHOW_CONTROL_OBJECTS) $(SHOW_CONTROL_TARGET)
 
 # Rebuild
 rebuild: clean test
