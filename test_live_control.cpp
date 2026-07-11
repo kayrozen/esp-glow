@@ -339,6 +339,19 @@ void test_midi_to_dispatch() {
   delete effects[0];
 }
 
+void test_midi_button_value_zeroed() {
+  TEST("MIDI parse: button events zero out.value");
+  ControlEvent ev;
+  ev.value = 42.0f;
+  uint8_t noteOn[] = {0x90, 60, 100};
+  CHECK(parseMidi(noteOn, 3, ev));
+  CHECK(ev.value == 0.0f);
+  ev.value = 42.0f;
+  uint8_t noteOff[] = {0x80, 60, 0};
+  CHECK(parseMidi(noteOff, 3, ev));
+  CHECK(ev.value == 0.0f);
+}
+
 int main() {
   test_cue_flash();
   test_cue_toggle();
@@ -354,6 +367,7 @@ int main() {
   test_midi_parse_short_msg();
   test_midi_parse_unsupported();
   test_midi_to_dispatch();
+  test_midi_button_value_zeroed();
 
   if (g_failCount == 0) {
     printf("\nAll tests passed.\n");

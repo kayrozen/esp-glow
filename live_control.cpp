@@ -12,11 +12,13 @@ bool parseMidi(const uint8_t* msg, size_t len, ControlEvent& out) {
     out.type = ControlType::Button;
     out.id = data1;
     out.pressed = (data2 > 0);
+    out.value = 0.0f;
     return true;
   } else if (status == 0x80) {
     out.type = ControlType::Button;
     out.id = data1;
     out.pressed = false;
+    out.value = 0.0f;
     return true;
   } else if (status == 0xB0) {
     out.type = ControlType::Fader;
