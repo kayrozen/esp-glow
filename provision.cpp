@@ -65,10 +65,8 @@ bool parseFixtureDef(const std::string& text, FixtureDef& out, std::string& err)
 
   std::istringstream iss(text);
   std::string line;
-  int lineNum = 0;
 
   while (std::getline(iss, line)) {
-    lineNum++;
     stripComments(line);
 
     auto tokens = tokenize(line);
@@ -205,6 +203,7 @@ bool parseFixtureDef(const std::string& text, FixtureDef& out, std::string& err)
 std::vector<uint8_t> encodeProfile(const FixtureDef& def) {
   ProfileBuilder builder;
   builder.setFootprint(def.footprint);
+  builder.name = def.name;
   for (const auto& cm : def.caps) {
     bool inv = (cm.flags & 1) != 0;
     builder.add(cm.cap, cm.coarse, cm.fine, cm.defaultValue, inv);

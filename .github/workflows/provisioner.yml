@@ -1,0 +1,113 @@
+# Provisioning editor — build WASM + deploy static site to GitHub Pages.
+#
+# Two jobs:
+#   1. build-wasm: installs emsdk, compiles provision.cpp + wasm-glue.cpp
+#      to provision-wasm.{js,wasm}, runs the 14 C++ tests under Node to
+#      verify the WASM build matches the host build, uploads the artifacts.
+#   2. deploy-pages: downloads the WASM artifacts, builds the static
+#      editor bundle (web/provisioner-static/), deploys to GitHub Pages.
+#
+# The editor is plain HTML/JS/CSS — no build step. The WASM artifacts are
+# copied alongside it. The whole thing is served as static files.
+#
+# Trigger: push to main touching web/provision-wasm/**, web/provisioner-static/**,
+# provision.cpp, provision.h, fixture_profile.*, profile_encoder.*, show_bundle.*,
+# or the workflow itself. Also manual dispatch.
+
+name: Build & deploy provisioner
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/provision-wasm/**"
+      - "web/provisioner-static/**"
+      - "provision.cpp"
+      - "provision.h"
+      - "fixture_profile.*"
+      - "profile_encoder.*"
+      - "show_bundle.*"
+      - "vec_math.*"
+      - ".github/workflows/provisioner.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment.
+concurrency:
+  group: "provisioner-pages"
+  cancel-in-progress: true
+
+jobs:
+  build-wasm:
+    name: Build WASM + run tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up emsdk
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+          actions-cache-folder: emsdk-cache
+
+      - name: Verify emcc
+        run: emcc --version | head -2
+
+      - name: Build + run WASM tests (14 C++ tests under Node)
+        run: bash web/provision-wasm/build-wasm.sh test
+
+      - name: Build editor WASM
+        run: bash web/provision-wasm/build-wasm.sh editor
+
+      - name: Run editor smoke tests
+        run: node web/provision-wasm/smoke-test-wasm.mjs
+
+      - name: Upload WASM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: provision-wasm
+          path: |
+            web/provision-wasm/provision-wasm.js
+            web/provision-wasm/provision-wasm.wasm
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy-pages:
+    name: Deploy to GitHub Pages
+    needs: build-wasm
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download WASM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: provision-wasm
+          path: web/provisioner-static/wasm/
+
+      - name: Build static site
+        run: |
+          # The static site is web/provisioner-static/ — plain HTML/JS/CSS,
+          # plus the WASM artifacts we just downloaded into wasm/.
+          # No build step; just verify the structure.
+          ls -la web/provisioner-static/
+          ls -la web/provisioner-static/wasm/
+          test -f web/provisioner-static/index.html
+          test -f web/provisioner-static/wasm/provision-wasm.js
+          test -f web/provisioner-static/wasm/provision-wasm.wasm
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/provisioner-static
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
