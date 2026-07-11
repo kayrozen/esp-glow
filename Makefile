@@ -38,6 +38,12 @@ PIXEL_MATRIX_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.
 PIXEL_MATRIX_OBJECTS = $(PIXEL_MATRIX_SOURCES:.cpp=.o)
 PIXEL_MATRIX_TARGET  = test_pixel_matrix
 
+# --- test_provision: provisioning compiler/loader tests ---
+PROVISION_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp \
+                    color.cpp pixel_matrix.cpp provision.cpp show_bundle.cpp test_provision.cpp
+PROVISION_OBJECTS = $(PROVISION_SOURCES:.cpp=.o)
+PROVISION_TARGET  = test_provision
+
 $(AIM_TARGET): $(AIM_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(AIM_OBJECTS) -o $(AIM_TARGET) -lm
 
@@ -56,24 +62,28 @@ $(SHOW_CONTROL_TARGET): $(SHOW_CONTROL_OBJECTS)
 $(PIXEL_MATRIX_TARGET): $(PIXEL_MATRIX_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(PIXEL_MATRIX_OBJECTS) -o $(PIXEL_MATRIX_TARGET) -lm
 
+$(PROVISION_TARGET): $(PROVISION_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(PROVISION_OBJECTS) -o $(PROVISION_TARGET) -lm
+
 # Compile object files
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Run tests
-test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET)
+test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET)
 	./$(AIM_TARGET)
 	./$(FP_TARGET)
 	./$(SHOW_TARGET)
 	./$(EFFECTS_TARGET)
 	./$(SHOW_CONTROL_TARGET)
 	./$(PIXEL_MATRIX_TARGET)
+	./$(PROVISION_TARGET)
 
 # Clean build artifacts
 clean:
 	rm -f $(AIM_OBJECTS) $(AIM_TARGET) $(FP_OBJECTS) $(FP_TARGET) $(SHOW_OBJECTS) $(SHOW_TARGET) \
 	      $(EFFECTS_OBJECTS) $(EFFECTS_TARGET) $(SHOW_CONTROL_OBJECTS) $(SHOW_CONTROL_TARGET) \
-	      $(PIXEL_MATRIX_OBJECTS) $(PIXEL_MATRIX_TARGET)
+	      $(PIXEL_MATRIX_OBJECTS) $(PIXEL_MATRIX_TARGET) $(PROVISION_OBJECTS) $(PROVISION_TARGET)
 
 # Rebuild
 rebuild: clean test
