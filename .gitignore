@@ -69,9 +69,10 @@ vcpkg_installed/
 Testing/
 .cache/
 
-# Test executables
+# Test executables (but not Python test files)
 test_*
 !test_*.cpp
+!test_*.py
 
 # WASM build artifacts (rebuilt in CI, not committed)
 web/provision-wasm/build/

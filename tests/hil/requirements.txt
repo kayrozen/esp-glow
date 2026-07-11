@@ -1,0 +1,9 @@
+# HIL Test Harness Dependencies
+
+pytest>=7.0
+pyserial>=3.5
+websocket-client>=1.5
+
+# Optional but recommended for better output
+pytest-timeout>=2.1
+pytest-html>=3.1
