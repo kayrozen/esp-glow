@@ -1,0 +1,513 @@
+From 5f1dd5b3397047b499ca7216368efdcbdf0ae0f2 Mon Sep 17 00:00:00 2001
+From: esp-glow firmware <firmware@esp-glow.local>
+Date: Sat, 11 Jul 2026 13:35:24 +0000
+Subject: [PATCH] F0: ESP-IDF project scaffold + LED blink bring-up
+
+- firmware/ ESP-IDF project: CMakeLists, partitions.csv (nvs/ota_0/ota_1/littlefs/coredump), sdkconfig.defaults (octal PSRAM, -fno-exceptions/-fno-rtti enforced in glow_core, WiFi/lwIP/WS, OTA rollback, watchdog, core affinity)
+- glow_core component wraps existing host-tested runtime modules for device build
+- led_status reusable blinker task
+- main.cpp app_main prints banner (chip/flash/PSRAM) and blinks LED slowly
+- README_FIRMWARE.md with F0 observe-guide
+
+Host make test unchanged (green).
+---
+ README_FIRMWARE.md                           | 62 +++++++++++++++++
+ firmware/CMakeLists.txt                      | 20 ++++++
+ firmware/components/glow_core/CMakeLists.txt | 58 ++++++++++++++++
+ firmware/main/CMakeLists.txt                 | 20 ++++++
+ firmware/main/led_status.cpp                 | 71 ++++++++++++++++++++
+ firmware/main/led_status.h                   | 34 ++++++++++
+ firmware/main/main.cpp                       | 65 ++++++++++++++++++
+ firmware/partitions.csv                      | 23 +++++++
+ firmware/sdkconfig.defaults                  | 70 +++++++++++++++++++
+ 9 files changed, 423 insertions(+)
+ create mode 100644 README_FIRMWARE.md
+ create mode 100644 firmware/CMakeLists.txt
+ create mode 100644 firmware/components/glow_core/CMakeLists.txt
+ create mode 100644 firmware/main/CMakeLists.txt
+ create mode 100644 firmware/main/led_status.cpp
+ create mode 100644 firmware/main/led_status.h
+ create mode 100644 firmware/main/main.cpp
+ create mode 100644 firmware/partitions.csv
+ create mode 100644 firmware/sdkconfig.defaults
+
+diff --git a/README_FIRMWARE.md b/README_FIRMWARE.md
+new file mode 100644
+index 0000000..c32351f
+--- /dev/null
++++ b/README_FIRMWARE.md
+@@ -0,0 +1,62 @@
++# esp-glow Firmware (ESP32-S3)
++
++This is the ESP-IDF application that runs the host-tested `esp-glow` core on an
++ESP32-S3 board and drives real DMX / Art-Net fixtures, pixel matrices, and
++web/MIDI/OSC inputs.
++
++The host-tested core (`make test` at the repo root) is unchanged: every pure
++piece of firmware logic is extracted into a host-tested helper so the green
++`make test` gate keeps meaning something even after the firmware exists.
++
++> **Validation is on hardware.** No agent can close the hardware loop for you.
++> Each phase below states what you should observe on the board to call it done.
++
++## Project layout
++
++```
++firmware/
++  CMakeLists.txt                 top-level ESP-IDF project
++  partitions.csv                 nvs / ota_0 / ota_1 / littlefs / coredump
++  sdkconfig.defaults             octal PSRAM, -fno-exceptions/-fno-rtti, WiFi, lwIP
++  main/
++    CMakeLists.txt               app_main + per-phase modules
++    main.cpp                     app_main() — grown phase by phase
++    led_status.{h,cpp}           status LED blinker (the one feedback pre-serial)
++    console/                     Preact web console (F4), served from LittleFS
++  components/
++    glow_core/CMakeLists.txt     wraps the repo-root runtime modules as a component
++```
++
++## Build & flash (after every phase)
++
++```bash
++cd firmware
++idf.py set-target esp32s3      # first time only
++idf.py build
++idf.py flash monitor
++```
++
++`idf.py menuconfig` lets you override the status LED GPIO and board-specific
++options. The defaults target an ESP32-S3 with 8 MB flash + octal PSRAM; for
++16 MB boards, enlarge `ota_0`/`ota_1`/`littlefs` in `partitions.csv`.
++
++## Phases
++
++### Phase F0 — Project scaffold + bring-up  (GLM)
++
++Stand up the ESP-IDF project: `CMakeLists.txt`, partition table, `sdkconfig`
++defaults (PSRAM, C++ flags, WebSocket support), the runtime modules as a
++component. Get it building, flashing, and printing over serial. Blink an LED.
++
++Files added:
++- `firmware/CMakeLists.txt`, `firmware/partitions.csv`, `firmware/sdkconfig.defaults`
++- `firmware/main/{CMakeLists.txt,main.cpp,led_status.h,led_status.cpp}`
++- `firmware/components/glow_core/CMakeLists.txt` (existing runtime modules only)
++
++**You observe:** `idf.py flash monitor` prints the esp-glow banner (chip rev,
++flash size, PSRAM enabled, GPIO); the status LED blinks slowly at ~1 Hz.
++
++If you see that, the toolchain, PSRAM, partition table and `-fno-exceptions
++-fno-rtti` C++ flags are all good, and every later phase has a foundation.
++
++---
+diff --git a/firmware/CMakeLists.txt b/firmware/CMakeLists.txt
+new file mode 100644
+index 0000000..4a3fa66
+--- /dev/null
++++ b/firmware/CMakeLists.txt
+@@ -0,0 +1,20 @@
++# ESP-IDF project for esp-glow on ESP32-S3.
++#
++# Build:   idf.py build
++# Flash:   idf.py flash monitor
++#
++# The runtime lighting modules live at the repo root and are built as the
++# `glow_core` component (see components/glow_core/CMakeLists.txt). Device-only
++# transports (dmx_sink / artnet_sink / midi_input / osc_input / web_input) are
++# guarded by `#ifdef ESP_PLATFORM` so the same sources compile clean on host
++# (`make test`) and on the device.
++#
++# Target: ESP32-S3 with octal PSRAM. See sdkconfig.defaults for the pin/PSRAM
++# assumptions; adjust sdkconfig for your specific board.
++
++# Minimum ESP-IDF that supports the component manager + octal PSRAM.
++cmake_minimum_required(VERSION 3.16)
++
++include($ENV{IDF_PATH}/tools/cmake/project.cmake)
++
++project(esp-glow)
+diff --git a/firmware/components/glow_core/CMakeLists.txt b/firmware/components/glow_core/CMakeLists.txt
+new file mode 100644
+index 0000000..33948e4
+--- /dev/null
++++ b/firmware/components/glow_core/CMakeLists.txt
+@@ -0,0 +1,58 @@
++# `glow_core` ESP-IDF component.
++#
++# Wraps the host-tested runtime modules (living at the repo root) so they build
++# inside the ESP-IDF firmware project. The same .cpp files also build under
++# `make test` on the host; device-only transports are guarded by
++# `#ifdef ESP_PLATFORM` and compile to nothing on host.
++#
++# Modules NOT included here (host-only):
++#   provision.cpp / profile_encoder.cpp (PC compiler toolchain, provision_main)
++#   test_*.cpp                      (host test harness)
++#
++# -fno-exceptions -fno-rtti are enforced here to match the host build.
++#
++# F0 scope: register the EXISTING runtime modules only, so the toolchain
++# (C++ flags, PSRAM, component wrapping) is de-risked before any device driver
++# is written. Later phases append new sources to this list:
++#   F1: render_pacing.cpp, dmx_sink.cpp (already listed? no — added in F1)
++#   F3: apply_loaded_show.cpp
++#   F4: midi_parser.cpp, osc_parser.cpp, web_protocol.cpp, web_input_handler.cpp,
++#       live_control.cpp, midi_input.cpp, osc_input.cpp, web_input.cpp
++
++set(GLOW_ROOT ${CMAKE_CURRENT_LIST_DIR}/../../..)
++
++idf_component_register(
++    SRCS
++        # geometry / math
++        ${GLOW_ROOT}/vec_math.cpp
++        ${GLOW_ROOT}/aim.cpp
++        # fixture profiles
++        ${GLOW_ROOT}/fixture_profile.cpp
++        # show engine + effects
++        ${GLOW_ROOT}/show.cpp
++        ${GLOW_ROOT}/oscillator.cpp
++        ${GLOW_ROOT}/color.cpp
++        ${GLOW_ROOT}/effects.cpp
++        ${GLOW_ROOT}/show_control.cpp
++        # pixel matrices
++        ${GLOW_ROOT}/pixel_matrix.cpp
++        ${GLOW_ROOT}/pixel_patterns.cpp
++        # bundle loader
++        ${GLOW_ROOT}/show_bundle.cpp
++        # device-only DMX sink (#ifdef ESP_PLATFORM guarded; filled in F1)
++        ${GLOW_ROOT}/dmx_sink.cpp
++        # device-only Art-Net sink (#ifdef ESP_PLATFORM guarded; filled in F2)
++        ${GLOW_ROOT}/artnet_sink.cpp
++    INCLUDE_DIRS
++        ${GLOW_ROOT}
++)
++
++# Match the host build flags: no exceptions, no RTTI, full warnings.
++target_compile_options(${COMPONENT_LIB} PRIVATE
++    -fno-exceptions
++    -fno-rtti
++    -Wall
++    -Wextra
++    -Werror
++    -std=c++17
++)
+diff --git a/firmware/main/CMakeLists.txt b/firmware/main/CMakeLists.txt
+new file mode 100644
+index 0000000..dd2de1e
+--- /dev/null
++++ b/firmware/main/CMakeLists.txt
+@@ -0,0 +1,20 @@
++# firmware/main — ESP-IDF application entry.
++#
++# app_main() lives in main.cpp. It is grown phase by phase (see README_FIRMWARE):
++#   F0: banner + LED blink
++#   F1: + DMX sink + render task (hardcoded patch)
++#   F2: + WiFi + Art-Net sink (matrices)
++#   F3: + LittleFS + load SHW1 bundle via applyLoadedShow
++#   F4: + web/MIDI/OSC inputs + console serving
++#   F5: + OTA + watchdog + safe-blackout fallback
++
++idf_component_register(
++    SRCS
++        main.cpp
++        led_status.cpp
++    INCLUDE_DIRS
++        "."
++)
++
++# Pull in the host-tested lighting core as a component dependency.
++idf_component_requires(PRIVATE glow_core)
+diff --git a/firmware/main/led_status.cpp b/firmware/main/led_status.cpp
+new file mode 100644
+index 0000000..f281ed8
+--- /dev/null
++++ b/firmware/main/led_status.cpp
+@@ -0,0 +1,71 @@
++// led_status.cpp — status LED blinker running in its own FreeRTOS task.
++//
++// Kept deliberately tiny: one task, one GPIO, a small pattern table. Later
++// phases call led_status_set() to reflect WiFi / render / OTA / error state.
++#include "led_status.h"
++
++#include <stddef.h>
++#include "freertos/FreeRTOS.h"
++#include "freertos/task.h"
++#include "driver/gpio.h"
++
++static int s_gpio = -1;
++static led_pattern_t s_pattern = LED_OFF;
++static TaskHandle_t s_task = nullptr;
++
++static void set_led(int on) {
++  if (s_gpio < 0) return;
++  gpio_set_level((gpio_num_t)s_gpio, on ? 1 : 0);
++}
++
++static void blinker_task(void*) {
++  // Each pattern: (on_ms, off_ms, on_ms, off_ms, cycle_ms). cycle_ms==0 means
++  // the pair repeats.
++  struct phase { uint16_t a, b; uint16_t cycle; };
++  static const phase table[] = {
++    [LED_OFF]          = {   0,   0, 0 },   // off
++    [LED_ON]           = {1000,   0, 0 },   // solid on
++    [LED_BLINK_SLOW]   = { 500, 500, 0 },
++    [LED_BLINK_FAST]   = { 125, 125, 0 },
++    [LED_BLINK_DOUBLE] = { 120, 120, 0 },   // handled specially below
++    [LED_ERROR]        = { 100, 100, 0 },
++  };
++
++  while (true) {
++    led_pattern_t p = s_pattern;
++    if (p == LED_OFF) { set_led(0); vTaskDelay(pdMS_TO_TICKS(200)); continue; }
++    if (p == LED_ON)  { set_led(1); vTaskDelay(pdMS_TO_TICKS(200)); continue; }
++
++    if (p == LED_BLINK_DOUBLE) {
++      set_led(1); vTaskDelay(pdMS_TO_TICKS(120));
++      set_led(0); vTaskDelay(pdMS_TO_TICKS(120));
++      set_led(1); vTaskDelay(pdMS_TO_TICKS(120));
++      set_led(0); vTaskDelay(pdMS_TO_TICKS(640));
++      continue;
++    }
++
++    const phase& ph = table[p];
++    set_led(1); vTaskDelay(pdMS_TO_TICKS(ph.a));
++    set_led(0); vTaskDelay(pdMS_TO_TICKS(ph.b));
++  }
++}
++
++void led_status_init(int gpio) {
++  s_gpio = gpio;
++  gpio_config_t io = {};
++  io.pin_bit_mask = (1ULL << gpio);
++  io.mode = GPIO_MODE_OUTPUT;
++  io.pull_up_en = GPIO_PULLUP_DISABLE;
++  io.pull_down_en = GPIO_PULLDOWN_DISABLE;
++  io.intr_type = GPIO_INTR_DISABLE;
++  gpio_config(&io);
++  set_led(0);
++
++  if (s_task == nullptr) {
++    xTaskCreate(blinker_task, "led", 1024, nullptr, tskIDLE_PRIORITY + 1, &s_task);
++  }
++}
++
++void led_status_set(led_pattern_t p) {
++  s_pattern = p;
++}
+diff --git a/firmware/main/led_status.h b/firmware/main/led_status.h
+new file mode 100644
+index 0000000..399497e
+--- /dev/null
++++ b/firmware/main/led_status.h
+@@ -0,0 +1,34 @@
++// led_status.h — reusable status LED indicator.
++//
++// A single GPIO LED is the only feedback you have before the serial console
++// comes up and before WiFi is up. Each phase of the firmware reuses this to
++// signal its state, so the bring-up progress is visible without a logic
++// analyzer.
++#pragma once
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++// LED blink patterns. Periods are in ms; the cycle repeats.
++typedef enum {
++  LED_OFF = 0,
++  LED_ON,            // solid: booted, idle
++  LED_BLINK_SLOW,    // 1 Hz: bring-up OK, waiting for show
++  LED_BLINK_FAST,    // 4 Hz: running the render loop
++  LED_BLINK_DOUBLE,  // double-pulse: WiFi connected
++  LED_ERROR,         // 5 Hz error: no bundle / corrupt / OTA fail
++} led_pattern_t;
++
++// Initialise the status LED on the given GPIO. Safe to call once from app_main.
++void led_status_init(int gpio);
++
++// Set the current pattern. The blinker runs in its own FreeRTOS task, so this
++// just updates the active pattern atomically.
++void led_status_set(led_pattern_t p);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/firmware/main/main.cpp b/firmware/main/main.cpp
+new file mode 100644
+index 0000000..4801892
+--- /dev/null
++++ b/firmware/main/main.cpp
+@@ -0,0 +1,65 @@
++// main.cpp — esp-glow firmware entry point (ESP32-S3).
++//
++// Phase F0: toolchain de-risk. Print a banner over serial and blink the status
++// LED. Every later phase extends app_main() — DMX render task (F1), WiFi +
++// Art-Net (F2), show-from-storage (F3), inputs (F4), OTA + robustness (F5).
++//
++// The host-tested core (Show, effects, geometry) lives in the `glow_core`
++// component; this file is the only place that touches ESP-IDF drivers.
++//
++// What to observe (F0):
++//   idf.py flash monitor  ->  the banner prints, the LED blinks slowly.
++//   If you see that, the toolchain, PSRAM, partition table and C++ flags are
++//   all good, and every later phase has a foundation to build on.
++
++#include <cstdio>
++#include "esp_log.h"
++#include "esp_chip_info.h"
++#include "esp_flash.h"
++#include "sdkconfig.h"
++
++#include "led_status.h"
++
++static const char* TAG = "esp-glow";
++
++// Board pin for the status LED. Override via sdkconfig if your board differs.
++#ifndef CONFIG_GLOW_STATUS_LED_GPIO
++#define GLOW_STATUS_LED_GPIO 2
++#else
++#define GLOW_STATUS_LED_GPIO CONFIG_GLOW_STATUS_LED_GPIO
++#endif
++
++extern "C" void app_main(void) {
++  // --- Banner: proves serial + chip introspection are alive. ---
++  esp_chip_info_t chip;
++  esp_chip_info(&chip);
++  uint32_t flash_size = 0;
++  esp_flash_get_size(nullptr, &flash_size);
++
++  ESP_LOGI(TAG, "");
++  ESP_LOGI(TAG, "========================================");
++  ESP_LOGI(TAG, "  esp-glow firmware  (ESP32-S3)");
++  ESP_LOGI(TAG, "  %s %s", __DATE__, __TIME__);
++  ESP_LOGI(TAG, "========================================");
++  ESP_LOGI(TAG, "chip: rev %d, cores %d, %s%s",
++           chip.revision, chip.cores,
++           (chip.features & CHIP_FEATURE_WIFI_BGN) ? "WiFi " : "",
++           (chip.features & CHIP_FEATURE_BLE) ? "BLE " : "");
++  ESP_LOGI(TAG, "flash: %lu KB", (unsigned long)(flash_size / 1024));
++#ifdef CONFIG_SPIRAM
++  ESP_LOGI(TAG, "psram:  enabled (octal=%d)", CONFIG_SPIRAM_MODE_OCT ? 1 : 0);
++#else
++  ESP_LOGI(TAG, "psram:  disabled");
++#endif
++  ESP_LOGI(TAG, "status LED on GPIO %d", GLOW_STATUS_LED_GPIO);
++  ESP_LOGI(TAG, "");
++
++  // --- LED blinker: the one piece of feedback that needs no peripherals. ---
++  led_status_init(GLOW_STATUS_LED_GPIO);
++  led_status_set(LED_BLINK_SLOW);
++
++  ESP_LOGI(TAG, "F0 bring-up complete. Waiting (later phases add DMX/WiFi/show).");
++
++  // app_main returns; FreeRTOS idle tasks take over. Later phases spawn their
++  // own tasks here before returning.
++}
+diff --git a/firmware/partitions.csv b/firmware/partitions.csv
+new file mode 100644
+index 0000000..8f81486
+--- /dev/null
++++ b/firmware/partitions.csv
+@@ -0,0 +1,23 @@
++# ESP-IDF partition table for esp-glow (ESP32-S3, 8 MB flash assumed).
++# Adjust sizes for your board's flash (see README_FIRMWARE.md).
++#
++# Layout:
++#   nvs        24 KB   non-volatile storage (WiFi creds, config)
++#   phy_init    4 KB   RF calibration
++#   otadata     8 KB   OTA slot selection
++#   ota_0      3 MB   factory application (A/B slot A)
++#   ota_1      3 MB   OTA application (A/B slot B)
++#   littlefs  ~1 MB   show bundle (.shw1) + Preact web console
++#   coredump  512 KB  panic core dumps (robustness)
++#
++# Total: ~7.6 MB, fits in 8 MB flash. For 16 MB boards, enlarge ota_0/ota_1
++# and/or littlefs.
++
++# Name,     Type, SubType,  Offset,   Size,    Flags
++nvs,        data, nvs,      0x9000,   0x6000,
++phy_init,   data, phy,      0xf000,   0x1000,
++otadata,    data, ota,      0x10000,  0x2000,
++ota_0,      app,  ota_0,    0x20000,  0x300000,
++ota_1,      app,  ota_1,    0x320000, 0x300000,
++littlefs,   data, 0x81,     0x620000, 0x100000,
++coredump,   data, coredump, 0x720000, 0x80000,
+diff --git a/firmware/sdkconfig.defaults b/firmware/sdkconfig.defaults
+new file mode 100644
+index 0000000..e558ab6
+--- /dev/null
++++ b/firmware/sdkconfig.defaults
+@@ -0,0 +1,70 @@
++# sdkconfig.defaults for esp-glow (ESP32-S3 + octal PSRAM).
++#
++# These defaults are applied at `idf.py set-target esp32s3` time. Override
++# per-board values in sdkconfig (generated) or by editing this file.
++
++# --- Target ---
++CONFIG_IDF_TARGET="esp32s3"
++
++# --- Flash & partitioning ---
++CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
++CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
++CONFIG_PARTITION_TABLE_CUSTOM=y
++CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
++CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
++
++# --- Octal PSRAM (ESP32-S3) ---
++# The pixel buffers and the loaded SHW1 bundle live in PSRAM. Octal mode gives
++# the bandwidth the render loop needs at 44 Hz with multiple universes.
++CONFIG_SPIRAM=y
++CONFIG_SPIRAM_MODE_OCT=y
++CONFIG_SPIRAM_TYPE_AUTO=y
++CONFIG_SPIRAM_SPEED_80M=y
++CONFIG_SPIRAM_USE_MALLOC=y
++CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
++CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
++CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
++
++# --- C++ runtime ---
++# The core modules were written for -fno-exceptions -fno-rtti (std::vector on
++# alloc failure aborts; that is acceptable with PSRAM available). The flags
++# themselves are enforced in components/glow_core/CMakeLists.txt via
++# target_compile_options, because sdkconfig only exposes RTTI via
++# CONFIG_COMPILER_RTTI (default off) and exceptions via
++# CONFIG_COMPILER_CXX_EXCEPTIONS (default off). We pin both off here too.
++CONFIG_COMPILER_CXX_EXCEPTIONS=n
++CONFIG_COMPILER_RTTI=n
++
++# --- WiFi (station + softAP) ---
++CONFIG_ESP_WIFI_ENABLED=y
++CONFIG_ESP_WIFI_STA_DISCONNECTED_PM=y
++CONFIG_ESP_WIFI_NVS_ENABLED=y
++CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
++
++# --- lwIP / sockets ---
++CONFIG_LWIP_TCP=y
++CONFIG_LWIP_UDP=y
++CONFIG_LWIP_SO_REUSE=y
++CONFIG_LWIP_MAX_SOCKETS=16
++
++# --- HTTP server (WebSocket endpoint + console serving in F4) ---
++CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
++CONFIG_HTTPD_MAX_URI_LEN=512
++
++# --- mbedTLS (OTA over HTTPS in F5) ---
++CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
++
++# --- OTA ---
++CONFIG_APP_ROLLBACK_ENABLE=y
++
++# --- Task watchdog (F5 robustness) ---
++CONFIG_ESP_TASK_WDT=y
++CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
++CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
++CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
++
++# --- Core affinity (WiFi/DMX coexistence) ---
++# The render task pins itself to core 1 at runtime (xTaskCreatePinnedToCore).
++# Keep WiFi/lwIP on core 0 so DMX timing on core 1 is never starved.
++CONFIG_ESP_WIFI_TASK_CORE_AFFINITY_0=y
++CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0=y
+-- 
+2.47.3
+
