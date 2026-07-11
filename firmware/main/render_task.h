@@ -20,10 +20,23 @@
 extern "C" {
 #endif
 
+// Forward declarations for C++ types used by the C interface.
+#ifdef __cplusplus
+class IControlEventQueue;
+class LiveControl;
+#else
+typedef void IControlEventQueue;
+typedef void LiveControl;
+#endif
+
 // Optional per-frame callback. Called on the render task with the current time
 // (seconds) and the Show pointer, before renderFrame. Use it to populate Raw
 // universes (writeRawUniverse) from a PixelMatrix or similar.
 typedef void (*render_pre_render_fn)(void* ctx, float t_sec, Show* show);
+
+// Optional per-frame callback. Called on the render task after renderFrame,
+// before the frame pacing sleep. Use it for state broadcasts (F5) or diagnostics.
+typedef void (*render_post_render_fn)(void* ctx, float t_sec, Show* show);
 
 struct RenderTaskConfig {
   Show*    show;            // borrowed, must outlive the task
@@ -33,6 +46,12 @@ struct RenderTaskConfig {
   UBaseType_t priority;     // default 20 (above WiFi, below ISR)
   render_pre_render_fn pre_render;  // optional, may be nullptr
   void*               pre_render_ctx;
+  render_post_render_fn post_render;  // F5: optional, may be nullptr
+  void*               post_render_ctx;
+
+  // F4: Control input queue and live control handler (optional, may be nullptr).
+  IControlEventQueue* queue;        // optional, used if non-nullptr
+  LiveControl*        live_control; // optional, used if non-nullptr
 };
 
 // Start the render task. Returns true on success. The task runs until

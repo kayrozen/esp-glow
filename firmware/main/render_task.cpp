@@ -3,8 +3,9 @@
 // Each iteration:
 //   1. read esp_timer_get_time() (monotonic us)
 //   2. glow::paceNextFrame() -> (nowSec, sleepUs, nextDeadline)  [host-tested]
-//   3. show->renderFrame(nowSec)
-//   4. vTaskDelay(sleepUs) — 0 if behind, so we immediately re-loop
+//   3. drain input queue via pumpControlEvents() (F4, optional)
+//   4. show->renderFrame(nowSec)
+//   5. vTaskDelay(sleepUs) — 0 if behind, so we immediately re-loop
 //
 // Pinned to core 1; WiFi/lwIP live on core 0 (sdkconfig) so DMX timing on
 // core 1 is never preempted by network work.
@@ -14,6 +15,11 @@
 #include "esp_timer.h"
 #include "esp_log.h"
 
+#ifdef __cplusplus
+#include "control_queue.h"
+#include "live_control.h"
+#endif
+
 static const char* TAG = "render_task";
 
 static TaskHandle_t s_task = nullptr;
@@ -22,6 +28,15 @@ static uint32_t     s_periodUs = 0;
 static volatile bool s_behind = false;
 static render_pre_render_fn s_pre_render = nullptr;
 static void*               s_pre_render_ctx = nullptr;
+static render_post_render_fn s_post_render = nullptr;
+static void*               s_post_render_ctx = nullptr;
+#ifdef __cplusplus
+static IControlEventQueue* s_queue = nullptr;
+static LiveControl*        s_live = nullptr;
+#else
+static void* s_queue = nullptr;
+static void* s_live = nullptr;
+#endif
 
 static void render_loop(void*) {
   ESP_LOGI(TAG, "render loop started on core %d (period=%lu us%s)",
@@ -40,9 +55,19 @@ static void render_loop(void*) {
     prevDeadline = r.nextDeadlineUs;
 
     if (s_show) {
+      // F4: drain input queue and dispatch to live control (if available).
+#ifdef __cplusplus
+      if (s_queue && s_live) {
+        pumpControlEvents(*s_queue, *s_live, r.nowSec);
+      }
+#endif
+
       // F2: let the caller populate Raw universes before the render+flush.
       if (s_pre_render) s_pre_render(s_pre_render_ctx, r.nowSec, s_show);
       s_show->renderFrame(r.nowSec);
+
+      // F5: let the caller broadcast state or perform diagnostics after render.
+      if (s_post_render) s_post_render(s_post_render_ctx, r.nowSec, s_show);
     }
 
     if (r.behind) {
@@ -74,6 +99,10 @@ bool render_task_start(const RenderTaskConfig* cfg) {
   s_show = cfg->show;
   s_pre_render = cfg->pre_render;
   s_pre_render_ctx = cfg->pre_render_ctx;
+  s_post_render = cfg->post_render;
+  s_post_render_ctx = cfg->post_render_ctx;
+  s_queue = cfg->queue;
+  s_live = cfg->live_control;
   uint32_t hz = cfg->targetHz ? cfg->targetHz : glow::DEFAULT_RENDER_HZ;
   s_periodUs = (hz == 0) ? glow::DEFAULT_RENDER_PERIOD_US : (1'000'000u / hz);
 

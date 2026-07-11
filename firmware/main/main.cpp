@@ -22,6 +22,7 @@
 
 #include <cstdio>
 #include <vector>
+#include <atomic>
 #include "esp_log.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
@@ -35,6 +36,7 @@
 #include "storage_manager.h"
 
 #include "show.h"
+#include "show_control.h"
 #include "effects.h"
 #include "fixture_profile.h"
 #include "dmx_sink.h"
@@ -43,6 +45,9 @@
 #include "pixel_patterns.h"
 #include "show_bundle.h"
 #include "apply_loaded_show.h"
+#include "live_control.h"
+#include "control_queue.h"
+#include "web_protocol.h"
 
 #ifdef ESP_PLATFORM
 #include "esp_dmx.h"
@@ -78,6 +83,7 @@ static const char* TAG = "esp-glow";
 
 // Globals: must outlive the render task.
 static Show         g_show;
+static ShowController g_controller;
 static DmxSink*      g_dmx = nullptr;
 static ArtNetSink*   g_artnet = nullptr;
 
@@ -92,6 +98,29 @@ struct MatrixDriver {
   }
 };
 static MatrixDriver g_md;
+
+// F4: Control layer (input queue + live control bindings).
+// The render task is the only place that mutates these.
+static IControlEventQueue* g_queue = nullptr;
+static LiveControl*        g_live = nullptr;
+
+// F5: Active cue mask (bit i = cue i active, for cues 0–31).
+// The render task updates this after each frame (release store).
+// The broadcast task reads it (acquire load) to send state updates over WS.
+static std::atomic<uint32_t> g_activeCueMask{0};
+
+// F5: Build the active-cue mask from the ShowController and store it atomically
+// (release semantics). This is called by the render task after each frame.
+// Only cues 0–31 are tracked in the bitmask; cues >= 32 are ignored.
+static void update_active_cue_mask() {
+  uint32_t mask = 0;
+  for (uint16_t cueId = 0; cueId < 32; cueId++) {
+    if (g_controller.isActive(cueId)) {
+      mask |= (1u << cueId);
+    }
+  }
+  g_activeCueMask.store(mask, std::memory_order_release);
+}
 
 // Device-side sink factory: routes Dmx -> DmxSink, ArtNet -> ArtNetSink,
 // everything else -> nullptr (universe skipped).
@@ -118,12 +147,55 @@ static void on_pre_render(void* /*ctx*/, float t, Show* show) {
   }
 }
 
+static void on_post_render(void* /*ctx*/, float /*t*/, Show* /*show*/) {
+  // F5: Update the active-cue mask for state broadcasts.
+  update_active_cue_mask();
+  // TODO: Broadcast task reads g_activeCueMask and sends state JSON over WS.
+}
+
 static FixtureProfile makeDimmerProfile() {
   FixtureProfile p{};
   p.footprint = 1;
   p.channelCount = 1;
   p.channels[0] = { Capability::Dimmer, 0, 0xFF, 0, 0 };
   return p;
+}
+
+// F4: set up the control layer (input queue + live control with bindings).
+// The bindings map MIDI/OSC/web inputs to cues/scenes.
+// This function is called once before the render task starts; bindings are
+// never mutated after this point (immutability makes transport-side reads safe).
+static void setup_control_layer() {
+  // Create the control-event queue (capacity >= 64).
+  // On device, this creates a FreeRTOS queue; on host, a mutex-guarded ring.
+#ifdef ESP_PLATFORM
+  g_queue = new FreeRtosControlEventQueue(64);
+#else
+  g_queue = new RingControlEventQueue(64);
+#endif
+
+  if (!g_queue) {
+    ESP_LOGE(TAG, "failed to create control event queue");
+    return;
+  }
+
+  // Create live control and bind inputs to cues/scenes.
+  g_live = new LiveControl(g_controller);
+  if (!g_live) {
+    ESP_LOGE(TAG, "failed to create live control");
+    return;
+  }
+
+  // TODO: Populate g_live with bindings:
+  //   g_live->bindButton(controlId, ActionKind, targetId);
+  //   g_live->bindFader(controlId, ActionKind);
+  // Example:
+  //   g_live->bindButton(0, ActionKind::CueToggle, 0);   // MIDI note 0 -> toggle cue 0
+  //   g_live->bindFader(0, ActionKind::Master);          // fader 0 -> master level
+  // The bindings array is configured once here and never mutated after
+  // this function returns.
+
+  ESP_LOGI(TAG, "F4: control layer initialized (queue + live control)");
 }
 
 // F1/F2 fallback: hardcoded dimmer + 16x8 rainbow matrix. Used when no bundle.
@@ -196,7 +268,7 @@ extern "C" void app_main(void) {
   esp_flash_get_size(nullptr, &flash_size);
   ESP_LOGI(TAG, "");
   ESP_LOGI(TAG, "========================================");
-  ESP_LOGI(TAG, "  esp-glow firmware  (ESP32-S3)  F3");
+  ESP_LOGI(TAG, "  esp-glow firmware  (ESP32-S3)  F4");
   ESP_LOGI(TAG, "  %s %s", __DATE__, __TIME__);
   ESP_LOGI(TAG, "========================================");
   ESP_LOGI(TAG, "chip: rev %d, cores %d", chip.revision, chip.cores);
@@ -243,15 +315,22 @@ extern "C" void app_main(void) {
     setup_hardcoded_fallback();
   }
 
-  // --- Render task (core 1, 44 Hz, pre_render drives all matrices) ---
+  // --- F4: control layer (input queue + live control) ---
+  setup_control_layer();
+
+  // --- Render task (core 1, 44 Hz, pre_render drives all matrices, F4 drains input queue, F5 broadcasts state) ---
   RenderTaskConfig rcfg = {};
-  rcfg.show       = &g_show;
-  rcfg.targetHz   = 44;
-  rcfg.core       = 1;
-  rcfg.stackBytes = 4096;
-  rcfg.priority   = 20;
-  rcfg.pre_render = on_pre_render;
+  rcfg.show           = &g_show;
+  rcfg.targetHz       = 44;
+  rcfg.core           = 1;
+  rcfg.stackBytes     = 4096;
+  rcfg.priority       = 20;
+  rcfg.pre_render     = on_pre_render;
   rcfg.pre_render_ctx = nullptr;
+  rcfg.post_render    = on_post_render;
+  rcfg.post_render_ctx = nullptr;
+  rcfg.queue          = g_queue;
+  rcfg.live_control   = g_live;
   if (!render_task_start(&rcfg)) {
     ESP_LOGE(TAG, "render task start failed; halting.");
     led_status_set(LED_ERROR);
@@ -259,9 +338,14 @@ extern "C" void app_main(void) {
   }
   led_status_set(LED_BLINK_FAST);
 
+  ESP_LOGI(TAG, "F4 complete: input layer wired (MIDI/OSC/Web → cues/scenes)");
   ESP_LOGI(TAG, "F3 complete: show is %s.",
            from_bundle ? "loaded from /littlefs/show.shw1" : "hardcoded fallback");
   ESP_LOGI(TAG, "Swap the bundle file on LittleFS and reboot to change the patch.");
+
+  // TODO: F5 — Start broadcast task for state updates.
+  // The broadcast task reads g_activeCueMask (acquire) and sends state JSON over WS.
+  // For now, the render task updates the mask but no task sends it.
 
   while (true) {
     led_status_set(wifi_is_connected() ? LED_BLINK_DOUBLE : LED_BLINK_FAST);
