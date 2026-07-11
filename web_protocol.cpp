@@ -251,6 +251,12 @@ bool parseWebCommand(const char* json, size_t len, ControlEvent& out) {
   return false;
 }
 
+bool isHelloCommand(const char* json, size_t len) {
+  static const char prefix[] = "{\"type\":\"hello\"";
+  const size_t plen = sizeof(prefix) - 1;  // 15
+  return json != nullptr && len >= plen && std::memcmp(json, prefix, plen) == 0;
+}
+
 // ---------------------------------------------------------------------------
 // buildConfigJson / buildStateJson
 // ---------------------------------------------------------------------------
