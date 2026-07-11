@@ -178,6 +178,18 @@ void test_parse_string_with_escapes_rejected() {
   CHECK(!parseOk(R"({"type":"cu\e","id":1,"pressed":true})", ev));
 }
 
+void test_parse_depth_limit() {
+  TEST("parse: deep nested unknown field rejected, shallow tolerated");
+  ControlEvent ev;
+  CHECK(parseOk(R"({"type":"cue","id":1,"pressed":true,"x":[1,[2,3]]})", ev));
+  CHECK(parseOk(R"({"type":"cue","id":1,"pressed":true,"x":{"a":{"b":1}}})", ev));
+  std::string deep = R"({"type":"cue","id":1,"pressed":true,"x":)";
+  for (int i = 0; i < 200; i++) deep += "[";
+  for (int i = 0; i < 200; i++) deep += "]";
+  deep += "}";
+  CHECK(parseWebCommand(deep.c_str(), deep.size(), ev) == false);
+}
+
 // ---------------------------------------------------------------------------
 // buildConfigJson
 // ---------------------------------------------------------------------------
@@ -325,6 +337,7 @@ int main() {
   test_parse_malformed_object();
   test_parse_empty_input();
   test_parse_string_with_escapes_rejected();
+  test_parse_depth_limit();
 
   // Builder — config
   test_build_config_empty();
