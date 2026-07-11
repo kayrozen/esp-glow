@@ -64,6 +64,9 @@ struct WebSceneInfo {
 // The device scaffold is responsible for the `hello` path (send config back).
 bool parseWebCommand(const char* json, size_t len, ControlEvent& out);
 
+// Returns true iff the frame is the `hello` handshake (device replies with config).
+bool isHelloCommand(const char* json, size_t len);
+
 // Build a `config` JSON message into `buf`. Returns the number of bytes
 // written (excluding the terminating NUL). If the buffer is too small,
 // writes a truncated-but-NUL-terminated prefix and returns the number of

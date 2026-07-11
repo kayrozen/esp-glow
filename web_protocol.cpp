@@ -118,7 +118,8 @@ struct Parser {
 
   // Skip a single JSON value (object/array/string/number/keyword). Used to
   // tolerate unknown fields without failing the whole parse.
-  bool skipValue() {
+  bool skipValue(int depth) {
+    if (depth > 32) return false;
     skipWs();
     if (eof()) return false;
     char c = *p;
@@ -134,7 +135,7 @@ struct Parser {
         View key;
         if (!parseStringRaw(key)) return false;
         if (!consume(':')) return false;
-        if (!skipValue()) return false;
+        if (!skipValue(depth + 1)) return false;
         if (consume(',')) continue;
         if (consume('}')) return true;
         return false;
@@ -145,7 +146,7 @@ struct Parser {
       skipWs();
       if (consume(']')) return true;
       while (true) {
-        if (!skipValue()) return false;
+        if (!skipValue(depth + 1)) return false;
         if (consume(',')) continue;
         if (consume(']')) return true;
         return false;
@@ -202,7 +203,7 @@ bool parseWebCommand(const char* json, size_t len, ControlEvent& out) {
       if (!ps.parseNumber(valueVal)) return false;
       hasValue = true;
     } else {
-      if (!ps.skipValue()) return false;
+      if (!ps.skipValue(1)) return false;
     }
 
     if (ps.consume(',')) continue;
@@ -248,6 +249,12 @@ bool parseWebCommand(const char* json, size_t len, ControlEvent& out) {
 
   // Unknown type — including "state" (device->UI only) — is rejected.
   return false;
+}
+
+bool isHelloCommand(const char* json, size_t len) {
+  static const char prefix[] = "{\"type\":\"hello\"";
+  const size_t plen = sizeof(prefix) - 1;  // 15
+  return json != nullptr && len >= plen && std::memcmp(json, prefix, plen) == 0;
 }
 
 // ---------------------------------------------------------------------------

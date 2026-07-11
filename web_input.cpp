@@ -95,7 +95,7 @@ int web_input_handle_text_frame(const char* json, size_t len) {
   // is strict and returns false for hello, since hello isn't a ControlEvent).
   // We detect it cheaply first; if it's not hello, fall through to the
   // testable core.
-  if (len >= 14 && std::memcmp(json, "{\"type\":\"hello\"", 15) == 0) {
+  if (isHelloCommand(json, len)) {
     return 0;
   }
 

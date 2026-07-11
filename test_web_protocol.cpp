@@ -178,6 +178,30 @@ void test_parse_string_with_escapes_rejected() {
   CHECK(!parseOk(R"({"type":"cu\e","id":1,"pressed":true})", ev));
 }
 
+void test_parse_depth_limit() {
+  TEST("parse: deep nested unknown field rejected, shallow tolerated");
+  ControlEvent ev;
+  CHECK(parseOk(R"({"type":"cue","id":1,"pressed":true,"x":[1,[2,3]]})", ev));
+  CHECK(parseOk(R"({"type":"cue","id":1,"pressed":true,"x":{"a":{"b":1}}})", ev));
+  std::string deep = R"({"type":"cue","id":1,"pressed":true,"x":)";
+  for (int i = 0; i < 200; i++) deep += "[";
+  for (int i = 0; i < 200; i++) deep += "]";
+  deep += "}";
+  CHECK(parseWebCommand(deep.c_str(), deep.size(), ev) == false);
+}
+
+void test_is_hello_command() {
+  TEST("isHelloCommand: detects hello, no overread on short buffer");
+  CHECK(isHelloCommand(R"({"type":"hello"})", 16) == true);
+  CHECK(isHelloCommand(R"({"type":"cue","id":0,"pressed":true})", 37) == false);
+  CHECK(isHelloCommand(nullptr, 0) == false);
+  const char* src = "{\"type\":\"hello";   // 14 chars, not NUL-terminated
+  char* buf = new char[14];
+  std::memcpy(buf, src, 14);
+  CHECK(isHelloCommand(buf, 14) == false); // len<15 -> false, never reads buf[14]
+  delete[] buf;
+}
+
 // ---------------------------------------------------------------------------
 // buildConfigJson
 // ---------------------------------------------------------------------------
@@ -325,6 +349,8 @@ int main() {
   test_parse_malformed_object();
   test_parse_empty_input();
   test_parse_string_with_escapes_rejected();
+  test_parse_depth_limit();
+  test_is_hello_command();
 
   // Builder — config
   test_build_config_empty();
