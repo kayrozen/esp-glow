@@ -1,0 +1,70 @@
+# sdkconfig.defaults for esp-glow (ESP32-S3 + octal PSRAM).
+#
+# These defaults are applied at `idf.py set-target esp32s3` time. Override
+# per-board values in sdkconfig (generated) or by editing this file.
+
+# --- Target ---
+CONFIG_IDF_TARGET="esp32s3"
+
+# --- Flash & partitioning ---
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# --- Octal PSRAM (ESP32-S3) ---
+# The pixel buffers and the loaded SHW1 bundle live in PSRAM. Octal mode gives
+# the bandwidth the render loop needs at 44 Hz with multiple universes.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_TYPE_AUTO=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# --- C++ runtime ---
+# The core modules were written for -fno-exceptions -fno-rtti (std::vector on
+# alloc failure aborts; that is acceptable with PSRAM available). The flags
+# themselves are enforced in components/glow_core/CMakeLists.txt via
+# target_compile_options, because sdkconfig only exposes RTTI via
+# CONFIG_COMPILER_RTTI (default off) and exceptions via
+# CONFIG_COMPILER_CXX_EXCEPTIONS (default off). We pin both off here too.
+CONFIG_COMPILER_CXX_EXCEPTIONS=n
+CONFIG_COMPILER_RTTI=n
+
+# --- WiFi (station + softAP) ---
+CONFIG_ESP_WIFI_ENABLED=y
+CONFIG_ESP_WIFI_STA_DISCONNECTED_PM=y
+CONFIG_ESP_WIFI_NVS_ENABLED=y
+CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
+
+# --- lwIP / sockets ---
+CONFIG_LWIP_TCP=y
+CONFIG_LWIP_UDP=y
+CONFIG_LWIP_SO_REUSE=y
+CONFIG_LWIP_MAX_SOCKETS=16
+
+# --- HTTP server (WebSocket endpoint + console serving in F4) ---
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+CONFIG_HTTPD_MAX_URI_LEN=512
+
+# --- mbedTLS (OTA over HTTPS in F5) ---
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+
+# --- OTA ---
+CONFIG_APP_ROLLBACK_ENABLE=y
+
+# --- Task watchdog (F5 robustness) ---
+CONFIG_ESP_TASK_WDT=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
+
+# --- Core affinity (WiFi/DMX coexistence) ---
+# The render task pins itself to core 1 at runtime (xTaskCreatePinnedToCore).
+# Keep WiFi/lwIP on core 0 so DMX timing on core 1 is never starved.
+CONFIG_ESP_WIFI_TASK_CORE_AFFINITY_0=y
+CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0=y
