@@ -1,293 +1,284 @@
-# Moving Head Pan/Tilt Aim Geometry
+# esp-glow
 
-Pure C++17 implementation of pan/tilt angle computation for DMX moving head fixtures on ESP32-S3.
-
-## Coordinate Conventions
-
-### World Frame (Right-Handed)
-- **+X**: Stage right
-- **+Y**: Up (vertical)
-- **+Z**: Toward audience (front)
-- **Units**: Any consistent length unit (meters, feet, etc.); for aiming, only direction matters.
-
-### Fixture-Local Frame (at pan=0°, tilt=0°)
-- **+Z_local**: Beam direction (forward)
-- **+Y_local**: Up-post (vertical)
-- **+X_local**: Right from fixture perspective
-
-### Fixture Orientation
-The fixture's mounting orientation is represented as a **3×3 rotation matrix** `R` that maps **local → world** coordinates:
-```
-v_world = R * v_local
-```
-
-To transform a world direction into the fixture's local frame (required by the aiming algorithm):
-```
-v_local = Rᵀ * v_world  (Rᵀ = inverse for rotation matrices)
-```
-
-### Euler Angle Convention
-Euler angles are applied in the order **(intrinsic Y-X-Z)**:
-```
-R = rotY(yaw) * rotX(pitch) * rotZ(roll)
-```
-
-Where:
-- **yaw** (in degrees): Heading rotation about world +Y axis
-- **pitch** (in degrees): Nod/tilt rotation about the intermediate X axis
-- **roll** (in degrees): Bank rotation about the final Z axis
-
-## Pan and Tilt Angles
-
-### Pan Angle
-- Rotation about the vertical (Y) axis of the fixture
-- Computed from local X and Z components: `pan = atan2f(dl.x, dl.z)`
-- Maps to normalized DMX value via: `panNorm = panCenter + pan / panRange`
-
-### Tilt Angle
-- Rotation about the horizontal (X) axis after pan
-- Computed from local Y and horizontal distance: `tilt = atan2f(dl.y, sqrt(dl.x² + dl.z²))`
-- Maps to normalized DMX value via: `tiltNorm = tiltCenter + tilt / tiltRange`
-
-## Worked Example
-
-**Setup:**
-- Fixture at world position (2, 1, 0)
-- Fixture orientation: yaw=0°, pitch=0°, roll=0° (identity orientation)
-- Pan range: 540°, tilt range: 270°
-- Centers: pan=0.5, tilt=0.5
-- No inversions
-
-**Target:** Point at world position (2, 6, 10)
-
-**Calculation:**
-
-1. Direction vector: (2, 6, 10) - (2, 1, 0) = (0, 5, 10)
-2. Normalize: d ≈ (0, 0.447, 0.894)
-3. Transform to local (R = identity, so Rᵀ = identity): dl = (0, 0.447, 0.894)
-4. Pan angle: atan2(0, 0.894) ≈ 0 rad
-5. Tilt angle: sqrt(0² + 0.894²) ≈ 0.894; atan2(0.447, 0.894) ≈ 0.464 rad (≈ 26.6°)
-6. Convert ranges: panRange = 540° = 3π rad, tiltRange = 270° = 1.5π rad
-7. Pan norm: 0.5 + 0 / 3π = 0.5
-8. Tilt norm: 0.5 + 0.464 / 1.5π ≈ 0.5 + 0.0988 ≈ 0.599
-9. Result: **panNorm ≈ 0.5**, **tiltNorm ≈ 0.599**, **reachable = true**
-
-## API Overview
-
-### `aimDirection(config, directionVector) → AimResult`
-Compute pan/tilt angles to point the fixture in a given world direction.
-
-### `aimAtPoint(config, targetPosition) → AimResult`
-Compute pan/tilt angles to point the fixture at a world position. Internally computes direction as `target - fixture_position` and calls `aimDirection`.
-
-### `AimResult`
-```cpp
-struct AimResult {
-  float panNorm;    // [0, 1] normalized DMX value for pan
-  float tiltNorm;   // [0, 1] normalized DMX value for tilt
-  bool reachable;   // false if clamped or degenerate input
-};
-```
-
-### `MovingHeadConfig`
-```cpp
-struct MovingHeadConfig {
-  Vec3 position;        // World position
-  Mat3 orientation;     // Local→world rotation matrix
-  float panRangeDeg;    // Total pan sweep (e.g., 540°)
-  float tiltRangeDeg;   // Total tilt sweep (e.g., 270°)
-  float panCenterNorm;  // DMX value at pan=0° (typically 0.5)
-  float tiltCenterNorm; // DMX value at tilt=0° (typically 0.5)
-  bool invertPan;       // Negate pan angle before mapping
-  bool invertTilt;      // Negate tilt angle before mapping
-};
-```
-
-## Building and Testing
-
-```bash
-make test
-```
-
-Builds with `-std=c++17 -Wall -Wextra -Werror` and runs all tests. All assertions must pass.
-
-## Integration with Profile Subsystem
-
-The output values `panNorm` and `tiltNorm` are plain floats in `[0, 1]`, ready to pass to the profile system:
-```cpp
-applyCapability(profile, Capability::Pan, panNorm, ...);
-applyCapability(profile, Capability::Tilt, tiltNorm, ...);
-```
-
-No shared DMX headers or dependencies—this module is purely mathematical geometry.
-
-## Files
-
-- **`vec_math.h`, `vec_math.cpp`**: Vector and matrix primitives (Vec3, Mat3, rotations, Euler angle conversion)
-- **`aim.h`, `aim.cpp`**: Main aiming algorithm (`aimDirection`, `aimAtPoint`)
-- **`test_aim.cpp`**: Comprehensive test suite (13 tests covering all cases)
-- **`Makefile`**: Build configuration
-- **`README.md`**: This file
+A native C++ DMX lighting control system for the ESP32-S3 — a from-scratch
+reimplementation of an Afterglow-style show engine, with no JVM, running standalone on
+the microcontroller. It drives moving heads, wash/PARs, smoke machines, and RGB pixel
+matrices; it is scripted with a small text patch language; and it is piloted live from
+a MIDI controller, OSC, or a built-in web console.
 
 ---
 
-# Show / Render Loop
+## 1. What it is
 
-Wires the fixture-profile subsystem (`fixture_profile.h`) and the aim geometry
-subsystem (`aim.h`, `vec_math.h`) into a `Show`: a set of patched fixtures and
-DMX universes that get resolved and flushed once per frame.
+The engine turns *time* into *DMX frames*. Effects and cues produce abstract intents
+("this fixture is blue at 80%", "this head points at that spot"), an assigner layer
+resolves them to channel values using per-fixture profiles, and the result is flushed
+to the wire — local DMX-512 for fixtures, Art-Net over WiFi for matrices.
 
-## `renderFrame(t)` algorithm
+There are two data paths, by design:
 
-```
-1. For each universe u:
-     if mode(u) == Fixture:  zero all 512 bytes of u
-     (Raw universes are left as-is)
+- **Per-fixture path** — moving heads, PARs, wash, smoke. One resolved value per
+  capability per fixture. Moving heads add pan/tilt geometry (aim a beam at a point in
+  the room).
+- **Per-pixel path** — RGB matrices. A 2D canvas is rendered by a pattern engine and
+  packed into DMX universes (Art-Net → bridge → the matrix's DMX input).
 
-2. For each patched fixture f (all live in Fixture universes):
-     applyDefaults(f.profile, universe[f.universe].data, f.base)
+### Module map (all host-testable under `make test`)
 
-3. Gather intents: clear the reusable member vectors caps_ and aims_ (keep
-   capacity), then for each effect in insertion order call
-   fx->evaluate(t, caps_, aims_).
-
-4. Resolve aim intents FIRST, then cap intents (so an explicit Pan CapIntent
-   could override an aim if authored that way — last write wins):
-     for each AimIntent ai:
-        f = fixture(ai.fixtureId); if !f or !f->isHead: skip
-        AimResult r = ai.isPoint ? aimAtPoint(f->head, ai.target)
-                                 : aimDirection(f->head, ai.target)
-        applyCapability(f->profile, Capability::Pan,  r.panNorm,  buf(f), f->base)
-        applyCapability(f->profile, Capability::Tilt, r.tiltNorm, buf(f), f->base)
-        (ignore r.reachable for now; engine may use it later)
-     for each CapIntent ci (in list order):
-        f = fixture(ci.fixtureId); if !f: skip
-        applyCapability(f->profile, ci.cap, ci.norm01, buf(f), f->base)
-
-5. For each universe u: sink(u)->send(u, universe[u].data, 512)
-   (skip universes with no configured sink)
-```
-
-`Show::caps_` and `Show::aims_` are `std::vector` members reserved once
-(construction time) and `clear()`-ed every frame — `renderFrame` never
-allocates.
-
-## Fixture vs. Raw universes
-
-Each universe configured via `configureUniverse(idx, mode, sink)` is one of:
-
-- **`UniverseMode::Fixture`** — owned by the patch/effect pipeline. Zeroed at
-  the start of every `renderFrame`, then repopulated by `applyDefaults` and
-  the resolved effect intents (steps 1–4 above).
-- **`UniverseMode::Raw`** — the pixel-effect seam. `renderFrame` never
-  touches its bytes. Callers write into it directly with
-  `writeRawUniverse(idx, data, len)` before calling `renderFrame` for the
-  frame that buffer should appear in; whatever was last written is what gets
-  sent. `writeRawUniverse` is a no-op on a `Fixture`-mode universe.
-
-Both universe kinds are flushed identically in step 5: whatever bytes are
-currently in `universe[u].data` go to `sink(u)->send(...)`.
-
-## Device sinks
-
-`IUniverseSink` is the hardware seam — the core (`show.h`/`show.cpp`) only
-depends on the interface, plus the host-only `MockSink` used by tests.
-
-Two concrete transports plug in on real hardware, each in its own file,
-guarded by `#ifdef ESP_PLATFORM` so they compile to nothing (and pull in no
-ESP-IDF headers) on a host build:
-
-- **`dmx_sink.cpp` — `DmxSink`**: wraps an `esp_dmx` port. `send()` is meant
-  to call `dmx_write()` then `dmx_send()` on that port; the actual esp_dmx
-  calls are left as `// TODO` since they can only be verified on hardware.
-- **`artnet_sink.cpp` — `ArtNetSink`**: builds an Art-Net DMX packet (8-byte
-  `"Art-Net\0"` ID, OpCode 0x5000, ProtVer 0/14, Sequence, Physical,
-  15-bit universe as SubUni+Net, 512 length big-endian, then the 512 data
-  bytes) and is meant to UDP-send it to a configured bridge IP:port; the
-  socket call is left as `// TODO` device wiring.
-
-Neither file is part of `make test` — the `Makefile`'s `SHOW_SOURCES` list
-only builds `show.cpp`, the upstream subsystems, and `test_show.cpp`. Wire a
-concrete sink in on real firmware by constructing a `DmxSink`/`ArtNetSink`
-and passing it to `Show::configureUniverse`.
-
-## Building and testing
-
-```bash
-make test
-```
-
-Builds `test_aim` and `test_show` under
-`-std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined` and runs
-both. `renderFrame` performs zero heap allocation per frame.
+| Module | Responsibility |
+|---|---|
+| `fixture_profile` | `Capability` enum, `FixtureProfile`, `applyCapability`/`applyDefaults`, the `PFX1` binary profile format |
+| `vec_math` / `aim` | 3D math + moving-head pan/tilt aim (`aimAtPoint`/`aimDirection`) |
+| `show` | `Show` model, universes (Fixture/Raw), `IUniverseSink`, `renderFrame`, the intent→channel resolve |
+| `effects` / `oscillator` / `color` | oscillators (sine/saw/triangle/square), HSV→RGB, effects (dimmer, hue-rotate, chase, strobe, sweep, …) |
+| `show_control` | cues, scenes, fade envelopes, HTP/LTP blending (`ShowController`) |
+| `pixel_matrix` | `Canvas`, pixel mapping (serpentine/order/multi-universe), patterns (solid/gradient/rainbow/plasma) |
+| `provision` / `show_bundle` | `.fdef`/`.show` text → `PFX1` profiles + `SHW1` bundle; device-side loader |
+| `live_control` / `control_queue` | input→cue bindings, `ControlEvent` queue, `pumpControlEvents` (concurrency-safe dispatch) |
+| `firmware/` | the ESP-IDF application (DMX driver, render task, WiFi/Art-Net, LittleFS, inputs, OTA) |
 
 ---
 
-# Effects Engine (Oscillators, Color, Time-Driven Effects)
+## 2. Hardware
 
-Turns time into `IEffect` intents. Pure computation — no hardware, no DMX,
-no buffers. Downstream of `show.h`; effects emit `CapIntent`/`AimIntent` by
-fixture id and never touch DMX buffers or fixture profiles directly.
+- **MCU**: ESP32-S3 (dual-core, hardware FPU, PSRAM for pixel buffers).
+- **DMX out**: an RS-485 transceiver (e.g. MAX3485) on the DMX UART. Default GPIOs
+  (set in `menuconfig`): TX = 17, RX = 18, DE/RTS = 8. Wire the transceiver to a 3- or
+  5-pin XLR.
+- **Matrices**: driven over **Art-Net** on WiFi to an existing Art-Net→DMX bridge; the
+  matrices take DMX input (each pixel = 3 channels).
+- **Inputs**: MIDI (DIN over UART, or native USB-MIDI), OSC (UDP), and a web console
+  (HTTP + WebSocket served from the device).
+- **Status LED**: default GPIO 2 (reflects boot / WiFi / error state).
 
-## Oscillators (`oscillator.h`/`.cpp`)
+The render task is pinned to core 1; WiFi/lwIP run on core 0 so network work never
+jitters DMX timing.
 
-```cpp
-enum class Waveform : uint8_t { Sine, Sawtooth, Triangle, Square };
+---
+
+## 3. Build & flash
+
+Firmware lives in `firmware/` and builds with **ESP-IDF v5.1+**.
+
+### 3.1 One-time setup
+
+```sh
+. $IDF_PATH/export.sh            # activate the ESP-IDF environment
+cd firmware
+idf.py set-target esp32s3
+idf.py menuconfig                # Component config → esp-glow:
+                                 #   DMX TX/RX/DE GPIOs, status LED GPIO,
+                                 #   WiFi SSID/pass, Art-Net bridge IP
+                                 #   (bridge IP 0 = LAN broadcast)
 ```
 
-Given `phase01` in `[0,1)`, `oscillator(w, phase01)` returns a value in
-`[0,1]`:
+PSRAM (octal) and the C++ flags are already set in `sdkconfig.defaults`.
 
-- **Sine**: `0.5 + 0.5 * sin(2*PI*phase01)`
-- **Sawtooth**: `phase01`
-- **Triangle**: `phase01 < 0.5 ? 2*phase01 : 2*(1 - phase01)`
-- **Square**: `phase01 < 0.5 ? 0.0 : 1.0`
+### 3.2 Build the show bundle (LittleFS)
 
-`phaseFromTime(t, periodSec, phaseOffset01)` maps absolute time to a wrapped
-phase: `raw = t/periodSec + phaseOffset01; return raw - floor(raw)`.
-`periodSec <= 0` returns `0`.
+The device loads its patch from a `SHW1` bundle in the LittleFS partition. Compile the
+demo patch before building the firmware:
 
-`OscillatedParam` swings a value between `min` and `max` on a waveform:
-`value(t) = min + (max-min) * oscillator(w, phaseFromTime(t, periodSec, phaseOffset01))`.
-
-**Worked example**: `OscillatedParam{Sawtooth, periodSec=2, phaseOffset01=0,
-min=0, max=100}.value(1)` — at `t=1` the phase is `1/2 = 0.5`, sawtooth of
-`0.5` is `0.5`, so the value is `0 + 100*0.5 = 50`.
-
-`beatsToSeconds(beats, bpm) = beats * 60 / bpm` (`bpm <= 0` returns `0`) lets
-an `OscillatedParam.periodSec` be built beat-synced, e.g. one cycle per beat
-at 120 BPM: `periodSec = beatsToSeconds(1, 120)` (= 0.5s).
-
-## Color (`color.h`/`.cpp`)
-
-`hsvToRgb(h01, s01, v01) -> Rgb{r,g,b}` — standard HSV to RGB conversion.
-Hue wraps (`h01` and `h01+1` are equal); saturation and value are clamped to
-`[0,1]`.
-
-## Effects (`effects.h`/`.cpp`)
-
-All implement `IEffect`, holding fixture ids and config from construction;
-`evaluate` only `push_back`s into the caller's vectors:
-
-- `DimmerEffect(ids, level)` — flat Dimmer intent per id.
-- `OscillatedDimmerEffect(ids, OscillatedParam)` — Dimmer driven by the param.
-- `ColorEffect(ids, r, g, b)` — flat Red/Green/Blue per id.
-- `HueRotateEffect(ids, periodSec, sat=1, val=1)` — hue cycles once per
-  `periodSec`, converted to RGB via `hsvToRgb`.
-- `ChaseEffect(ids, periodSec)` — one fixture lit at a time, cycling through
-  `ids` once per `periodSec`.
-- `StrobeEffect(ids, hz)` — Dimmer toggled by a Square oscillator at `hz`;
-  `hz <= 0` holds steady on.
-- `SweepEffect(id, dirA, dirB, periodSec)` — a single moving head's aim
-  direction oscillates between `dirA` and `dirB` on a Triangle wave (linear
-  back-and-forth), emitting one `AimIntent` per frame.
-
-## Building and testing
-
-```bash
-make test
+```sh
+./scripts/build_sample_bundle.sh      # → firmware/main/data/show.shw1
 ```
 
-Builds `test_aim`, `test_fixture_profile`, `test_show`, and `test_effects`
-under `-std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined` and
-runs all four. `evaluate` performs zero heap allocation of its own.
+> Note: fix the hard-coded `cd` line at the top of that script to point at your repo
+> root (e.g. `cd "$(git rev-parse --show-toplevel)"`). It compiles the `provision`
+> tool and runs `./provision samples/demo.show firmware/main/data/show.shw1`. CMake
+> then flashes `data/` into LittleFS via `littlefs_create_partition_image()`.
+
+### 3.3 Flash & monitor
+
+```sh
+idf.py -p /dev/ttyUSB0 flash monitor      # replace with your serial port
+```
+
+On boot the serial console prints a banner, `render loop started on core 1`, the DMX
+init result, the loaded fixture/matrix counts, and a per-5s frame-rate stat line. Exit
+the monitor with `Ctrl-]`. If a flash gets wedged: `idf.py -p <port> erase-flash` then
+reflash.
+
+### 3.4 Partition layout
+
+`ota_0` / `ota_1` (3 MB each, A/B OTA), `littlefs` (1 MB, the show bundle + web
+console assets), `nvs`, and a `coredump` partition for post-mortem backtraces.
+
+---
+
+## 4. The script language (`.fdef` / `.show`)
+
+Fixtures and patches are authored in two small line-oriented text formats, compiled
+off-device by the `provision` tool into the compact binary the firmware loads. `#`
+starts a comment; blank lines are ignored.
+
+### 4.1 Fixture definitions — `.fdef`
+
+One fixture *type* per file: its DMX footprint and what each channel does.
+
+```
+FIXTURE <name...>
+FOOTPRINT <n>                 # number of DMX channels this fixture occupies
+HEAD                          # optional: this is a moving head
+PANRANGE  <deg>               # head only, e.g. 540
+TILTRANGE <deg>               # head only, e.g. 270
+CAP <Capability> <coarse> [<fine>|-] [<default>] [inv]
+```
+
+`CAP` maps a capability to channel offset(s) within the footprint: `coarse` is
+required; `fine` is a second offset for 16-bit channels (or `-` for 8-bit); `default`
+is an idle value (e.g. shutter-open); `inv` inverts the output.
+
+Capabilities: `Dimmer Red Green Blue White Amber Uv Cyan Magenta Yellow Pan Tilt
+ShutterStrobe Gobo Focus Zoom Fog Fan Generic`.
+
+Example — a 9-channel moving head with 16-bit pan/tilt:
+
+```
+FIXTURE Moving Head
+FOOTPRINT 9
+HEAD
+PANRANGE 540
+TILTRANGE 270
+CAP Dimmer 0
+CAP Pan    1 2          # 16-bit: coarse=1, fine=2
+CAP Tilt   3 4
+CAP Red    5
+CAP Green  6
+CAP Blue   7
+CAP ShutterStrobe 8 - 8 # 8-bit, idle value 8 (shutter open)
+```
+
+### 4.2 Show / patch — `.show`
+
+Where fixture *instances* live: their universe, DMX base address, and (for heads)
+position/orientation; plus matrices and universe transports.
+
+```
+UNIVERSE <idx> <DMX|ARTNET|SACN>          # transport for that universe
+FIXTURE  <deffile> <universe> <base>       # patch an instance
+POS      <x> <y> <z>                        # head only: metres, modifies the last FIXTURE
+ROT      <yaw> <pitch> <roll>              # head only: degrees
+CENTER   <panNorm> <tiltNorm>              # head only, optional (default 0.5 0.5)
+INVERT   <0|1> <0|1>                        # head only, optional
+MATRIX   <startUniverse> <startChannel> <w> <h> <SERP|PROG> <H|V> <ORDER>
+```
+
+`ORDER` ∈ `RGB GRB BRG RBG GBR BGR`. Example:
+
+```
+UNIVERSE 0 DMX
+UNIVERSE 1 ARTNET
+UNIVERSE 2 ARTNET
+
+FIXTURE samples/dimmer.fdef 0 1      # a PAR at universe 0, base ch 1
+FIXTURE samples/head.fdef   0 21     # a head at universe 0, base ch 21
+POS 2.0 1.0 0.0
+ROT 0 0 0
+
+MATRIX 2 0 16 8 SERP H RGB           # 16×8 matrix, universe 2, serpentine, RGB
+```
+
+### 4.3 Compile
+
+```sh
+./provision samples/demo.show firmware/main/data/show.shw1
+```
+
+`.fdef` references resolve by path from the working directory, so run from the repo
+root. Heavy fixture libraries (GDTF / QLC+ / Open Fixture Library) are **not** parsed
+here — importers that emit `.fdef`/`.show` are a separate tool; these text formats are
+the stable seam. The output `SHW1` bundle carries the profiles, the patch table (with
+each head's baked position/orientation), the matrix maps, and the per-universe
+transport routing.
+
+---
+
+## 5. Fixtures
+
+The engine treats four archetypes, each with a different cost and code path:
+
+- **Wash / PARs** — trivial: RGB(W/A/UV) + dimmer + strobe, a few channels, no
+  geometry. Pure per-fixture path.
+- **Moving heads** — the expensive, expressive case. Pan/tilt are usually 16-bit
+  (coarse+fine). With a head's `POS`/`ROT` in the patch, the aim engine computes
+  pan/tilt from a target point via inverse kinematics, so cues can say "point here"
+  instead of raw angles. `PANRANGE`/`TILTRANGE` and `CENTER` map the angles back to DMX.
+- **Smoke / haze** — one or two channels, but with timing semantics (warm-up,
+  duty-cycle); treat as a fixture with constraints, not a plain dimmer.
+- **RGB pixel matrices** — the per-pixel path. A `MATRIX` line declares geometry,
+  wiring (serpentine/progressive, row/column), color order, and start universe/channel.
+  The pixel engine renders a pattern into a 2D canvas and packs it — component by
+  component, so a pixel straddling the 512-channel boundary is still correct — into the
+  Raw universes, which flush over Art-Net. Budget: ~170 RGB pixels per universe.
+
+Under the hood every fixture is just a `FixtureProfile` (a channel map + capability
+tags); effects and cues never touch raw channels.
+
+---
+
+## 6. Development & testing
+
+Host-side (no hardware): the entire engine is unit-tested.
+
+```sh
+make test        # builds every suite under -Wall -Wextra -Werror + ASan/UBSan
+                 # (the control-queue suite additionally runs under ThreadSanitizer)
+```
+
+Firmware behaviour that can't be host-tested (DMX timing, Art-Net on the wire, WS/OSC
+round-trips, crash-safety under load) is covered by an automated **hardware-in-the-loop
+(HIL)** suite that flashes the board and asserts on serial telemetry + network traffic.
+Two things HIL cannot check stay human/instrumented: whether a head physically aims
+right and whether colors look right.
+
+**Hygiene guardrail** (add to your pre-push): fail on committed conflict markers or
+`.rej`/`.orig` files, and require a green `make test`, before any push.
+
+---
+
+## 7. Roadmap
+
+### Done — host-tested and green
+- Full engine: `fixture_profile`, `aim`/`vec_math`, `show`, `effects`/`color`/
+  `oscillator`, `show_control`, `pixel_matrix`.
+- Provisioning: `.fdef`/`.show` compiler, `PFX1`/`SHW1` formats, device-side loader.
+- Live-control core: `live_control`, `control_queue` + `pumpControlEvents` (the
+  concurrency-safe input dispatch), MIDI/web parsers.
+- Web console (Preact + WebSocket protocol) and a browser provisioner (WASM).
+
+### In progress — firmware
+- **F0–F3** (scaffold, DMX output + render task, WiFi + Art-Net, show-load from
+  LittleFS): clean, host seams green. **Next hardware step: F1 bring-up** — flash it
+  and watch a real fixture respond to the engine. Do this before any networked work.
+- **F4 (inputs)**: spec'd to build on the existing `control_queue` (transports enqueue
+  `ControlEvent`s, the render task drains via `pumpControlEvents` — the *only* place the
+  controller is mutated). Adds an OSC parser (host-tested), the three transport tasks,
+  and the WS server serving the console.
+
+### Next
+- **HIL suite** — boot/POST, DMX loopback, Art-Net capture, WS/OSC round-trips, and a
+  10-minute soak that proves the concurrency holds under load.
+- **F5** — OTA (A/B partitions), watchdog, WiFi reconnect, safe-blackout on a missing
+  bundle.
+
+### Later
+- GDTF / QLC+ / OFL importers that emit `.fdef`/`.show`.
+- Gamma correction and audio-reactive patterns for matrices.
+- Integrating matrices into the cue/blend engine (a cue that fades a matrix pattern).
+- Timeline / auto-advancing cue-list playback; external clock (MIDI/DJ-Link) sync.
+
+---
+
+## 8. Repository layout
+
+```
+*.cpp / *.h              engine + provisioning + live-control (host-buildable)
+test_*.cpp               host unit tests            (make test)
+samples/                 example .fdef / .show      (+ build_sample_bundle.sh)
+firmware/                ESP-IDF application
+  main/                  main.cpp, render_task, wifi/storage/ota managers, data/
+  components/glow_core/  the engine, wrapped as an IDF component
+  partitions.csv, sdkconfig.defaults
+web/                     Preact console + browser provisioner
+```
