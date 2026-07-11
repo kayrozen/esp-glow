@@ -1,0 +1,48 @@
+# firmware/main/Kconfig.projbuild — esp-glow menuconfig options.
+#
+# Surfaced under Component config -> esp-glow in `idf.py menuconfig`.
+
+menu "esp-glow"
+
+config GLOW_STATUS_LED_GPIO
+    int "Status LED GPIO"
+    default 2
+    help
+        GPIO driving the status LED. Default 2 (most ESP32-S3 devkits).
+
+config GLOW_DMX_TX_GPIO
+    int "DMX TX GPIO (RS485 DI)"
+    default 17
+
+config GLOW_DMX_RX_GPIO
+    int "DMX RX GPIO (RS485 RO)"
+    default 18
+
+config GLOW_DMX_RTS_GPIO
+    int "DMX RTS GPIO (RS485 DE/RE tied)"
+    default 8
+    help
+        The UART RTS pin, which esp_dmx toggles for the DMX break/MAB and
+        to drive the RS485 transceiver's DE + /RE lines (wire them together).
+
+config GLOW_WIFI_SSID
+    string "WiFi SSID"
+    default "esp-glow"
+    help
+        Station SSID to join at boot. Set this to your LAN SSID.
+
+config GLOW_WIFI_PASS
+    string "WiFi password"
+    default "esp-glow"
+    help
+        Station password for the SSID above.
+
+config GLOW_ARTNET_BRIDGE_IP
+    int "Art-Net bridge IP (packed, 0 = broadcast)"
+    default 0
+    help
+        IPv4 of the Art-Net node/bridge, packed host-byte order, e.g.
+        192.168.1.50 => (192<<24)|(168<<16)|(1<<8)|50 = 0xC0A80132 = 3232235826.
+        0 means LAN broadcast (255.255.255.255), the Art-Net default.
+
+endmenu
