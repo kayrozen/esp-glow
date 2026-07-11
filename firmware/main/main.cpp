@@ -1,33 +1,38 @@
 // main.cpp — esp-glow firmware entry point (ESP32-S3).
 //
-// Phase F2: WiFi + Art-Net output (matrices). On top of F1's DMX path, we now:
-//   - bring up WiFi (STA) so the Art-Net sink has a network
-//   - add a second IUniverseSink: ArtNetSink -> bridge IP:6454
-//   - patch a 16x8 RGB pixel matrix on universes 1+2 (Raw mode, Art-Net)
-//   - drive the matrix from the render loop via the pre_render hook
+// Phase F3: load the show from storage. At boot we mount LittleFS, read
+// /littlefs/show.shw1, call the host-tested loadShow(), then applyLoadedShow()
+// to patch every fixture and route each universe's sink (Dmx->DmxSink,
+// ArtNet->ArtNetSink). The patch is now data-driven — swapping the bundle
+// changes the show with no code change.
 //
-// What to observe (F2):
-//   - Serial: "got ip: ..." then "Art-Net -> ...:6454 (ready)".
-//   - Your existing Art-Net bridge lights the matrix with a scrolling rainbow.
-//   - Or: Wireshark on the LAN shows Art-Net OpDmx packets for universes 1 and
-//     2 at ~44 Hz (sequence numbers incrementing), and DMX on universe 0 still
-//     holds the F1 dimmer at 50%.
-//   - Status LED: fast blink (render), double-pulse when WiFi is up.
+// If the bundle is missing or corrupt we fall back to the F1/F2 hardcoded
+// patch (one dimmer + a 16x8 rainbow matrix) so the board still does
+// something. F5 replaces this fallback with a safe blackout.
 //
-// Config: set CONFIG_GLOW_WIFI_SSID / CONFIG_GLOW_WIFI_PASS and
-// CONFIG_GLOW_ARTNET_BRIDGE_IP via menuconfig (Kconfig below) or edit defaults
-// in sdkconfig. Bridge IP "0.0.0.0" => broadcast (255.255.255.255).
+// What to observe (F3):
+//   - Serial: "LittleFS mounted ...", "read /littlefs/show.shw1 (N bytes)",
+//     "show loaded: U universes, F fixtures, M matrices", then
+//     "applied: U configured, F patched, H heads, R matrix universes".
+//   - Swapping the bundle file on LittleFS and rebooting changes the patch
+//     with no code change / no reflash.
+//   - DMX fixtures respond per the bundle; matrices light per the bundle's
+//     MatrixMap entries.
+//   - Status LED: double-pulse (WiFi up) + fast blink (render).
 
 #include <cstdio>
+#include <vector>
 #include "esp_log.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "sdkconfig.h"
 #include "nvs_flash.h"
+#include "esp_heap_caps.h"
 
 #include "led_status.h"
 #include "render_task.h"
 #include "wifi_manager.h"
+#include "storage_manager.h"
 
 #include "show.h"
 #include "effects.h"
@@ -36,6 +41,8 @@
 #include "artnet_sink.h"
 #include "pixel_matrix.h"
 #include "pixel_patterns.h"
+#include "show_bundle.h"
+#include "apply_loaded_show.h"
 
 #ifdef ESP_PLATFORM
 #include "esp_dmx.h"
@@ -56,43 +63,58 @@ static const char* TAG = "esp-glow";
 #ifndef CONFIG_GLOW_DMX_RTS_GPIO
 #define GLOW_DMX_RTS_GPIO 8
 #endif
-
 #ifndef CONFIG_GLOW_WIFI_SSID
 #define GLOW_WIFI_SSID "esp-glow"
 #endif
 #ifndef CONFIG_GLOW_WIFI_PASS
 #define GLOW_WIFI_PASS "esp-glow"
 #endif
-
-// Art-Net bridge IP as a packed u32, host-byte order, e.g. 192.168.1.50 =>
-// (192<<24)|(168<<16)|(1<<8)|50. 0 => broadcast.
 #ifndef CONFIG_GLOW_ARTNET_BRIDGE_IP
 #define GLOW_ARTNET_BRIDGE_IP 0u
 #endif
 
+#define BUNDLE_PATH "/littlefs/show.shw1"
+#define BUNDLE_BUF_CAP (64 * 1024)  // 64 KB scratch in PSRAM
+
 // Globals: must outlive the render task.
-static Show            g_show;
-static DmxSink*         g_dmx = nullptr;
-static ArtNetSink*      g_artnet = nullptr;
-static DimmerEffect*    g_fx = nullptr;
+static Show         g_show;
+static DmxSink*      g_dmx = nullptr;
+static ArtNetSink*   g_artnet = nullptr;
 
-// Pixel matrix: 16x8 RGB, serpentine horizontal, on universes 1..2.
-static PixelMatrix*     g_matrix = nullptr;
-static RainbowScrollPattern* g_pattern = nullptr;
+// Matrix driver: owns the PixelMatrix + pattern objects built from the bundle
+// (or the hardcoded fallback). The pre_render hook iterates this list.
+struct MatrixDriver {
+  std::vector<PixelMatrix*>     matrices;
+  std::vector<IPixelPattern*>  patterns;  // owned
+  ~MatrixDriver() {
+    for (auto* p : patterns) delete p;
+    for (auto* m : matrices) delete m;
+  }
+};
+static MatrixDriver g_md;
 
-static const uint16_t MX_W = 16;
-static const uint16_t MX_H = 8;
+// Device-side sink factory: routes Dmx -> DmxSink, ArtNet -> ArtNetSink,
+// everything else -> nullptr (universe skipped).
+class DeviceSinkFactory : public ISinkFactory {
+public:
+  IUniverseSink* sinkFor(uint8_t /*universeIdx*/, UniverseTransport t) override {
+    switch (t) {
+      case UniverseTransport::Dmx:    return g_dmx;
+      case UniverseTransport::ArtNet: return g_artnet;
+      default: return nullptr;  // Sacn/Unused not supported
+    }
+  }
+};
 
-// Pre-render hook: render the pixel pattern into the canvas, then blit each
-// matrix universe into the Show's Raw universes. Show::renderFrame flushes
-// them via the ArtNetSink.
 static void on_pre_render(void* /*ctx*/, float t, Show* show) {
-  if (!g_matrix || !show) return;
-  g_matrix->render(t);
-  for (uint8_t i = 0; i < g_matrix->universeCount(); ++i) {
-    uint8_t  uidx = g_matrix->universeIndex(i);
-    const uint8_t* data = g_matrix->universeData(i);
-    show->writeRawUniverse(uidx, data, DMX_UNIVERSE_SIZE);
+  if (!show) return;
+  for (PixelMatrix* m : g_md.matrices) {
+    m->render(t);
+    for (uint8_t i = 0; i < m->universeCount(); ++i) {
+      uint8_t uidx = m->universeIndex(i);
+      if (uidx >= show->universeCount()) continue;
+      show->writeRawUniverse(uidx, m->universeData(i), DMX_UNIVERSE_SIZE);
+    }
   }
 }
 
@@ -104,6 +126,68 @@ static FixtureProfile makeDimmerProfile() {
   return p;
 }
 
+// F1/F2 fallback: hardcoded dimmer + 16x8 rainbow matrix. Used when no bundle.
+static void setup_hardcoded_fallback() {
+  ESP_LOGW(TAG, "using hardcoded fallback patch (no bundle found).");
+  g_show.setUniverseCount(3);
+  g_show.configureUniverse(0, UniverseMode::Fixture, g_dmx);
+  g_show.configureUniverse(1, UniverseMode::Raw, g_artnet);
+  g_show.configureUniverse(2, UniverseMode::Raw, g_artnet);
+
+  FixtureProfile dimmer = makeDimmerProfile();
+  g_show.patch(dimmer, 0, 0);
+  static uint16_t ids[] = { 0 };
+  static DimmerEffect fx({ids, 1}, 0.5f);
+  g_show.addEffect(&fx);
+
+  MatrixMap mm = {};
+  mm.width = 16; mm.height = 8; mm.serpentine = true; mm.vertical = false;
+  mm.order = ColorOrder::RGB; mm.startUniverse = 1; mm.startChannel = 0;
+  PixelMatrix* m = new PixelMatrix(mm);
+  IPixelPattern* p = new RainbowScrollPattern(4.0f, 2.0f);
+  m->setPattern(p);
+  m->setMasterBrightness(0.8f);
+  g_md.matrices.push_back(m);
+  g_md.patterns.push_back(p);  // PixelMatrix does not own it; we do.
+}
+
+// F3: build the show from a loaded bundle via the host-tested applyLoadedShow.
+static bool setup_show_from_bundle() {
+  uint8_t* buf = (uint8_t*)heap_caps_malloc(BUNDLE_BUF_CAP, MALLOC_CAP_SPIRAM);
+  if (!buf) {
+    ESP_LOGE(TAG, "no PSRAM for bundle buffer");
+    return false;
+  }
+
+  LoadedShow ls;
+  if (!storage_load_show(BUNDLE_PATH, &ls, buf, BUNDLE_BUF_CAP)) {
+    free(buf);
+    return false;
+  }
+  free(buf);  // loadShow copied what it needed
+
+  DeviceSinkFactory factory;
+  ApplyResult r = applyLoadedShow(ls, g_show, factory);
+  ESP_LOGI(TAG, "applied: %u universes configured, %u skipped, %u fixtures (%u heads), %u matrix universes",
+           r.universesConfigured, r.universesSkipped, r.fixturesPatched,
+           r.headsPatched, r.matrixUniverses);
+
+  // Build PixelMatrix objects for each matrix entry. Each gets a rainbow
+  // pattern by default; a richer config (F4) can map patterns per matrix.
+  for (const MatrixMap& mm : ls.matrices) {
+    PixelMatrix* m = new PixelMatrix(mm);
+    IPixelPattern* p = new RainbowScrollPattern(4.0f, 2.0f);
+    m->setPattern(p);
+    m->setMasterBrightness(0.8f);
+    g_md.matrices.push_back(m);
+    g_md.patterns.push_back(p);
+    ESP_LOGI(TAG, "matrix %ux%u -> universes %u..%u",
+             mm.width, mm.height, mm.startUniverse,
+             mm.startUniverse + m->universeCount() - 1);
+  }
+  return true;
+}
+
 extern "C" void app_main(void) {
   // --- Banner (F0) ---
   esp_chip_info_t chip;
@@ -112,7 +196,7 @@ extern "C" void app_main(void) {
   esp_flash_get_size(nullptr, &flash_size);
   ESP_LOGI(TAG, "");
   ESP_LOGI(TAG, "========================================");
-  ESP_LOGI(TAG, "  esp-glow firmware  (ESP32-S3)  F2");
+  ESP_LOGI(TAG, "  esp-glow firmware  (ESP32-S3)  F3");
   ESP_LOGI(TAG, "  %s %s", __DATE__, __TIME__);
   ESP_LOGI(TAG, "========================================");
   ESP_LOGI(TAG, "chip: rev %d, cores %d", chip.revision, chip.cores);
@@ -120,12 +204,10 @@ extern "C" void app_main(void) {
 #ifdef CONFIG_SPIRAM
   ESP_LOGI(TAG, "psram:  enabled (octal=%d)", CONFIG_SPIRAM_MODE_OCT ? 1 : 0);
 #endif
-  ESP_LOGI(TAG, "DMX:    tx=%d rx=%d rts=%d", GLOW_DMX_TX_GPIO, GLOW_DMX_RX_GPIO, GLOW_DMX_RTS_GPIO);
 
   led_status_init(GLOW_STATUS_LED_GPIO);
   led_status_set(LED_BLINK_SLOW);
 
-  // NVS (needed by WiFi).
   esp_err_t nvs = nvs_flash_init();
   if (nvs == ESP_ERR_NVS_NO_FREE_PAGES || nvs == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     nvs_flash_erase();
@@ -149,47 +231,19 @@ extern "C" void app_main(void) {
 
   // --- F2: Art-Net sink ---
   uint32_t bridge = GLOW_ARTNET_BRIDGE_IP;
-  if (bridge == 0) bridge = 0xFFFFFFFFu;  // broadcast default
+  if (bridge == 0) bridge = 0xFFFFFFFFu;
   g_artnet = new ArtNetSink(bridge, 6454);
   if (!g_artnet->begin()) {
     ESP_LOGE(TAG, "Art-Net socket failed; matrix output disabled.");
-    // Non-fatal: DMX still works.
   }
 
-  // --- F1: DMX patch (universe 0, dimmer at base 0, 50%) ---
-  g_show.setUniverseCount(3);
-  g_show.configureUniverse(0, UniverseMode::Fixture, g_dmx);
-  FixtureProfile dimmer = makeDimmerProfile();
-  uint16_t fixtureId = g_show.patch(dimmer, 0, 0);
-  (void)fixtureId;
-  static uint16_t ids[] = { 0 };
-  g_fx = new DimmerEffect({ids, 1}, 0.5f);
-  g_show.addEffect(g_fx);
+  // --- F3: load the show from LittleFS, else fall back ---
+  bool from_bundle = setup_show_from_bundle();
+  if (!from_bundle) {
+    setup_hardcoded_fallback();
+  }
 
-  // --- F2: pixel matrix on universes 1+2 (Raw mode, Art-Net) ---
-  MatrixMap mm = {};
-  mm.width = MX_W;
-  mm.height = MX_H;
-  mm.serpentine = true;
-  mm.vertical = false;
-  mm.order = ColorOrder::RGB;
-  mm.startUniverse = 1;
-  mm.startChannel = 0;
-  g_matrix = new PixelMatrix(mm);
-  g_pattern = new RainbowScrollPattern(/*periodSec*/ 4.0f, /*cyclesAcross*/ 2.0f);
-  g_matrix->setPattern(g_pattern);
-  g_matrix->setMasterBrightness(0.8f);
-
-  // One ArtNetSink instance serves both matrix universes (send() stamps the
-  // universe index per packet).
-  g_show.configureUniverse(1, UniverseMode::Raw, g_artnet);
-  g_show.configureUniverse(2, UniverseMode::Raw, g_artnet);
-
-  ESP_LOGI(TAG, "matrix %ux%u -> universes %u..%u (Art-Net)",
-           MX_W, MX_H, mm.startUniverse,
-           mm.startUniverse + g_matrix->universeCount() - 1);
-
-  // --- Render task (core 1, 44 Hz, with pre_render filling the matrix) ---
+  // --- Render task (core 1, 44 Hz, pre_render drives all matrices) ---
   RenderTaskConfig rcfg = {};
   rcfg.show       = &g_show;
   rcfg.targetHz   = 44;
@@ -205,14 +259,12 @@ extern "C" void app_main(void) {
   }
   led_status_set(LED_BLINK_FAST);
 
-  // Reflect WiFi state on the LED (best-effort; loop in app_main is fine
-  // because everything else runs in its own task).
+  ESP_LOGI(TAG, "F3 complete: show is %s.",
+           from_bundle ? "loaded from /littlefs/show.shw1" : "hardcoded fallback");
+  ESP_LOGI(TAG, "Swap the bundle file on LittleFS and reboot to change the patch.");
+
   while (true) {
-    if (wifi_is_connected()) {
-      led_status_set(LED_BLINK_DOUBLE);
-    } else {
-      led_status_set(LED_BLINK_FAST);
-    }
+    led_status_set(wifi_is_connected() ? LED_BLINK_DOUBLE : LED_BLINK_FAST);
     vTaskDelay(pdMS_TO_TICKS(2000));
   }
 }

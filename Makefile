@@ -49,6 +49,12 @@ PACING_SOURCES = render_pacing.cpp test_render_pacing.cpp
 PACING_OBJECTS = $(PACING_SOURCES:.cpp=.o)
 PACING_TARGET  = test_render_pacing
 
+# --- test_apply_loaded_show: F3 patch-routing glue (host-tested) ---
+APPLY_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp show.cpp show_bundle.cpp \
+                pixel_matrix.cpp apply_loaded_show.cpp test_apply_loaded_show.cpp
+APPLY_OBJECTS = $(APPLY_SOURCES:.cpp=.o)
+APPLY_TARGET  = test_apply_loaded_show
+
 # --- test_live_control: live control layer (MIDI/OSC/web → cues) tests ---
 LIVE_CONTROL_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp show.cpp \
                        show_control.cpp live_control.cpp test_live_control.cpp
@@ -94,6 +100,9 @@ $(PROVISION_TARGET): $(PROVISION_OBJECTS)
 $(PACING_TARGET): $(PACING_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(PACING_OBJECTS) -o $(PACING_TARGET) -lm
 
+$(APPLY_TARGET): $(APPLY_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(APPLY_OBJECTS) -o $(APPLY_TARGET) -lm
+
 $(LIVE_CONTROL_TARGET): $(LIVE_CONTROL_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(LIVE_CONTROL_OBJECTS) -o $(LIVE_CONTROL_TARGET) -lm
 
@@ -108,7 +117,7 @@ $(CONTROL_QUEUE_TARGET): $(CONTROL_QUEUE_SOURCES)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Run tests
-test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET) $(PACING_TARGET) $(LIVE_CONTROL_TARGET) $(WEB_PROTOCOL_TARGET) $(CONTROL_QUEUE_TARGET)
+test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET) $(PACING_TARGET) $(APPLY_TARGET) $(LIVE_CONTROL_TARGET) $(WEB_PROTOCOL_TARGET) $(CONTROL_QUEUE_TARGET)
 	./$(AIM_TARGET)
 	./$(FP_TARGET)
 	./$(SHOW_TARGET)
@@ -117,6 +126,7 @@ test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL
 	./$(PIXEL_MATRIX_TARGET)
 	./$(PROVISION_TARGET)
 	./$(PACING_TARGET)
+	./$(APPLY_TARGET)
 	./$(LIVE_CONTROL_TARGET)
 	./$(WEB_PROTOCOL_TARGET)
 	./$(CONTROL_QUEUE_TARGET)
@@ -126,7 +136,7 @@ clean:
 	rm -f $(AIM_OBJECTS) $(AIM_TARGET) $(FP_OBJECTS) $(FP_TARGET) $(SHOW_OBJECTS) $(SHOW_TARGET) \
 	      $(EFFECTS_OBJECTS) $(EFFECTS_TARGET) $(SHOW_CONTROL_OBJECTS) $(SHOW_CONTROL_TARGET) \
 	      $(PIXEL_MATRIX_OBJECTS) $(PIXEL_MATRIX_TARGET) $(PROVISION_OBJECTS) $(PROVISION_TARGET) \
-	      $(PACING_OBJECTS) $(PACING_TARGET) \
+	      $(PACING_OBJECTS) $(PACING_TARGET) $(APPLY_OBJECTS) $(APPLY_TARGET) \
 	      $(LIVE_CONTROL_OBJECTS) $(LIVE_CONTROL_TARGET) \
 	      $(WEB_PROTOCOL_OBJECTS) $(WEB_PROTOCOL_TARGET) \
 	      $(CONTROL_QUEUE_TARGET)

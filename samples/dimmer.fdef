@@ -1,0 +1,7 @@
+# samples/dimmer.fdef — a simple 4-channel RGB dimmer fixture.
+FIXTURE Dimmer RGB
+FOOTPRINT 4
+CAP Dimmer 0
+CAP Red    1
+CAP Green  2
+CAP Blue   3

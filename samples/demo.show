@@ -1,0 +1,29 @@
+# samples/demo.show — a small demo patch for F3 bring-up.
+#
+# Two DMX universes (0 = DMX, 1 = Art-Net) plus a 16x8 RGB matrix on
+# Art-Net universes 2..3. Compile with:
+#   ./provision samples/demo.show firmware/main/data/show.shw1
+#
+# (The provision compiler resolves fixture .fdef files by basename from the
+# current working directory; run from the repo root so samples/*.fdef resolve.)
+
+UNIVERSE 0 DMX
+UNIVERSE 1 ARTNET
+UNIVERSE 2 ARTNET
+UNIVERSE 3 ARTNET
+
+# Two dimmer fixtures on DMX universe 0.
+FIXTURE samples/dimmer.fdef 0 1
+FIXTURE samples/dimmer.fdef 0 11
+
+# One moving head on DMX universe 0, base 21.
+FIXTURE samples/head.fdef 0 21
+POS 2.0 1.0 0.0
+ROT 0 0 0
+CENTER 0.5 0.5
+
+# One dimmer fixture on Art-Net universe 1 (for a remote Art-Net node).
+FIXTURE samples/dimmer.fdef 1 1
+
+# A 16x8 RGB matrix on Art-Net universes 2..3, serpentine horizontal, RGB order.
+MATRIX 2 0 16 8 SERP H RGB

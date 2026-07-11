@@ -1,0 +1,13 @@
+# samples/head.fdef — a 9-channel moving head (dimmer, 16-bit pan/tilt, RGB, shutter).
+FIXTURE Moving Head
+FOOTPRINT 9
+HEAD
+PANRANGE 540
+TILTRANGE 270
+CAP Dimmer 0
+CAP Pan    1 2
+CAP Tilt   3 4
+CAP Red    5
+CAP Green  6
+CAP Blue   7
+CAP ShutterStrobe 8 - 8

@@ -141,3 +141,54 @@ Files added/changed:
 - Status LED: double-pulse when WiFi is up, fast blink while connecting.
 
 ---
+
+### Phase F3 — Load the show from storage  (GLM mount + Haiku-style patch glue)
+
+Mount LittleFS. At boot, read `/littlefs/show.shw1` and call the host-tested
+`loadShow`. Then iterate the `LoadedShow` and configure the running `Show` via
+the host-tested `applyLoadedShow` — `patch`/`patchHead` each fixture, register
+matrices (as Raw universes), and map each universe's `transport` to the right
+sink (Dmx -> DmxSink, ArtNet -> ArtNetSink). Now the show is data-driven, not
+hardcoded.
+
+**Split (per the plan):** filesystem mount + bundle read = GLM (init is
+finicky). The "iterate LoadedShow -> Show::patch + sink routing" is a
+mechanical transcription against `loadShow`'s already-tested output ->
+Haiku-style, with F0-F2 as the working example. It is extracted into
+`apply_loaded_show.{h,cpp}` with a host test using MockSinks, so even the
+"glue" half keeps a `make test` gate.
+
+**Extracted testable:** `applyLoadedShow(LoadedShow&, Show&, ISinkFactory&)` —
+a pure function that decides each universe's mode (Raw for matrix universes,
+Fixture otherwise), routes sinks via a factory, and patches every fixture
+including moving-head geometry. `test_apply_loaded_show.cpp` covers 6 cases
+including a large matrix spanning multiple universes, unsupported transports,
+and out-of-range fixtures. ASAN caught a dangling-pointer bug in the test's
+MockSinkFactory (a `std::vector` reallocation) — exactly why we test.
+
+Files added/changed:
+- `apply_loaded_show.h` / `apply_loaded_show.cpp` — host-tested patch routing.
+- `test_apply_loaded_show.cpp` — 6 tests, wired into `make test`.
+- `firmware/main/storage_manager.{h,cpp}` — LittleFS mount + SHW1 read +
+  `loadShow` call.
+- `firmware/main/main.cpp` — F3: `setup_show_from_bundle()` reads the bundle,
+  calls `applyLoadedShow` with a `DeviceSinkFactory`, builds `PixelMatrix`
+  objects from `ls.matrices`. Falls back to the hardcoded patch if no bundle.
+- `firmware/main/data/show.shw1` — a pre-built demo bundle (2 dimmers + 1
+  moving head on DMX u0, 1 dimmer on Art-Net u1, 16x8 matrix on Art-Net u2-3).
+- `samples/{demo.show,dimmer.fdef,head.fdef}` — source for the demo bundle.
+- `scripts/build_sample_bundle.sh` — rebuilds the bundle with the provision
+  compiler.
+- `firmware/main/CMakeLists.txt` — `littlefs_create_partition_image()` packs
+  `data/` (bundle + console) into the LittleFS partition at flash time.
+
+**You observe:**
+- Serial: `LittleFS mounted ...`, `read /littlefs/show.shw1 (295 bytes)`,
+  `show loaded: 4 universes, 4 fixtures, 1 matrices`, then
+  `applied: 4 universes configured, 4 fixtures (1 heads), 1 matrix universes`.
+- Swapping the bundle file on LittleFS and rebooting changes the patch with no
+  code change / no reflash of the firmware.
+- DMX fixtures respond per the bundle; the matrix lights per its MatrixMap.
+- Status LED: double-pulse (WiFi) + fast blink (render).
+
+---
