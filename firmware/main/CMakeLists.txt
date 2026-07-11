@@ -12,6 +12,7 @@ idf_component_register(
     SRCS
         main.cpp
         led_status.cpp
+        render_task.cpp
     INCLUDE_DIRS
         "."
 )
