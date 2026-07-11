@@ -220,3 +220,74 @@ make test
 Builds `test_aim` and `test_show` under
 `-std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined` and runs
 both. `renderFrame` performs zero heap allocation per frame.
+
+---
+
+# Effects Engine (Oscillators, Color, Time-Driven Effects)
+
+Turns time into `IEffect` intents. Pure computation — no hardware, no DMX,
+no buffers. Downstream of `show.h`; effects emit `CapIntent`/`AimIntent` by
+fixture id and never touch DMX buffers or fixture profiles directly.
+
+## Oscillators (`oscillator.h`/`.cpp`)
+
+```cpp
+enum class Waveform : uint8_t { Sine, Sawtooth, Triangle, Square };
+```
+
+Given `phase01` in `[0,1)`, `oscillator(w, phase01)` returns a value in
+`[0,1]`:
+
+- **Sine**: `0.5 + 0.5 * sin(2*PI*phase01)`
+- **Sawtooth**: `phase01`
+- **Triangle**: `phase01 < 0.5 ? 2*phase01 : 2*(1 - phase01)`
+- **Square**: `phase01 < 0.5 ? 0.0 : 1.0`
+
+`phaseFromTime(t, periodSec, phaseOffset01)` maps absolute time to a wrapped
+phase: `raw = t/periodSec + phaseOffset01; return raw - floor(raw)`.
+`periodSec <= 0` returns `0`.
+
+`OscillatedParam` swings a value between `min` and `max` on a waveform:
+`value(t) = min + (max-min) * oscillator(w, phaseFromTime(t, periodSec, phaseOffset01))`.
+
+**Worked example**: `OscillatedParam{Sawtooth, periodSec=2, phaseOffset01=0,
+min=0, max=100}.value(1)` — at `t=1` the phase is `1/2 = 0.5`, sawtooth of
+`0.5` is `0.5`, so the value is `0 + 100*0.5 = 50`.
+
+`beatsToSeconds(beats, bpm) = beats * 60 / bpm` (`bpm <= 0` returns `0`) lets
+an `OscillatedParam.periodSec` be built beat-synced, e.g. one cycle per beat
+at 120 BPM: `periodSec = beatsToSeconds(1, 120)` (= 0.5s).
+
+## Color (`color.h`/`.cpp`)
+
+`hsvToRgb(h01, s01, v01) -> Rgb{r,g,b}` — standard HSV to RGB conversion.
+Hue wraps (`h01` and `h01+1` are equal); saturation and value are clamped to
+`[0,1]`.
+
+## Effects (`effects.h`/`.cpp`)
+
+All implement `IEffect`, holding fixture ids and config from construction;
+`evaluate` only `push_back`s into the caller's vectors:
+
+- `DimmerEffect(ids, level)` — flat Dimmer intent per id.
+- `OscillatedDimmerEffect(ids, OscillatedParam)` — Dimmer driven by the param.
+- `ColorEffect(ids, r, g, b)` — flat Red/Green/Blue per id.
+- `HueRotateEffect(ids, periodSec, sat=1, val=1)` — hue cycles once per
+  `periodSec`, converted to RGB via `hsvToRgb`.
+- `ChaseEffect(ids, periodSec)` — one fixture lit at a time, cycling through
+  `ids` once per `periodSec`.
+- `StrobeEffect(ids, hz)` — Dimmer toggled by a Square oscillator at `hz`;
+  `hz <= 0` holds steady on.
+- `SweepEffect(id, dirA, dirB, periodSec)` — a single moving head's aim
+  direction oscillates between `dirA` and `dirB` on a Triangle wave (linear
+  back-and-forth), emitting one `AimIntent` per frame.
+
+## Building and testing
+
+```bash
+make test
+```
+
+Builds `test_aim`, `test_fixture_profile`, `test_show`, and `test_effects`
+under `-std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined` and
+runs all four. `evaluate` performs zero heap allocation of its own.
