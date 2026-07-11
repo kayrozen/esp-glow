@@ -1,3 +1,4 @@
+<<<<<<< ours
 #ifdef ESP_PLATFORM
 
 //
@@ -139,5 +140,155 @@ void web_server_task() {
 }
 
 }  // extern "C"
+=======
+// web_input.cpp — device-only HTTP + WebSocket server for the web console.
+#ifdef ESP_PLATFORM
+
+#include "web_input.h"
+#include "web_input_handler.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "esp_http_server.h"
+#include <cstdio>
+#include <cstring>
+#include <cstdio>
+
+static const char* TAG = "web_input";
+
+static LiveControl*      s_live = nullptr;
+static httpd_handle_t    s_server = nullptr;
+static int               s_ws_fd = -1;   // latest connected client fd
+
+static float now_sec() { return (float)(esp_timer_get_time() / 1000000.0); }
+
+// --- WebSocket handler at /ws ---
+static esp_err_t ws_handler(httpd_req_t* req) {
+  // On the initial GET (the WS upgrade), esp_http_server sends the 101 and
+  // then invokes this handler once. We use that first call to push the config
+  // snapshot and record the fd for later broadcasts.
+  s_ws_fd = httpd_req_to_sockfd(req);
+
+  if (s_live) {
+    char buf[512];
+    size_t n = web_input_build_config(*s_live, buf, sizeof(buf));
+    if (n > 0) {
+      httpd_ws_frame_t f = {};
+      f.type = HTTPD_WS_TYPE_TEXT;
+      f.payload = (uint8_t*)buf;
+      f.len = n;
+      f.final = true;
+      httpd_ws_send_frame(req, &f);
+    }
+  }
+
+  // Read one inbound frame (if any). The first call after upgrade may have no
+  // pending frame; recv with len 0 peeks the size.
+  httpd_ws_frame_t f = {};
+  f.type = HTTPD_WS_TYPE_TEXT;
+  esp_err_t e = httpd_ws_recv_frame(req, &f, 0);
+  if (e != ESP_OK || f.len == 0) {
+    return ESP_OK;  // no payload yet (upgrade-only invocation)
+  }
+  if (f.len > 256) {
+    // Oversized frame: drain and ignore.
+    uint8_t tmp[256];
+    f.payload = tmp;
+    httpd_ws_recv_frame(req, &f, sizeof(tmp));
+    return ESP_OK;
+  }
+  char text[257] = {0};
+  f.payload = (uint8_t*)text;
+  e = httpd_ws_recv_frame(req, &f, sizeof(text) - 1);
+  if (e != ESP_OK) return ESP_OK;
+  text[f.len] = 0;
+
+  if (s_live) {
+    web_input_handle_text_frame(text, *s_live, now_sec());
+  }
+  return ESP_OK;
+}
+
+// --- Static file handler: /littlefs/console/<uri> ---
+static esp_err_t file_handler(httpd_req_t* req) {
+  const char* uri = req->uri;
+  if (strcmp(uri, "/") == 0) uri = "/index.html";
+
+  char path[80];
+  snprintf(path, sizeof(path), "/littlefs/console%s", uri);
+
+  FILE* fp = fopen(path, "rb");
+  if (!fp) {
+    httpd_resp_send_404(req);
+    return ESP_OK;
+  }
+
+  if (strstr(uri, ".html"))      httpd_resp_set_type(req, "text/html");
+  else if (strstr(uri, ".js"))   httpd_resp_set_type(req, "application/javascript");
+  else if (strstr(uri, ".css"))  httpd_resp_set_type(req, "text/css");
+  else if (strstr(uri, ".json")) httpd_resp_set_type(req, "application/json");
+  else                            httpd_resp_set_type(req, "application/octet-stream");
+
+  char buf[512];
+  size_t n;
+  while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) {
+    if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) break;
+  }
+  fclose(fp);
+  httpd_resp_send_chunk(req, nullptr, 0);
+  return ESP_OK;
+}
+
+bool web_input_start(const WebInputConfig* cfg) {
+  if (!cfg || !cfg->live) return false;
+  s_live = cfg->live;
+
+  httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
+  hc.server_port = cfg->port ? cfg->port : 80;
+  hc.max_uri_handlers = 8;
+  hc.lru_purge_enable = true;
+  hc.stack_size = 6144;
+
+  esp_err_t e = httpd_start(&s_server, &hc);
+  if (e != ESP_OK) {
+    ESP_LOGE(TAG, "httpd_start: %s", esp_err_to_name(e));
+    return false;
+  }
+
+  httpd_uri_t ws = {};
+  ws.uri = "/ws";
+  ws.method = HTTP_GET;
+  ws.handler = ws_handler;
+  ws.is_websocket = true;
+  ws.support_ws_subprotocol = nullptr;
+  httpd_register_uri_handler(s_server, &ws);
+
+  httpd_uri_t files = {};
+  files.uri = "/*";
+  files.method = HTTP_GET;
+  files.handler = file_handler;
+  httpd_register_uri_handler(s_server, &files);
+
+  ESP_LOGI(TAG, "web console on http://<ip>:%u/  (ws at /ws)", hc.server_port);
+  return true;
+}
+
+void web_input_stop(void) {
+  if (s_server) {
+    httpd_stop(s_server);
+    s_server = nullptr;
+    s_ws_fd = -1;
+  }
+}
+
+void web_input_broadcast_state(const char* json) {
+  if (!json || s_ws_fd < 0 || !s_server) return;
+  httpd_ws_frame_t f = {};
+  f.type = HTTPD_WS_TYPE_TEXT;
+  f.payload = (uint8_t*)json;
+  f.len = strlen(json);
+  f.final = true;
+  httpd_ws_send_frame_async(s_server, s_ws_fd, &f);
+}
+>>>>>>> theirs
 
 #endif  // ESP_PLATFORM

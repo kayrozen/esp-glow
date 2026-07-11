@@ -25,6 +25,29 @@ config GLOW_DMX_RTS_GPIO
         The UART RTS pin, which esp_dmx toggles for the DMX break/MAB and
         to drive the RS485 transceiver's DE + /RE lines (wire them together).
 
+config GLOW_MIDI_UART
+    int "MIDI UART number"
+    default 1
+    help
+        UART peripheral for DIN-MIDI (31250 baud). Default UART1 (UART0 is
+        the console).
+
+config GLOW_MIDI_RX_GPIO
+    int "MIDI RX GPIO (opto output)"
+    default 16
+
+config GLOW_MIDI_TX_GPIO
+    int "MIDI TX GPIO (-1 = listen only)"
+    default -1
+
+config GLOW_OSC_PORT
+    int "OSC UDP listen port"
+    default 8000
+
+config GLOW_WEB_PORT
+    int "Web console HTTP port"
+    default 80
+
 config GLOW_WIFI_SSID
     string "WiFi SSID"
     default "esp-glow"

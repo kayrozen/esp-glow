@@ -1,3 +1,4 @@
+<<<<<<< ours
 #include "live_control.h"
 #include "show_control.h"
 
@@ -93,10 +94,87 @@ void LiveControl::handle(const ControlEvent& ev, float t) {
       master_ = ev.value;
       if (master_ < 0.0f) master_ = 0.0f;
       if (master_ > 1.0f) master_ = 1.0f;
+=======
+// live_control.cpp — input-to-ShowController dispatch.
+#include "live_control.h"
+#include <cstring>
+#include <algorithm>
+
+LiveControl::LiveControl(ShowController& controller) : controller_(controller) {}
+
+void LiveControl::bindMidiNote(uint8_t channel, uint8_t note, uint16_t cueId) {
+  midi_.push_back({channel, note, cueId, /*isCC*/ false});
+}
+void LiveControl::bindMidiCC(uint8_t channel, uint8_t cc, uint16_t cueId) {
+  midi_.push_back({channel, cc, cueId, /*isCC*/ true});
+}
+void LiveControl::bindOsc(const char* address, uint16_t cueId, bool releaseOnZero) {
+  OscBinding b{};
+  std::strncpy(b.address, address ? address : "", sizeof(b.address) - 1);
+  b.cueId = cueId;
+  b.releaseOnZero = releaseOnZero;
+  osc_.push_back(b);
+}
+void LiveControl::bindWebButton(uint8_t buttonId, uint16_t cueId, const char* label) {
+  web_.push_back({buttonId, cueId, label});
+}
+
+void LiveControl::handleMidi(const MidiEvent& ev, float t) {
+  if (ev.type == MidiEvent::NoteOn) {
+    for (const auto& b : midi_) {
+      if (!b.isCC && b.channel == ev.channel && b.index == ev.data1) {
+        if (ev.data2 > 0) controller_.go(b.cueId, t);
+        else              controller_.release(b.cueId, t);  // velocity 0 = off
+        return;
+      }
+    }
+  } else if (ev.type == MidiEvent::NoteOff) {
+    for (const auto& b : midi_) {
+      if (!b.isCC && b.channel == ev.channel && b.index == ev.data1) {
+        controller_.release(b.cueId, t);
+        return;
+      }
+    }
+  } else if (ev.type == MidiEvent::ControlChange) {
+    for (const auto& b : midi_) {
+      if (b.isCC && b.channel == ev.channel && b.index == ev.data1) {
+        if (ev.data2 > 0) controller_.go(b.cueId, t);
+        else              controller_.release(b.cueId, t);
+        return;
+      }
     }
   }
 }
 
+void LiveControl::handleOsc(const char* address, float arg, bool hasArg, float t) {
+  if (!address) return;
+  for (const auto& b : osc_) {
+    if (std::strncmp(b.address, address, sizeof(b.address)) == 0) {
+      if (b.releaseOnZero && hasArg && arg <= 0.0f) {
+        controller_.release(b.cueId, t);
+      } else {
+        controller_.go(b.cueId, t);
+      }
+      return;
+>>>>>>> theirs
+    }
+  }
+}
+
+<<<<<<< ours
 float LiveControl::masterLevel() const {
   return master_;
+=======
+void LiveControl::handleWebCueGo(uint16_t cueId, float t)      { controller_.go(cueId, t); }
+void LiveControl::handleWebCueRelease(uint16_t cueId, float t)  { controller_.release(cueId, t); }
+void LiveControl::handleWebScene(uint16_t sceneId, float t)     { controller_.goScene(sceneId, t); }
+
+void LiveControl::handleWebButton(uint8_t buttonId, float t) {
+  for (const auto& b : web_) {
+    if (b.id == buttonId) {
+      controller_.go(b.cueId, t);
+      return;
+    }
+  }
+>>>>>>> theirs
 }

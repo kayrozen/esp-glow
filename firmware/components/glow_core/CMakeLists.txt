@@ -43,10 +43,19 @@ idf_component_register(
         ${GLOW_ROOT}/render_pacing.cpp
         # F3: host-tested patch routing from a LoadedShow
         ${GLOW_ROOT}/apply_loaded_show.cpp
+        # F4: host-tested input parsers + binding layer
+        ${GLOW_ROOT}/midi_parser.cpp
+        ${GLOW_ROOT}/osc_parser.cpp
+        ${GLOW_ROOT}/web_input_handler.cpp
+        ${GLOW_ROOT}/live_control.cpp
         # device-only DMX sink (#ifdef ESP_PLATFORM guarded; filled in F1)
         ${GLOW_ROOT}/dmx_sink.cpp
         # device-only Art-Net sink (#ifdef ESP_PLATFORM guarded; filled in F2)
         ${GLOW_ROOT}/artnet_sink.cpp
+        # device-only input transports (#ifdef ESP_PLATFORM guarded; F4)
+        ${GLOW_ROOT}/midi_input.cpp
+        ${GLOW_ROOT}/osc_input.cpp
+        ${GLOW_ROOT}/web_input.cpp
     INCLUDE_DIRS
         ${GLOW_ROOT}
 )

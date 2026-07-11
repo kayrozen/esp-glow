@@ -1,11 +1,84 @@
 <!doctype html>
-<!-- F3 placeholder. F4 replaces this with the real Preact console that talks
-     to the WebSocket endpoint in web_input.cpp. Kept here so the LittleFS
-     image builds and the HTTP server has something to serve at / . -->
-<html><head><meta charset="utf-8"><title>esp-glow</title></head>
-<body style="font-family:system-ui;background:#111;color:#eee;padding:2rem">
-<h1>esp-glow</h1>
-<p>Firmware is up. The Preact console lands in F4.</p>
-<p>For now, validate the show via DMX / Art-Net / Wireshark as described in
-README_FIRMWARE.md (phase F3).</p>
-</body></html>
+<!-- esp-glow web console. Served from LittleFS at / by web_input.cpp.
+     Connects to /ws, receives a `config` snapshot (cue buttons), and sends
+     {"type":"go"/"release","cue":N} on tap. Tiny: no build step, Preact via
+     CDN, single HTML file. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>esp-glow</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; background:#0d0d12; color:#eee;
+         margin:0; padding:1rem; min-height:100vh; }
+  h1 { font-size:1.1rem; margin:0 0 .5rem; color:#9ad; letter-spacing:.05em; }
+  .status { font-size:.8rem; color:#888; margin-bottom:1rem; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr));
+          gap:.6rem; }
+  button { background:#1c1c28; color:#eee; border:1px solid #2a2a3a;
+           border-radius:.5rem; padding:1.2rem .5rem; font-size:.95rem;
+           cursor:pointer; touch-action:manipulation; transition:background .08s; }
+  button:active { background:#2a4a6a; transform:scale(.97); }
+  button.active { background:#3a5a8a; border-color:#5a8acf; }
+</style>
+</head>
+<body>
+<h1>esp-glow console</h1>
+<div class="status" id="status">connecting…</div>
+<div class="grid" id="grid"></div>
+
+<script>
+// No framework needed for this size; plain DOM keeps the console < 3 KB and
+// avoids a CDN dependency on the field network.
+const grid = document.getElementById('grid');
+const status = document.getElementById('status');
+let ws = null;
+let buttons = [];
+const active = new Set();
+
+function render() {
+  grid.innerHTML = '';
+  buttons.forEach(b => {
+    const el = document.createElement('button');
+    el.textContent = b.label || ('Cue ' + b.cue);
+    el.dataset.cue = b.cue;
+    if (active.has(b.cue)) el.classList.add('active');
+    // touch+mouse friendly: go on pointerdown, release on pointerup (momentary)
+    el.addEventListener('pointerdown', () => send({type:'go', cue:b.cue}));
+    el.addEventListener('pointerup',   () => send({type:'release', cue:b.cue}));
+    el.addEventListener('pointerleave',() => send({type:'release', cue:b.cue}));
+    grid.appendChild(el);
+  });
+}
+
+function send(obj) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
+}
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto + '//' + location.host + '/ws');
+  ws.onopen = () => { status.textContent = 'connected'; };
+  ws.onmessage = (ev) => {
+    let m;
+    try { m = JSON.parse(ev.data); } catch { return; }
+    if (m.type === 'config') {
+      buttons = m.buttons || [];
+      render();
+    } else if (m.type === 'state') {
+      active.clear();
+      (m.active || []).forEach(c => active.add(c));
+      render();
+    }
+  };
+  ws.onclose = () => {
+    status.textContent = 'disconnected — retrying in 1s';
+    setTimeout(connect, 1000);
+  };
+  ws.onerror = () => { ws.close(); };
+}
+connect();
+</script>
+</body>
+</html>

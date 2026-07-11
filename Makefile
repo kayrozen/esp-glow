@@ -55,6 +55,24 @@ APPLY_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp show.cpp show_bundle.cp
 APPLY_OBJECTS = $(APPLY_SOURCES:.cpp=.o)
 APPLY_TARGET  = test_apply_loaded_show
 
+# --- test_midi_parser: F4 MIDI byte-stream parser (host-tested) ---
+MIDI_SOURCES = midi_parser.cpp test_midi_parser.cpp
+MIDI_OBJECTS = $(MIDI_SOURCES:.cpp=.o)
+MIDI_TARGET  = test_midi_parser
+
+# --- test_osc_parser: F4 OSC packet parser (host-tested) ---
+OSC_SOURCES = osc_parser.cpp test_osc_parser.cpp
+OSC_OBJECTS = $(OSC_SOURCES:.cpp=.o)
+OSC_TARGET  = test_osc_parser
+
+# --- test_web_input_handler: F4 JSON->LiveControl dispatch (host-tested) ---
+WEB_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp show.cpp show_control.cpp \
+              effects.cpp oscillator.cpp color.cpp midi_parser.cpp osc_parser.cpp \
+              web_input_handler.cpp live_control.cpp \
+              test_web_input_handler.cpp
+WEB_OBJECTS = $(WEB_SOURCES:.cpp=.o)
+WEB_TARGET  = test_web_input_handler
+
 # --- test_live_control: live control layer (MIDI/OSC/web → cues) tests ---
 LIVE_CONTROL_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp show.cpp \
                        show_control.cpp live_control.cpp test_live_control.cpp
@@ -103,6 +121,15 @@ $(PACING_TARGET): $(PACING_OBJECTS)
 $(APPLY_TARGET): $(APPLY_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(APPLY_OBJECTS) -o $(APPLY_TARGET) -lm
 
+$(MIDI_TARGET): $(MIDI_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(MIDI_OBJECTS) -o $(MIDI_TARGET) -lm
+
+$(OSC_TARGET): $(OSC_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(OSC_OBJECTS) -o $(OSC_TARGET) -lm
+
+$(WEB_TARGET): $(WEB_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(WEB_OBJECTS) -o $(WEB_TARGET) -lm
+
 $(LIVE_CONTROL_TARGET): $(LIVE_CONTROL_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(LIVE_CONTROL_OBJECTS) -o $(LIVE_CONTROL_TARGET) -lm
 
@@ -117,7 +144,7 @@ $(CONTROL_QUEUE_TARGET): $(CONTROL_QUEUE_SOURCES)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Run tests
-test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET) $(PACING_TARGET) $(APPLY_TARGET) $(LIVE_CONTROL_TARGET) $(WEB_PROTOCOL_TARGET) $(CONTROL_QUEUE_TARGET)
+test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET) $(PACING_TARGET) $(APPLY_TARGET) $(MIDI_TARGET) $(OSC_TARGET) $(WEB_TARGET) $(LIVE_CONTROL_TARGET) $(WEB_PROTOCOL_TARGET) $(CONTROL_QUEUE_TARGET)
 	./$(AIM_TARGET)
 	./$(FP_TARGET)
 	./$(SHOW_TARGET)
@@ -127,6 +154,9 @@ test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL
 	./$(PROVISION_TARGET)
 	./$(PACING_TARGET)
 	./$(APPLY_TARGET)
+	./$(MIDI_TARGET)
+	./$(OSC_TARGET)
+	./$(WEB_TARGET)
 	./$(LIVE_CONTROL_TARGET)
 	./$(WEB_PROTOCOL_TARGET)
 	./$(CONTROL_QUEUE_TARGET)
@@ -137,6 +167,7 @@ clean:
 	      $(EFFECTS_OBJECTS) $(EFFECTS_TARGET) $(SHOW_CONTROL_OBJECTS) $(SHOW_CONTROL_TARGET) \
 	      $(PIXEL_MATRIX_OBJECTS) $(PIXEL_MATRIX_TARGET) $(PROVISION_OBJECTS) $(PROVISION_TARGET) \
 	      $(PACING_OBJECTS) $(PACING_TARGET) $(APPLY_OBJECTS) $(APPLY_TARGET) \
+	      $(MIDI_OBJECTS) $(MIDI_TARGET) $(OSC_OBJECTS) $(OSC_TARGET) $(WEB_OBJECTS) $(WEB_TARGET) \
 	      $(LIVE_CONTROL_OBJECTS) $(LIVE_CONTROL_TARGET) \
 	      $(WEB_PROTOCOL_OBJECTS) $(WEB_PROTOCOL_TARGET) \
 	      $(CONTROL_QUEUE_TARGET)

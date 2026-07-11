@@ -1,3 +1,4 @@
+<<<<<<< ours
 #pragma once
 
 #include <cstdint>
@@ -82,3 +83,33 @@ size_t buildConfigJson(const WebCueInfo* cues, size_t nCues,
 // `activeIds` may be nullptr only if nActive is 0.
 size_t buildStateJson(const uint16_t* activeIds, size_t nActive,
                       char* buf, size_t bufLen);
+=======
+// web_protocol.h — JSON message schema for the Preact <-> firmware WebSocket.
+//
+// The console (firmware/main/data/console/) and web_input.cpp exchange tiny
+// JSON text frames. The shapes are fixed and small, so we parse them with a
+// hand-rolled scanner (no cJSON dependency) in web_input_handler.cpp.
+//
+// Inbound (browser -> device):
+//   {"type":"go","cue":N}        trigger cue N
+//   {"type":"release","cue":N}   release cue N
+//   {"type":"scene","id":N}      go scene N
+//   {"type":"button","id":N}     fire web-button binding N
+//
+// Outbound (device -> browser), sent on connect and on state change:
+//   {"type":"config","cues":[{"id":N,"label":"..."}],"buttons":[{"id":N,"cue":N,"label":"..."}]}
+//   {"type":"state","active":[N,M,...]}
+#pragma once
+
+#include <cstdint>
+
+// Inbound message types (matched as substrings by the handler).
+#define WEB_TYPE_GO      "go"
+#define WEB_TYPE_RELEASE "release"
+#define WEB_TYPE_SCENE   "scene"
+#define WEB_TYPE_BUTTON  "button"
+
+// Outbound message type strings.
+#define WEB_OUT_CONFIG "config"
+#define WEB_OUT_STATE  "state"
+>>>>>>> theirs

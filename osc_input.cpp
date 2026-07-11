@@ -1,3 +1,4 @@
+<<<<<<< ours
 #ifdef ESP_PLATFORM
 
 //
@@ -102,3 +103,86 @@ void osc_server_task() {
 }
 
 #endif
+=======
+// osc_input.cpp — device-only UDP OSC receiver.
+#ifdef ESP_PLATFORM
+
+#include "osc_input.h"
+#include "osc_parser.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "lwip/sockets.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#include <cstring>
+
+static const char* TAG = "osc_input";
+static int s_sock = -1;
+static TaskHandle_t s_task = nullptr;
+static LiveControl* s_live = nullptr;
+
+static float now_sec() { return (float)(esp_timer_get_time() / 1000000.0); }
+
+static void osc_task(void*) {
+  static uint8_t buf[1024];
+  while (true) {
+    struct sockaddr_in src = {};
+    socklen_t sl = sizeof(src);
+    int n = recvfrom(s_sock, buf, sizeof(buf), 0,
+                     (struct sockaddr*)&src, &sl);
+    if (n <= 0) {
+      // EINTR / socket closed: small delay then retry.
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
+    if (!s_live) continue;
+    OscMessage m;
+    if (!parseOsc(buf, (size_t)n, m)) continue;
+    if (!m.valid || !m.address) continue;
+    float arg = 0.0f;
+    bool hasArg = false;
+    if (m.arg.type == OscArg::Float32) { arg = m.arg.f; hasArg = true; }
+    else if (m.arg.type == OscArg::Int32) { arg = (float)m.arg.i; hasArg = true; }
+    s_live->handleOsc(m.address, arg, hasArg, now_sec());
+  }
+}
+
+bool osc_input_start(const OscInputConfig* cfg) {
+  if (!cfg || !cfg->live) return false;
+  s_live = cfg->live;
+
+  s_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  if (s_sock < 0) {
+    ESP_LOGE(TAG, "socket(): errno %d", errno);
+    return false;
+  }
+  struct sockaddr_in bind = {};
+  bind.sin_family = AF_INET;
+  bind.sin_port = htons(cfg->port);
+  bind.sin_addr.s_addr = htonl(INADDR_ANY);
+  if (bind(s_sock, (struct sockaddr*)&bind, sizeof(bind)) != 0) {
+    ESP_LOGE(TAG, "bind(%u): errno %d", (unsigned)cfg->port, errno);
+    close(s_sock);
+    s_sock = -1;
+    return false;
+  }
+  BaseType_t ok = xTaskCreate(osc_task, "osc", 3072, nullptr,
+                              tskIDLE_PRIORITY + 2, &s_task);
+  if (ok != pdPASS) {
+    ESP_LOGE(TAG, "task create failed");
+    close(s_sock);
+    s_sock = -1;
+    return false;
+  }
+  ESP_LOGI(TAG, "OSC listening on UDP %u", (unsigned)cfg->port);
+  return true;
+}
+
+void osc_input_stop(void) {
+  if (s_task) { vTaskDelete(s_task); s_task = nullptr; }
+  if (s_sock >= 0) { close(s_sock); s_sock = -1; }
+}
+
+#endif  // ESP_PLATFORM
+>>>>>>> theirs

@@ -192,3 +192,57 @@ Files added/changed:
 - Status LED: double-pulse (WiFi) + fast blink (render).
 
 ---
+
+### Phase F4 — Inputs: web + MIDI + OSC  (GLM)
+
+Fill the three input scaffolds. The parsers underneath are already
+host-tested, so the risk is confined to the transport wiring:
+
+- **`web_input.cpp`** — `esp_http_server` with a WebSocket endpoint at `/ws`
+  feeding the host-tested `web_input_handle_text_frame` -> `LiveControl`.
+  Serves the Preact console bundle from LittleFS (`/littlefs/console/`).
+  Sends the `config` snapshot on connect; a state broadcaster pushes
+  `{"type":"state","active":[...]}` every 500ms.
+- **`midi_input.cpp`** — DIN-MIDI over UART (31250 baud) -> `parseMidi`
+  (host-tested) -> `LiveControl::handle`. Native USB-MIDI via TinyUSB is
+  stubbed via `midi_input_feed_bytes()` (the descriptor is board-specific).
+- **`osc_input.cpp`** — UDP socket -> `parseOsc` (host-tested) ->
+  `LiveControl::handle`.
+
+**Host-tested helpers added (the plan's "already-tested" parsers, created
+here because they did not yet exist):**
+- `midi_parser.{h,cpp}` + `test_midi_parser.cpp` — 11 tests: running status,
+  real-time interleaving, SysEx abort, variable data-byte counts.
+- `osc_parser.{h,cpp}` + `test_osc_parser.cpp` — 8 tests: float/int args,
+  bundles, blob/string skip, malformed rejection, 4-byte alignment.
+- `web_input_handler.{h,cpp}` + `test_web_input_handler.cpp` — 10 tests:
+  go/release/scene/button frames, malformed rejection, MIDI/OSC paths through
+  LiveControl (verified end-to-end against a MockSink), config JSON build.
+- `live_control.{h,cpp}` — input->ShowController binding layer (MIDI note/CC,
+  OSC address, web button -> cue go/release).
+- `web_protocol.h` — JSON message-shape constants.
+
+**Device transports** (`midi_input`, `osc_input`, `web_input`) are
+`#ifdef ESP_PLATFORM`-guarded and added to the `glow_core` component.
+
+Files added/changed:
+- Host-tested: `midi_parser.{h,cpp}`, `osc_parser.{h,cpp}`,
+  `web_input_handler.{h,cpp}`, `live_control.{h,cpp}`, `web_protocol.h`,
+  + 3 test files wired into `make test`.
+- Device-only: `midi_input.{h,cpp}`, `osc_input.{h,cpp}`, `web_input.{h,cpp}`.
+- `firmware/main/data/console/index.html` — minimal Preact-free console
+  (plain DOM, < 3 KB) that connects to /ws, renders cue buttons, sends
+  go/release on tap.
+- `firmware/main/main.cpp` — F4: ShowController + 2 demo cues (blackout/full),
+  LiveControl with MIDI/OSC/web bindings, starts all three input transports,
+  state broadcaster task.
+- `firmware/main/Kconfig.projbuild` — MIDI UART/pins, OSC port, web port.
+
+**You observe:**
+- Browser loads `http://<ip>/`; cue buttons render (config frame). Tapping
+  "Full" lights the patched fixtures; releasing dims them back.
+- MIDI pad: Note On (ch0, note 60) triggers "Full"; Note Off releases it.
+- OSC app: `/esp-glow/full` with a float triggers cue 1.
+- Serial: each transport logs its bring-up line.
+
+---
