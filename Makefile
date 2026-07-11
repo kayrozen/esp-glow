@@ -44,6 +44,17 @@ PROVISION_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp
 PROVISION_OBJECTS = $(PROVISION_SOURCES:.cpp=.o)
 PROVISION_TARGET  = test_provision
 
+# --- test_live_control: live control layer (MIDI/OSC/web → cues) tests ---
+LIVE_CONTROL_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp show.cpp \
+                       show_control.cpp live_control.cpp test_live_control.cpp
+LIVE_CONTROL_OBJECTS = $(LIVE_CONTROL_SOURCES:.cpp=.o)
+LIVE_CONTROL_TARGET  = test_live_control
+
+# --- test_web_protocol: web console JSON protocol testable core tests ---
+WEB_PROTOCOL_SOURCES = web_protocol.cpp test_web_protocol.cpp
+WEB_PROTOCOL_OBJECTS = $(WEB_PROTOCOL_SOURCES:.cpp=.o)
+WEB_PROTOCOL_TARGET  = test_web_protocol
+
 $(AIM_TARGET): $(AIM_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(AIM_OBJECTS) -o $(AIM_TARGET) -lm
 
@@ -65,12 +76,18 @@ $(PIXEL_MATRIX_TARGET): $(PIXEL_MATRIX_OBJECTS)
 $(PROVISION_TARGET): $(PROVISION_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(PROVISION_OBJECTS) -o $(PROVISION_TARGET) -lm
 
+$(LIVE_CONTROL_TARGET): $(LIVE_CONTROL_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(LIVE_CONTROL_OBJECTS) -o $(LIVE_CONTROL_TARGET) -lm
+
+$(WEB_PROTOCOL_TARGET): $(WEB_PROTOCOL_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(WEB_PROTOCOL_OBJECTS) -o $(WEB_PROTOCOL_TARGET) -lm
+
 # Compile object files
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Run tests
-test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET)
+test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET) $(LIVE_CONTROL_TARGET) $(WEB_PROTOCOL_TARGET)
 	./$(AIM_TARGET)
 	./$(FP_TARGET)
 	./$(SHOW_TARGET)
@@ -78,12 +95,16 @@ test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL
 	./$(SHOW_CONTROL_TARGET)
 	./$(PIXEL_MATRIX_TARGET)
 	./$(PROVISION_TARGET)
+	./$(LIVE_CONTROL_TARGET)
+	./$(WEB_PROTOCOL_TARGET)
 
 # Clean build artifacts
 clean:
 	rm -f $(AIM_OBJECTS) $(AIM_TARGET) $(FP_OBJECTS) $(FP_TARGET) $(SHOW_OBJECTS) $(SHOW_TARGET) \
 	      $(EFFECTS_OBJECTS) $(EFFECTS_TARGET) $(SHOW_CONTROL_OBJECTS) $(SHOW_CONTROL_TARGET) \
-	      $(PIXEL_MATRIX_OBJECTS) $(PIXEL_MATRIX_TARGET) $(PROVISION_OBJECTS) $(PROVISION_TARGET)
+	      $(PIXEL_MATRIX_OBJECTS) $(PIXEL_MATRIX_TARGET) $(PROVISION_OBJECTS) $(PROVISION_TARGET) \
+	      $(LIVE_CONTROL_OBJECTS) $(LIVE_CONTROL_TARGET) \
+	      $(WEB_PROTOCOL_OBJECTS) $(WEB_PROTOCOL_TARGET)
 
 # Rebuild
 rebuild: clean test
