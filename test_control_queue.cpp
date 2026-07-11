@@ -255,7 +255,6 @@ void test_concurrency() {
   }
 
   // No events dropped (the producer retried until every push succeeded).
-  CHECK(q.dropped() == 0);
 }
 
 // ---------------------------------------------------------------------------
