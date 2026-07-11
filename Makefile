@@ -8,6 +8,11 @@ AIM_SOURCES = vec_math.cpp aim.cpp test_aim.cpp
 AIM_OBJECTS = $(AIM_SOURCES:.cpp=.o)
 AIM_TARGET = test_aim
 
+# --- test_fixture_profile: fixture profile binary format tests ---
+FP_SOURCES = fixture_profile.cpp profile_encoder.cpp test_fixture_profile.cpp
+FP_OBJECTS = $(FP_SOURCES:.cpp=.o)
+FP_TARGET  = test_fixture_profile
+
 # --- test_show: render loop + show integration tests ---
 # Core + tests only; device sinks (dmx_sink.cpp, artnet_sink.cpp) are
 # device-only and excluded from the host build.
@@ -18,6 +23,9 @@ SHOW_TARGET = test_show
 $(AIM_TARGET): $(AIM_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(AIM_OBJECTS) -o $(AIM_TARGET) -lm
 
+$(FP_TARGET): $(FP_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(FP_OBJECTS) -o $(FP_TARGET) -lm
+
 $(SHOW_TARGET): $(SHOW_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(SHOW_OBJECTS) -o $(SHOW_TARGET) -lm
 
@@ -26,13 +34,14 @@ $(SHOW_TARGET): $(SHOW_OBJECTS)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Run tests
-test: $(AIM_TARGET) $(SHOW_TARGET)
+test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET)
 	./$(AIM_TARGET)
+	./$(FP_TARGET)
 	./$(SHOW_TARGET)
 
 # Clean build artifacts
 clean:
-	rm -f $(AIM_OBJECTS) $(AIM_TARGET) $(SHOW_OBJECTS) $(SHOW_TARGET)
+	rm -f $(AIM_OBJECTS) $(AIM_TARGET) $(FP_OBJECTS) $(FP_TARGET) $(SHOW_OBJECTS) $(SHOW_TARGET)
 
 # Rebuild
 rebuild: clean test
