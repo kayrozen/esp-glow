@@ -1,0 +1,35 @@
+diff a/firmware/main/render_task.cpp b/firmware/main/render_task.cpp	(rejected hunks)
+@@ -20,10 +20,13 @@ static TaskHandle_t s_task = nullptr;
+ static Show*        s_show = nullptr;
+ static uint32_t     s_periodUs = 0;
+ static volatile bool s_behind = false;
++static render_pre_render_fn s_pre_render = nullptr;
++static void*               s_pre_render_ctx = nullptr;
+ 
+ static void render_loop(void*) {
+-  ESP_LOGI(TAG, "render loop started on core %d (period=%lu us)",
+-           xPortGetCoreID(), (unsigned long)s_periodUs);
++  ESP_LOGI(TAG, "render loop started on core %d (period=%lu us%s)",
++           xPortGetCoreID(), (unsigned long)s_periodUs,
++           s_pre_render ? ", pre_render=on" : "");
+ 
+   uint64_t prevDeadline = 0;  // 0 => paceNextFrame seeds from nowUs
+   uint32_t frames = 0;
+@@ -37,6 +40,8 @@ static void render_loop(void*) {
+     prevDeadline = r.nextDeadlineUs;
+ 
+     if (s_show) {
++      // F2: let the caller populate Raw universes before the render+flush.
++      if (s_pre_render) s_pre_render(s_pre_render_ctx, r.nowSec, s_show);
+       s_show->renderFrame(r.nowSec);
+     }
+ 
+@@ -67,6 +72,8 @@ bool render_task_start(const RenderTaskConfig* cfg) {
+   if (s_task) return true;  // already running
+ 
+   s_show = cfg->show;
++  s_pre_render = cfg->pre_render;
++  s_pre_render_ctx = cfg->pre_render_ctx;
+   uint32_t hz = cfg->targetHz ? cfg->targetHz : glow::DEFAULT_RENDER_HZ;
+   s_periodUs = (hz == 0) ? glow::DEFAULT_RENDER_PERIOD_US : (1'000'000u / hz);
+ 

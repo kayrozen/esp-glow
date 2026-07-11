@@ -13,6 +13,7 @@ idf_component_register(
         main.cpp
         led_status.cpp
         render_task.cpp
+        wifi_manager.cpp
     INCLUDE_DIRS
         "."
 )
