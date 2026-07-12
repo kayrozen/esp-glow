@@ -188,40 +188,6 @@ public:
   }
 };
 
-// Forward declaration: defined below (near send_fx_error_to_ws), used here
-// as pumpEvalSubmissions's per-result callback.
-static void send_eval_result_to_ws(void* ctx, uint32_t requestId, bool ok, const char* err);
-
-static void on_pre_render(void* /*ctx*/, float t, Show* show) {
-  if (!show) return;
-
-  // F4 (pulled forward): drain queued web-console/MIDI/OSC events into
-  // g_liveControl -> g_controller BEFORE renderFrame, at the top of the
-  // frame, on the render task -- exactly control_queue.h's contract. This
-  // must not move after renderFrame: doing so would apply this frame's
-  // input a frame late every frame, not just occasionally.
-  if (g_controlQueue) {
-    pumpControlEvents(*g_controlQueue, g_liveControl, t);
-  }
-
-  // F4: same discipline for the eval channel -- bounded work per frame,
-  // each result broadcast to every connected console (see
-  // send_eval_result_to_ws; no submission carries a client fd to reply to
-  // directly, so broadcast + client-side seq matching is the only option).
-  if (g_evalQueue) {
-    glow::pumpEvalSubmissions(*g_evalQueue, /*maxPerFrame=*/4, send_eval_result_to_ws, nullptr);
-  }
-
-  for (PixelMatrix* m : g_md.matrices) {
-    m->render(t);
-    for (uint8_t i = 0; i < m->universeCount(); ++i) {
-      uint8_t uidx = m->universeIndex(i);
-      if (uidx >= show->universeCount()) continue;
-      show->writeRawUniverse(uidx, m->universeData(i), DMX_UNIVERSE_SIZE);
-    }
-  }
-}
-
 // F6: exposes g_md's matrices to glow.matrix.* by index (see glow_lua_api.h).
 class MainMatrixRegistry : public IMatrixRegistry {
 public:
@@ -232,12 +198,10 @@ public:
 };
 static MainMatrixRegistry g_matrixRegistry;
 
-// F6: the render task's post_render hook. This is the ONLY place the Lua
-// VM's GC ever runs (see lua_vm.h) -- it is created stopped specifically
-// so it can be confined to this bounded, measured window instead of
-// causing an uncontrolled pause on the render path. Skipping the call
-// entirely when the VM never initialized (g_luaReady false) is the
-// correct behavior, not an oversight: there is nothing to collect.
+// F6: whether the Lua VM ever initialized -- gates render_tick_hooks' Lua-
+// dependent work below (fx_error poll, gcStepSlack). Skipping that work
+// when g_luaReady is false is the correct behavior, not an oversight:
+// there is nothing Lua-related to poll or collect.
 static bool g_luaReady = false;
 
 // Fx-error broadcast: every connected client sees it (any of them may be
@@ -259,8 +223,8 @@ static void send_eval_result_to_ws(void* /*ctx*/, uint32_t requestId, bool ok, c
 // Periodic `state` broadcast (Phase-4 feedback, web_protocol.h): lets every
 // connected console reflect the demo cue's actual on/off state even when
 // it was toggled from a different client, MIDI, or OSC. This is a UI
-// indicator, not a control path, so a once-a-second cadence (see the frame
-// counter in on_post_render) is plenty.
+// indicator, not a control path, so a once-a-second cadence (see
+// render_tick_hooks' frame counter) is plenty.
 static void send_state_to_ws() {
   if (!g_hasDemoCue) return;
   uint16_t activeId = g_wsCues[0].id;
@@ -270,23 +234,85 @@ static void send_state_to_ws() {
   web_ws_broadcast(buf, n);
 }
 
-static void on_post_render(void* /*ctx*/, uint32_t slack_us) {
-  // State doesn't touch the Lua VM, so this runs regardless of g_luaReady
-  // -- a broken boot.fnl shouldn't also take down cue-state feedback.
-  static uint32_t frameCounter = 0;
-  if (++frameCounter >= 44) {  // ~once/sec at the render task's 44 Hz
-    frameCounter = 0;
-    send_state_to_ws();
+// The render task's two hook points, and what must run at each. This is
+// the ONE place that lists every per-frame queue/notification drain --
+// deliberately, after the fx_error drain shipped once in this project with
+// nothing calling it (no render-loop wiring, no header to call it from).
+// Splitting by phase isn't cosmetic: Pre must run BEFORE
+// show->renderFrame(t) (this frame's input must apply to THIS frame, not
+// arrive a frame late), Post must run AFTER (fx_error/state reflect this
+// frame's result; gcStepSlack spends time only known free once the frame
+// is actually done -- see render_task.cpp). Adding a fifth drain means
+// adding one call in the right case below, not remembering to also wire a
+// new call-site into on_pre_render/on_post_render separately.
+enum class RenderTickPhase { Pre, Post };
+
+static void render_tick_hooks(RenderTickPhase phase, float t, uint32_t slack_us) {
+  switch (phase) {
+    case RenderTickPhase::Pre:
+      // Drain queued web-console/MIDI/OSC events into g_liveControl ->
+      // g_controller -- exactly control_queue.h's contract.
+      if (g_controlQueue) {
+        pumpControlEvents(*g_controlQueue, g_liveControl, t);
+      }
+      // Same discipline for the eval channel -- bounded work per frame,
+      // each result broadcast to every connected console (see
+      // send_eval_result_to_ws; no submission carries a client fd to
+      // reply to directly, so broadcast + client-side seq matching is
+      // the only option).
+      if (g_evalQueue) {
+        glow::pumpEvalSubmissions(*g_evalQueue, /*maxPerFrame=*/4, send_eval_result_to_ws, nullptr);
+      }
+      break;
+
+    case RenderTickPhase::Post: {
+      // State doesn't touch the Lua VM, so this runs regardless of
+      // g_luaReady -- a broken boot.fnl shouldn't also take down
+      // cue-state feedback.
+      static uint32_t frameCounter = 0;
+      if (++frameCounter >= 44) {  // ~once/sec at the render task's 44 Hz
+        frameCounter = 0;
+        send_state_to_ws();
+      }
+
+      if (!g_luaReady) break;
+
+      // Poll every frame, independent of slack: an effect that just
+      // threw needs to be reported promptly, not only when there's GC
+      // time to spare.
+      web_input_poll_fx_error(glow::glowLuaApi(), send_fx_error_to_ws, nullptr);
+
+      // This is the ONLY place the Lua VM's GC ever runs (see lua_vm.h)
+      // -- it is created stopped specifically so it can be confined to
+      // this bounded, measured window instead of causing an uncontrolled
+      // pause on the render path. Must stay last in this phase: it's the
+      // one hook that consumes the frame's remaining slack rather than a
+      // fixed amount of work.
+      if (slack_us != 0) {
+        glow::glowLuaVM().gcStepSlack(slack_us);
+      }
+      break;
+    }
   }
+}
 
-  if (!g_luaReady) return;
+static void on_pre_render(void* /*ctx*/, float t, Show* show) {
+  if (!show) return;
 
-  // Poll every frame, independent of slack: an effect that just threw
-  // needs to be reported promptly, not only when there's GC time to spare.
-  web_input_poll_fx_error(glow::glowLuaApi(), send_fx_error_to_ws, nullptr);
+  render_tick_hooks(RenderTickPhase::Pre, t, 0);
 
-  if (slack_us == 0) return;
-  glow::glowLuaVM().gcStepSlack(slack_us);
+  for (PixelMatrix* m : g_md.matrices) {
+    m->render(t);
+    for (uint8_t i = 0; i < m->universeCount(); ++i) {
+      uint8_t uidx = m->universeIndex(i);
+      if (uidx >= show->universeCount()) continue;
+      show->writeRawUniverse(uidx, m->universeData(i), DMX_UNIVERSE_SIZE);
+    }
+  }
+}
+
+static void on_post_render(void* /*ctx*/, uint32_t slack_us) {
+  render_tick_hooks(RenderTickPhase::Post, 0.0f, slack_us);
 }
 
 // F6: initialize the single process-wide Lua VM, install glow.*, load the
