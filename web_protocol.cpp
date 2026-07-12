@@ -504,7 +504,7 @@ bool parseEvalCommand(const char* json, size_t len, uint32_t& outRequestId,
     if (k == "type") {
       if (!ps.parseStringRaw(typeStr)) return false;
       hasType = true;
-    } else if (k == "id") {
+    } else if (k == "seq") {
       if (!ps.parseNumber(idVal)) return false;
     } else if (k == "src") {
       size_t n = 0;
@@ -530,7 +530,7 @@ bool parseEvalCommand(const char* json, size_t len, uint32_t& outRequestId,
 size_t buildEvalResultJson(uint32_t requestId, bool ok, const char* err,
                           char* buf, size_t bufLen) {
   size_t w = 0;
-  w = appendRaw(buf, bufLen, w, "{\"type\":\"eval_result\",\"id\":");
+  w = appendRaw(buf, bufLen, w, "{\"type\":\"eval_result\",\"seq\":");
   w = appendUInt(buf, bufLen, w, requestId);
   w = appendRaw(buf, bufLen, w, ",\"ok\":");
   w = appendBool(buf, bufLen, w, ok);
@@ -538,6 +538,193 @@ size_t buildEvalResultJson(uint32_t requestId, bool ok, const char* err,
     w = appendRaw(buf, bufLen, w, ",\"err\":");
     w = appendString(buf, bufLen, w, err);
   }
+  w = appendChar(buf, bufLen, w, '}');
+
+  if (buf != nullptr && bufLen > 0) {
+    size_t termPos = w < bufLen ? w : bufLen - 1;
+    buf[termPos] = '\0';
+  }
+  return w;
+}
+
+// ---------------------------------------------------------------------------
+// Script CRUD (script_list / script_load / script_save / script_delete)
+// ---------------------------------------------------------------------------
+
+bool isScriptListCommand(const char* json, size_t len) {
+  static const char prefix[] = "{\"type\":\"script_list\"";
+  const size_t plen = sizeof(prefix) - 1;
+  return json != nullptr && len >= plen && std::memcmp(json, prefix, plen) == 0;
+}
+
+bool parseScriptNameCommand(const char* json, size_t len,
+                            const char** outType,
+                            char* nameBuf, size_t nameBufCap) {
+  if (json == nullptr || len == 0) return false;
+
+  View typeStr{nullptr, 0};
+  View nameStr{nullptr, 0};
+  bool hasType = false, hasName = false;
+
+  Parser ps{json, json + len};
+  ps.skipWs();
+  if (!ps.consume('{')) return false;
+  ps.skipWs();
+  if (ps.consume('}')) return false;
+
+  while (true) {
+    View k;
+    if (!ps.parseStringRaw(k)) return false;
+    if (!ps.consume(':')) return false;
+
+    if (k == "type") {
+      if (!ps.parseStringRaw(typeStr)) return false;
+      hasType = true;
+    } else if (k == "name") {
+      if (!ps.parseStringRaw(nameStr)) return false;
+      hasName = true;
+    } else {
+      if (!ps.skipValue(1)) return false;
+    }
+
+    if (ps.consume(',')) continue;
+    if (ps.consume('}')) break;
+    return false;
+  }
+
+  if (!hasType || !hasName) return false;
+
+  static const char kLoad[] = "load";
+  static const char kDelete[] = "delete";
+  if (typeStr == "script_load") {
+    *outType = kLoad;
+  } else if (typeStr == "script_delete") {
+    *outType = kDelete;
+  } else {
+    return false;
+  }
+
+  if (nameStr.len >= nameBufCap) return false;
+  if (nameBuf != nullptr) {
+    std::memcpy(nameBuf, nameStr.p, nameStr.len);
+    nameBuf[nameStr.len] = '\0';
+  }
+  return true;
+}
+
+bool parseScriptSaveCommand(const char* json, size_t len,
+                            char* nameBuf, size_t nameBufCap,
+                            char* srcBuf, size_t srcBufCap, size_t& outSrcLen) {
+  if (json == nullptr || len == 0) return false;
+
+  View typeStr{nullptr, 0};
+  View nameStr{nullptr, 0};
+  bool hasType = false, hasName = false, hasSrc = false;
+  outSrcLen = 0;
+
+  Parser ps{json, json + len};
+  ps.skipWs();
+  if (!ps.consume('{')) return false;
+  ps.skipWs();
+  if (ps.consume('}')) return false;
+
+  while (true) {
+    View k;
+    if (!ps.parseStringRaw(k)) return false;
+    if (!ps.consume(':')) return false;
+
+    if (k == "type") {
+      if (!ps.parseStringRaw(typeStr)) return false;
+      hasType = true;
+    } else if (k == "name") {
+      if (!ps.parseStringRaw(nameStr)) return false;
+      hasName = true;
+    } else if (k == "src") {
+      size_t n = 0;
+      if (!ps.parseStringEscaped(srcBuf, srcBufCap, n)) return false;
+      outSrcLen = n;
+      hasSrc = true;
+    } else {
+      if (!ps.skipValue(1)) return false;
+    }
+
+    if (ps.consume(',')) continue;
+    if (ps.consume('}')) break;
+    return false;
+  }
+
+  if (!hasType || !(typeStr == "script_save")) return false;
+  if (!hasName || !hasSrc) return false;
+  if (nameStr.len >= nameBufCap) return false;
+  if (nameBuf != nullptr) {
+    std::memcpy(nameBuf, nameStr.p, nameStr.len);
+    nameBuf[nameStr.len] = '\0';
+  }
+  return true;
+}
+
+size_t buildScriptsJson(const char* const* names, size_t nNames,
+                        char* buf, size_t bufLen) {
+  size_t w = 0;
+  w = appendRaw(buf, bufLen, w, "{\"type\":\"scripts\",\"names\":[");
+  for (size_t i = 0; i < nNames; ++i) {
+    if (i > 0) w = appendChar(buf, bufLen, w, ',');
+    w = appendString(buf, bufLen, w, names[i]);
+  }
+  w = appendRaw(buf, bufLen, w, "]}");
+
+  if (buf != nullptr && bufLen > 0) {
+    size_t termPos = w < bufLen ? w : bufLen - 1;
+    buf[termPos] = '\0';
+  }
+  return w;
+}
+
+size_t buildScriptJson(const char* name, const char* src, size_t srcLen,
+                      char* buf, size_t bufLen) {
+  size_t w = 0;
+  w = appendRaw(buf, bufLen, w, "{\"type\":\"script\",\"name\":");
+  w = appendString(buf, bufLen, w, name);
+  w = appendRaw(buf, bufLen, w, ",\"src\":");
+  w = appendChar(buf, bufLen, w, '"');
+  if (src != nullptr) {
+    for (size_t i = 0; i < srcLen; ++i) {
+      char c = src[i];
+      if (c == '"' || c == '\\') {
+        w = appendChar(buf, bufLen, w, '\\');
+        w = appendChar(buf, bufLen, w, c);
+      } else if (c == '\n') {
+        w = appendRaw(buf, bufLen, w, "\\n");
+      } else if (c == '\r') {
+        w = appendRaw(buf, bufLen, w, "\\r");
+      } else if (c == '\t') {
+        w = appendRaw(buf, bufLen, w, "\\t");
+      } else if ((unsigned char)c < 0x20) {
+        char tmp[8];
+        std::snprintf(tmp, sizeof(tmp), "\\u%04x", (unsigned)(unsigned char)c);
+        w = appendRaw(buf, bufLen, w, tmp);
+      } else {
+        w = appendChar(buf, bufLen, w, c);
+      }
+    }
+  }
+  w = appendChar(buf, bufLen, w, '"');
+  w = appendChar(buf, bufLen, w, '}');
+
+  if (buf != nullptr && bufLen > 0) {
+    size_t termPos = w < bufLen ? w : bufLen - 1;
+    buf[termPos] = '\0';
+  }
+  return w;
+}
+
+size_t buildFxErrorJson(const char* effectName, const char* err,
+                        char* buf, size_t bufLen) {
+  size_t w = 0;
+  w = appendRaw(buf, bufLen, w, "{\"type\":\"fx_error\",\"effect\":");
+  w = appendString(buf, bufLen, w, effectName);
+  w = appendRaw(buf, bufLen, w, ",\"err\":");
+  w = appendString(buf, bufLen, w, err);
   w = appendChar(buf, bufLen, w, '}');
 
   if (buf != nullptr && bufLen > 0) {

@@ -84,26 +84,41 @@ size_t buildStateJson(const uint16_t* activeIds, size_t nActive,
                       char* buf, size_t bufLen);
 
 //
-// Live-coding eval channel (see README_LUA_FENNEL.md, design doc section 8):
+// Live-coding eval channel + script CRUD (README_LUA_FENNEL.md;
+// the Fennel scripting UI's device-console protocol additions):
 //
 //   UI -> device:
-//     { "type":"eval", "id":1, "src":"(glow.cue.go :chorus)" }
+//     { "type":"eval",          "src":"(glow.cue.go :chorus)", "seq":7 }
+//     { "type":"script_list" }
+//     { "type":"script_load",   "name":"verse" }
+//     { "type":"script_save",   "name":"verse", "src":"(fn breathe [t] ...)" }
+//     { "type":"script_delete", "name":"verse" }
 //
 //   Device -> UI:
-//     { "type":"eval_result", "id":1, "ok":true }
-//     { "type":"eval_result", "id":1, "ok":false, "err":"...:1: unexpected symbol" }
+//     { "type":"eval_result", "seq":7, "ok":true }
+//     { "type":"eval_result", "seq":7, "ok":false, "err":"...:1: unexpected symbol" }
+//     { "type":"scripts",     "names":["boot","verse","chorus"] }
+//     { "type":"script",      "name":"verse", "src":"..." }
+//     { "type":"fx_error",    "effect":"breathe", "err":"attempt to index nil value" }
 //
-// `id` is an opaque request id the UI picks (e.g. an increasing counter) so
-// out-of-order replies can be matched back to their request; it is not a
-// cue/scene id. `src` is arbitrary Fennel source text, so — unlike every
-// other string in this protocol — it needs real JSON escape handling
+// `seq` is an opaque request id the UI picks (e.g. an increasing counter) so
+// out-of-order replies can be matched back to their request (evals are
+// queued and drained on the render task; results are asynchronous); it is
+// not a cue/scene id. `src` is arbitrary Fennel source text, so — unlike
+// every other string in this protocol — it needs real JSON escape handling
 // (parseWebCommand's strings deliberately reject backslash escapes because
-// labels/names never need them; script source does).
+// labels/names never need them; script source does). Script CRUD hits
+// LittleFS directly on the WS task (scripts_storage.h) -- unlike eval, it
+// never touches the Lua VM, so it doesn't go through the eval queue.
+//
+// `fx_error` is unsolicited: the device pushes it (to every connected
+// client) whenever a running LuaEffect throws and gets permanently disabled
+// (see lua_effect.h). It is not a reply to any UI->device message.
 //
 
 // Parse a UI->device `{"type":"eval", ...}` message. On success, the
 // unescaped source is written into srcBuf (NUL-terminated if it fits) and
-// outSrcLen is its length; outRequestId is the `id` field (0 if absent).
+// outSrcLen is its length; outRequestId is the `seq` field (0 if absent).
 // Returns false if this is not an `eval` message, srcBuf is too small for
 // the unescaped source, or the message is malformed.
 bool parseEvalCommand(const char* json, size_t len, uint32_t& outRequestId,
@@ -113,3 +128,39 @@ bool parseEvalCommand(const char* json, size_t len, uint32_t& outRequestId,
 // is true; may be nullptr when ok is false (omits the "err" field).
 size_t buildEvalResultJson(uint32_t requestId, bool ok, const char* err,
                           char* buf, size_t bufLen);
+
+// Returns true iff the frame is the `script_list` message (no other fields).
+bool isScriptListCommand(const char* json, size_t len);
+
+// Parse a UI->device `{"type":"script_load"|"script_delete", "name":"..."}`
+// message (both share this shape: just a name, using parseStringRaw's plain
+// rules -- script filenames, like cue labels, never need JSON escapes).
+// outType receives "load" or "delete" as a 0-terminated pointer into a
+// static string (safe to compare with ==, not to free). Returns false if
+// this isn't a script_load/script_delete message, the name doesn't fit
+// nameBuf, or the message is malformed.
+bool parseScriptNameCommand(const char* json, size_t len,
+                            const char** outType,
+                            char* nameBuf, size_t nameBufCap);
+
+// Parse a UI->device `{"type":"script_save", "name":"...", "src":"..."}`
+// message. `src` gets full escape handling (see parseEvalCommand); `name`
+// does not (see parseScriptNameCommand). Returns false if this isn't a
+// script_save message, name/src don't fit their buffers, or malformed.
+bool parseScriptSaveCommand(const char* json, size_t len,
+                            char* nameBuf, size_t nameBufCap,
+                            char* srcBuf, size_t srcBufCap, size_t& outSrcLen);
+
+// Build a `scripts` JSON message (the script_list reply) into `buf`. `names`
+// may be nullptr only if nNames is 0.
+size_t buildScriptsJson(const char* const* names, size_t nNames,
+                        char* buf, size_t bufLen);
+
+// Build a `script` JSON message (the script_load reply) into `buf`. `src`
+// may be nullptr (treated as empty).
+size_t buildScriptJson(const char* name, const char* src, size_t srcLen,
+                      char* buf, size_t bufLen);
+
+// Build an unsolicited `fx_error` JSON message into `buf`.
+size_t buildFxErrorJson(const char* effectName, const char* err,
+                        char* buf, size_t bufLen);

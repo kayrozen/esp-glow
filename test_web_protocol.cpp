@@ -340,7 +340,7 @@ void test_parse_eval_basic() {
 
 void test_parse_eval_with_id() {
   TEST("parse eval: id field carried through");
-  const char* json = R"JSON({"type":"eval","id":17,"src":"(+ 1 2)"})JSON";
+  const char* json = R"JSON({"type":"eval","seq":17,"src":"(+ 1 2)"})JSON";
   uint32_t id;
   char buf[64];
   size_t n;
@@ -352,7 +352,7 @@ void test_parse_eval_with_id() {
 
 void test_parse_eval_id_before_src() {
   TEST("parse eval: field order doesn't matter");
-  const char* json = R"({"id":3,"src":"nil","type":"eval"})";
+  const char* json = R"({"seq":3,"src":"nil","type":"eval"})";
   uint32_t id;
   char buf[64];
   size_t n;
@@ -394,7 +394,7 @@ void test_parse_eval_rejects_wrong_type() {
 
 void test_parse_eval_rejects_missing_src() {
   TEST("parse eval: rejects missing src");
-  const char* json = R"({"type":"eval","id":1})";
+  const char* json = R"({"type":"eval","seq":1})";
   uint32_t id;
   char buf[32];
   size_t n;
@@ -433,7 +433,7 @@ void test_build_eval_result_ok() {
   TEST("build eval_result: ok=true omits err");
   char buf[128];
   size_t w = buildEvalResultJson(7, true, nullptr, buf, sizeof(buf));
-  CHECK(std::string(buf) == R"({"type":"eval_result","id":7,"ok":true})");
+  CHECK(std::string(buf) == R"({"type":"eval_result","seq":7,"ok":true})");
   CHECK(w == std::strlen(buf));
 }
 
@@ -442,14 +442,14 @@ void test_build_eval_result_err() {
   char buf[128];
   buildEvalResultJson(7, false, "1:1: unexpected \"x\"", buf, sizeof(buf));
   CHECK(std::string(buf) ==
-       R"({"type":"eval_result","id":7,"ok":false,"err":"1:1: unexpected \"x\""})");
+       R"({"type":"eval_result","seq":7,"ok":false,"err":"1:1: unexpected \"x\""})");
 }
 
 void test_build_eval_result_false_no_err() {
   TEST("build eval_result: ok=false, err=nullptr omits the field");
   char buf[128];
   buildEvalResultJson(3, false, nullptr, buf, sizeof(buf));
-  CHECK(std::string(buf) == R"({"type":"eval_result","id":3,"ok":false})");
+  CHECK(std::string(buf) == R"({"type":"eval_result","seq":3,"ok":false})");
 }
 
 void test_build_eval_result_truncation_reported() {
@@ -457,6 +457,127 @@ void test_build_eval_result_truncation_reported() {
   char buf[8];
   size_t w = buildEvalResultJson(1, false, "a very long error message", buf, sizeof(buf));
   CHECK(w >= sizeof(buf));
+}
+
+// ---------------------------------------------------------------------------
+// Script CRUD: isScriptListCommand / parseScriptNameCommand /
+// parseScriptSaveCommand / buildScriptsJson / buildScriptJson / fx_error
+// ---------------------------------------------------------------------------
+
+void test_is_script_list_command() {
+  TEST("isScriptListCommand: recognizes script_list, rejects others");
+  const char* json = R"({"type":"script_list"})";
+  CHECK(isScriptListCommand(json, std::strlen(json)));
+  CHECK(!isScriptListCommand(R"({"type":"script_load","name":"x"})", 30));
+  CHECK(!isScriptListCommand(nullptr, 0));
+}
+
+void test_parse_script_load() {
+  TEST("parse script_load: extracts name");
+  const char* json = R"({"type":"script_load","name":"verse"})";
+  const char* type;
+  char name[64];
+  CHECK(parseScriptNameCommand(json, std::strlen(json), &type, name, sizeof(name)));
+  CHECK(std::string(type) == "load");
+  CHECK(std::string(name) == "verse");
+}
+
+void test_parse_script_delete() {
+  TEST("parse script_delete: extracts name");
+  const char* json = R"({"type":"script_delete","name":"verse"})";
+  const char* type;
+  char name[64];
+  CHECK(parseScriptNameCommand(json, std::strlen(json), &type, name, sizeof(name)));
+  CHECK(std::string(type) == "delete");
+  CHECK(std::string(name) == "verse");
+}
+
+void test_parse_script_name_rejects_wrong_type() {
+  TEST("parse script name: rejects unrelated type");
+  const char* json = R"({"type":"eval","name":"verse"})";
+  const char* type;
+  char name[64];
+  CHECK(!parseScriptNameCommand(json, std::strlen(json), &type, name, sizeof(name)));
+}
+
+void test_parse_script_name_rejects_missing_name() {
+  TEST("parse script name: rejects missing name");
+  const char* json = R"({"type":"script_load"})";
+  const char* type;
+  char name[64];
+  CHECK(!parseScriptNameCommand(json, std::strlen(json), &type, name, sizeof(name)));
+}
+
+void test_parse_script_name_rejects_buffer_too_small() {
+  TEST("parse script name: rejects when nameBuf can't hold the name");
+  const char* json = R"({"type":"script_load","name":"a-very-long-script-name"})";
+  const char* type;
+  char name[4];
+  CHECK(!parseScriptNameCommand(json, std::strlen(json), &type, name, sizeof(name)));
+}
+
+void test_parse_script_save() {
+  TEST("parse script_save: extracts name + escaped src");
+  const char* json = R"JSON({"type":"script_save","name":"verse","src":"(fn f [t]\n  t)"})JSON";
+  char name[64], src[128];
+  size_t n;
+  CHECK(parseScriptSaveCommand(json, std::strlen(json), name, sizeof(name), src, sizeof(src), n));
+  CHECK(std::string(name) == "verse");
+  std::string expected = "(fn f [t]\n  t)";
+  CHECK(n == expected.size());
+  CHECK(std::memcmp(src, expected.data(), n) == 0);
+}
+
+void test_parse_script_save_field_order() {
+  TEST("parse script_save: field order doesn't matter");
+  const char* json = R"({"src":"nil","type":"script_save","name":"x"})";
+  char name[64], src[64];
+  size_t n;
+  CHECK(parseScriptSaveCommand(json, std::strlen(json), name, sizeof(name), src, sizeof(src), n));
+  CHECK(std::string(name) == "x");
+  CHECK(n == 3);
+}
+
+void test_parse_script_save_rejects_missing_fields() {
+  TEST("parse script_save: rejects missing name or src");
+  char name[64], src[64];
+  size_t n;
+  CHECK(!parseScriptSaveCommand(R"({"type":"script_save","src":"nil"})", 34,
+                                name, sizeof(name), src, sizeof(src), n));
+  CHECK(!parseScriptSaveCommand(R"({"type":"script_save","name":"x"})", 33,
+                                name, sizeof(name), src, sizeof(src), n));
+}
+
+void test_build_scripts_json() {
+  TEST("build scripts: name array");
+  const char* names[] = {"boot", "verse", "chorus"};
+  char buf[128];
+  buildScriptsJson(names, 3, buf, sizeof(buf));
+  CHECK(std::string(buf) == R"({"type":"scripts","names":["boot","verse","chorus"]})");
+}
+
+void test_build_scripts_json_empty() {
+  TEST("build scripts: empty list");
+  char buf[64];
+  buildScriptsJson(nullptr, 0, buf, sizeof(buf));
+  CHECK(std::string(buf) == R"({"type":"scripts","names":[]})");
+}
+
+void test_build_script_json() {
+  TEST("build script: name + src with newline/quote escaped");
+  char buf[128];
+  const char* src = "(fn f [t]\n  \"hi\")";
+  buildScriptJson("verse", src, std::strlen(src), buf, sizeof(buf));
+  CHECK(std::string(buf) ==
+       R"JSON({"type":"script","name":"verse","src":"(fn f [t]\n  \"hi\")"})JSON");
+}
+
+void test_build_fx_error_json() {
+  TEST("build fx_error: effect name + err");
+  char buf[128];
+  buildFxErrorJson("breathe", "attempt to index nil value", buf, sizeof(buf));
+  CHECK(std::string(buf) ==
+       R"({"type":"fx_error","effect":"breathe","err":"attempt to index nil value"})");
 }
 
 // ---------------------------------------------------------------------------
@@ -523,6 +644,21 @@ int main() {
   test_build_eval_result_err();
   test_build_eval_result_false_no_err();
   test_build_eval_result_truncation_reported();
+
+  // Script CRUD
+  test_is_script_list_command();
+  test_parse_script_load();
+  test_parse_script_delete();
+  test_parse_script_name_rejects_wrong_type();
+  test_parse_script_name_rejects_missing_name();
+  test_parse_script_name_rejects_buffer_too_small();
+  test_parse_script_save();
+  test_parse_script_save_field_order();
+  test_parse_script_save_rejects_missing_fields();
+  test_build_scripts_json();
+  test_build_scripts_json_empty();
+  test_build_script_json();
+  test_build_fx_error_json();
 
   if (g_failCount == 0) {
     printf("\nAll tests passed.\n");

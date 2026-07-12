@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "lua_glow_include.h"
@@ -80,6 +81,14 @@ public:
   size_t ownedEffectCount() const { return ownedEffects_.size(); }
   size_t luaEffectCount() const { return luaEffects_.size(); }
 
+  // Appends (effectName, lastError) for every LuaEffect that has become
+  // disabled (see lua_effect.h's error policy) since the last call to this
+  // method -- i.e. exactly the unsolicited fx_error notifications the WS
+  // layer should push (web_protocol.h's buildFxErrorJson). Pure bookkeeping
+  // over LuaEffect's own disabled()/lastError(); no hardware involved, so
+  // this is host-tested like the rest of this file.
+  void pollNewlyDisabledEffects(std::vector<std::pair<std::string, std::string>>& out);
+
 private:
   static int l_set(lua_State* L);
   static int l_aim(lua_State* L);
@@ -101,7 +110,13 @@ private:
   // a Lua function, wrapped in a freshly-owned LuaEffect, or a
   // glow.effect_handle userdata from glow.fx.*) into a raw IEffect*,
   // appending to `out`. lua_error()s (never returns) on an invalid entry.
-  void resolveEffectsList(lua_State* L, int idx, std::vector<IEffect*>& out);
+  //
+  // `cueName` names any freshly-created LuaEffect as "<cueName>#<index>" --
+  // Lua function values have no reliable introspectable name of their own
+  // (lua_getinfo's name fields need call-site context we don't have here),
+  // so this is the identifier fx_error (web_protocol.h's buildFxErrorJson)
+  // reports when this specific effect throws and gets disabled.
+  void resolveEffectsList(lua_State* L, int idx, const char* cueName, std::vector<IEffect*>& out);
 
   // Wraps `effect` in a glow.effect_handle userdata pushed on top of the
   // stack, taking ownership (kept alive in ownedEffects_ for the VM's
@@ -121,5 +136,6 @@ private:
 
   std::vector<std::unique_ptr<IEffect>> ownedEffects_;         // glow.fx.* handles
   std::vector<std::unique_ptr<LuaEffect>> luaEffects_;         // wrapped bare Lua fns
+  std::vector<bool> luaEffectReported_;                        // parallel to luaEffects_
   std::vector<std::unique_ptr<IPixelPattern>> ownedPatterns_;  // glow.matrix.pattern
 };

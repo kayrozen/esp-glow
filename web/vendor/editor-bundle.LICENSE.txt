@@ -1,0 +1,13 @@
+web/vendor/editor-bundle.mjs is a bundled build of the following
+MIT-licensed packages (versions pinned in this script):
+
+  @codemirror/state, @codemirror/view, @codemirror/commands,
+  @codemirror/language, @codemirror/autocomplete, @codemirror/legacy-modes
+  Copyright (C) 2018-present by Marijn Haverbeke <marijnh@gmail.com> and others
+  https://codemirror.net/  MIT License
+
+  parinfer
+  Copyright (c) 2015-present, Shaun Williams and Chris Oakman
+  https://github.com/parinfer/parinfer.js  MIT License
+
+Full license texts: https://opensource.org/licenses/MIT

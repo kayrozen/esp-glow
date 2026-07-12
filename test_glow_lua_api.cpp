@@ -258,6 +258,44 @@ void test_cue_define_rejects_invalid_effects_entry() {
 }
 
 // ---------------------------------------------------------------------------
+// pollNewlyDisabledEffects -- the fx_error notification source
+// ---------------------------------------------------------------------------
+
+void test_poll_newly_disabled_effects_reports_once() {
+  TEST("pollNewlyDisabledEffects: reports a freshly-broken effect exactly once, named <cue>#<index>");
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc);
+
+  h.evalOrDie(
+      "(fn ok [t] (glow.set 1 :dimmer 1.0))\n"
+      "(fn breathe [t] (glow.set \"not-a-number\" :dimmer 1.0))\n"
+      "(glow.cue.define :verse {:effects [ok breathe] :priority 0})\n"
+      "(glow.cue.go :verse)\n");
+
+  std::vector<std::pair<std::string, std::string>> notifications;
+  h.api.pollNewlyDisabledEffects(notifications);
+  CHECK(notifications.empty());  // nothing has run yet
+
+  std::vector<CapIntent> caps;
+  std::vector<AimIntent> aims;
+  h.show.evaluate(0.0f, caps, aims);  // drives both effects once
+
+  notifications.clear();
+  h.api.pollNewlyDisabledEffects(notifications);
+  CHECK(notifications.size() == 1);
+  if (notifications.size() == 1) {
+    CHECK(notifications[0].first == "verse#1");  // "breathe" is the 2nd (index 1) effect
+    CHECK(notifications[0].second.find("number expected") != std::string::npos);
+  }
+
+  // A second frame doesn't re-report the same effect.
+  h.show.evaluate(1.0f / 44.0f, caps, aims);
+  notifications.clear();
+  h.api.pollNewlyDisabledEffects(notifications);
+  CHECK(notifications.empty());
+}
+
+// ---------------------------------------------------------------------------
 // matrix.*
 // ---------------------------------------------------------------------------
 
@@ -340,6 +378,8 @@ int main() {
   test_fx_hue_rotate_handle_usable_in_cue_and_emits();
   test_fx_sweep_handle();
   test_cue_define_rejects_invalid_effects_entry();
+
+  test_poll_newly_disabled_effects_reports_once();
 
   test_matrix_pattern_and_brightness_apply_to_the_registered_matrix();
   test_matrix_pattern_unknown_index_errors();
