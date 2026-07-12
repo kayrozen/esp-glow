@@ -1,12 +1,14 @@
 <!doctype html>
-<!-- F3 placeholder. F4 replaces this with the real Preact console that talks
-     to the WebSocket endpoint in web_input.cpp. Embedded into the app binary
-     via EMBED_FILES (main/CMakeLists.txt) so the HTTP server has something
-     to serve at / once F4 wires it up. -->
-<html><head><meta charset="utf-8"><title>esp-glow</title></head>
-<body style="font-family:system-ui;background:#111;color:#eee;padding:2rem">
-<h1>esp-glow</h1>
-<p>Firmware is up. The Preact console lands in F4.</p>
-<p>For now, validate the show via DMX / Art-Net / Wireshark as described in
-README_FIRMWARE.md (phase F3).</p>
-</body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#0a0c12" />
+  <title>esp-glow console</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

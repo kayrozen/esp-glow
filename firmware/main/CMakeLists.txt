@@ -22,7 +22,11 @@ idf_component_register(
         "."
     REQUIRES glow_core
     EMBED_FILES
-        "data/console/index.html"
+        # fennel_lua_start/_end are referenced directly in main.cpp (this
+        # component), so this one stays here. The console bundle's
+        # EMBED_FILES lives in glow_core's CMakeLists instead -- that's the
+        # component web_input.cpp (the consumer of _binary_index_html_start
+        # and friends) actually belongs to; see its comment for why.
         "../../third_party/fennel/fennel.lua"
 )
 

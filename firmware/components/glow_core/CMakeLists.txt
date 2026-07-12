@@ -16,17 +16,17 @@
 # is written. Later phases append new sources to this list:
 #   F1: render_pacing.cpp, dmx_sink.cpp (already listed? no — added in F1)
 #   F3: apply_loaded_show.cpp
-#   F4: midi_parser.cpp, osc_parser.cpp, web_protocol.cpp, web_input_handler.cpp,
-#       midi_input.cpp, osc_input.cpp, web_input.cpp (the actual hardware
-#       transports remain TODO stubs; see their own file headers)
+#   F4: web_protocol.cpp, osc_parser.cpp (host-tested parsers/protocol) +
+#       web_input.cpp, midi_input.cpp, osc_input.cpp (the device transports
+#       that call them -- real esp_http_server WS endpoint, MIDI UART,
+#       OSC UDP; untestable without hardware, same status as every other
+#       device-only file here, but no longer TODO stubs)
 #   F6: the Lua/Fennel live-coding layer (see README_LUA_FENNEL.md), plus
 #       live_control.cpp/control_queue*.cpp pulled forward from F4: cues
 #       need a real ShowController, and ShowController needs a real
 #       LiveControl + control-event queue feeding it for Lua, the web
 #       console, and MIDI/OSC to converge on the same controller (see
-#       main.cpp). Only the actual transports (web httpd, MIDI UART, OSC
-#       UDP) remain TODO stubs — the queue, the pump, and the wiring
-#       contract are real and reachable from main.cpp now.
+#       main.cpp).
 
 set(GLOW_ROOT ${CMAKE_CURRENT_LIST_DIR}/../../..)
 
@@ -62,13 +62,11 @@ idf_component_register(
         ${GLOW_ROOT}/lua_effect.cpp
         ${GLOW_ROOT}/glow_fennel.cpp
         ${GLOW_ROOT}/eval_queue.cpp
-        # device-only eval-queue backend (#ifdef ESP_PLATFORM guarded; TODO
-        # stub, same status as control_queue_freertos.cpp — see its header)
+        # device-only eval-queue backend (#ifdef ESP_PLATFORM guarded),
+        # same status as control_queue_freertos.cpp — see its header)
         ${GLOW_ROOT}/eval_queue_freertos.cpp
         # scripts partition (LittleFS): host-tested scriptNameIsValid +
-        # device-only mount/read/save (#ifdef ESP_PLATFORM guarded; TODO
-        # stub -- same status as storage_manager.cpp's raw-partition read
-        # was before F3 hardware validation)
+        # device-only mount/read/save (#ifdef ESP_PLATFORM guarded)
         ${GLOW_ROOT}/scripts_storage.cpp
         # pulled forward from F4: LiveControl + the control-event queue,
         # so glow.cue.*/the web console/MIDI/OSC all drive one
@@ -76,13 +74,46 @@ idf_component_register(
         ${GLOW_ROOT}/live_control.cpp
         ${GLOW_ROOT}/control_queue.cpp
         # device-only FreeRTOS queue backend (#ifdef ESP_PLATFORM guarded;
-        # TODO stub -- see control_queue_freertos.cpp's header)
+        # see control_queue_freertos.cpp's header)
         ${GLOW_ROOT}/control_queue_freertos.cpp
+        # F4: the testable protocol/parser cores (no ESP-IDF dependency —
+        # these already build and run under `make test`)
+        ${GLOW_ROOT}/web_protocol.cpp
+        ${GLOW_ROOT}/osc_parser.cpp
+        # F4: the device-only transports that call the above (#ifdef
+        # ESP_PLATFORM guarded; see each file's own header for the real
+        # esp_http_server/UART/UDP wiring)
+        ${GLOW_ROOT}/web_input.cpp
+        ${GLOW_ROOT}/midi_input.cpp
+        ${GLOW_ROOT}/osc_input.cpp
     INCLUDE_DIRS
         ${GLOW_ROOT}
         ${GLOW_ROOT}/third_party/lua
     REQUIRES esp_dmx esp_wifi lwip lua
-    PRIV_REQUIRES littlefs
+    PRIV_REQUIRES littlefs esp_http_server driver
+    EMBED_FILES
+        # The console bundle web_input.cpp's static_file_handler serves
+        # (see its kStaticFiles table) -- EMBED_FILES has to live in
+        # *this* component because the _binary_..._start/_end symbols it
+        # generates are extern "C" globals in whichever object file
+        # embeds them; web_input.cpp is the one declaring/using them, and
+        # putting the EMBED_FILES that produce them in a different
+        # component (main) than the one consuming them isn't reliable --
+        # main REQUIRES glow_core, not the other way around, so nothing
+        # guarantees main's archive gets pulled into the link before
+        # glow_core's object file's reference is resolved. Symbol naming:
+        # EMBED_FILES foo/ws-client.js -> _binary_ws_client_js_start/_end
+        # (path dropped, non-alnum chars in the basename -> '_').
+        ${GLOW_ROOT}/firmware/main/data/console/index.html
+        ${GLOW_ROOT}/firmware/main/data/console/app.js
+        ${GLOW_ROOT}/firmware/main/data/console/styles.css
+        ${GLOW_ROOT}/firmware/main/data/console/ws-client.js
+        ${GLOW_ROOT}/firmware/main/data/console/script-panel.js
+        ${GLOW_ROOT}/firmware/main/data/console/shared/fennel-editor.js
+        ${GLOW_ROOT}/firmware/main/data/console/vendor/preact.mjs
+        ${GLOW_ROOT}/firmware/main/data/console/vendor/preact-hooks.mjs
+        ${GLOW_ROOT}/firmware/main/data/console/vendor/htm.mjs
+        ${GLOW_ROOT}/firmware/main/data/console/vendor/editor-bundle.mjs
 )
 
 # Match the host build flags: no exceptions, no RTTI, full warnings.

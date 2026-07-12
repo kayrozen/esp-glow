@@ -402,7 +402,11 @@ const char* modeFromAction(ActionKind a) {
 
 size_t appendUInt(char* buf, size_t bufLen, size_t written, uint32_t v) {
   char tmp[12];
-  int n = std::snprintf(tmp, sizeof(tmp), "%u", v);
+  // uint32_t is `unsigned int` on the host (x86_64) but `unsigned long` on
+  // the Xtensa target, so "%u" with a bare uint32_t argument only matches
+  // -Wformat on one of the two -- cast to the type the format string
+  // actually names (every uint32_t value fits in unsigned int on both).
+  int n = std::snprintf(tmp, sizeof(tmp), "%u", static_cast<unsigned int>(v));
   if (n <= 0) return written;
   return appendRaw(buf, bufLen, written, tmp);
 }

@@ -64,3 +64,11 @@ private:
 // if `len` exceeds EVAL_SRC_MAX; still returns true in that case (see
 // header rationale above) — returns false only if src is null or len is 0.
 bool makeEvalSubmission(const char* src, size_t len, uint32_t requestId, EvalSubmission& out);
+
+#ifdef ESP_PLATFORM
+// Device-only factory: returns a FreeRTOS-queue-backed IEvalSubmissionQueue
+// (FreeRtosEvalSubmissionQueue, defined in eval_queue_freertos.cpp). Owned
+// by the caller (delete when done). Mirrors control_queue.h's
+// createDeviceControlEventQueue exactly.
+IEvalSubmissionQueue* createDeviceEvalSubmissionQueue(size_t capacity);
+#endif

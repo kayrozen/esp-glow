@@ -9,127 +9,189 @@ static constexpr size_t kMaxNameLen = 255;
 
 bool scriptNameIsValid(const char* name, size_t len) {
   if (name == nullptr || len == 0 || len > kMaxNameLen) return false;
-  if (len == 1 && name[0] == '.') return false;
-  if (len == 2 && name[0] == '.' && name[1] == '.') return false;
+
+  // Whitelist, not a blacklist: '/' and an embedded NUL are the only
+  // characters that could actually enable path traversal against
+  // scripts_storage_save/load/delete's flat "/scripts/<name>" construction
+  // (see their own comments -- rejecting '/' alone already makes escaping
+  // the single path component structurally impossible), but a whitelist
+  // also closes off control characters, whitespace, and anything else
+  // that could cause trouble elsewhere a name gets used (logged, shown in
+  // the console UI) without anyone having to enumerate them one by one.
   for (size_t i = 0; i < len; ++i) {
-    if (name[i] == '/') return false;
-    if (name[i] == '\0') return false;  // embedded NUL: not a valid filename
+    char c = name[i];
+    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+    if (!ok) return false;
   }
+
+  // No leading dot at all (stricter than just rejecting "." and ".."):
+  // scripts_storage_save stages writes at "/scripts/.<name>.tmp" before
+  // rename()ing over the final path (see its own comment). If dotfile
+  // script names were allowed, a script literally named e.g. ".foo.tmp"
+  // could collide with -- and get clobbered by -- an unrelated save of a
+  // script named "foo". Banning the leading dot entirely removes that
+  // collision by construction instead of trying to pattern-match around
+  // it, and costs nothing: nothing in this system treats dotfiles as
+  // actually hidden (scripts_storage_list returns everything).
+  if (name[0] == '.') return false;
+
   return true;
 }
 
 #ifdef ESP_PLATFORM
 
 //
-// Device-only mount/read/save. Untestable without hardware -- same status
-// as web_input.cpp / midi_input.cpp / osc_input.cpp's transports. See
-// scripts_storage.h for the exact contract each stub must satisfy.
+// Device-only mount/read/save, against esp_littlefs (joltwallet/littlefs,
+// see glow_core's idf_component.yml). Untestable without hardware -- same
+// status as web_input.cpp / midi_input.cpp / osc_input.cpp's transports.
 //
 
 #include "esp_littlefs.h"
 #include "esp_log.h"
 
+#include <cstdio>
+#include <dirent.h>
+#include <sys/stat.h>
+
 static const char* TAG = "scripts_storage";
 static bool s_mounted = false;
 
+// Guard rails: names arrive off the network (glow.save / the console's
+// script-save message), so cap both the size of any one script and how
+// many can pile up on the partition -- neither is enforced by LittleFS
+// itself.
+static constexpr size_t kMaxScriptBytes = 32 * 1024;
+static constexpr size_t kMaxScriptCount = 64;
+
+// scripts_storage_save writes to "/scripts/.<name>.tmp" then rename()s
+// over the final path (never partially overwrites on failure -- see the
+// header's contract). That temp file must not show up as a script in
+// listings or count against kMaxScriptCount. scriptNameIsValid now rejects
+// every leading dot, so nothing this system itself creates can produce a
+// dotfile other than this staging file -- the ".tmp" suffix check is a
+// second, cheap confirmation, not the only thing telling them apart.
+static bool isTempFile(const char* name) {
+  size_t n = std::strlen(name);
+  constexpr char kSuffix[] = ".tmp";
+  size_t suffixLen = sizeof(kSuffix) - 1;
+  return name[0] == '.' && n > suffixLen &&
+         std::strcmp(name + n - suffixLen, kSuffix) == 0;
+}
+
+// Counts real (non-temp-file) entries directly under "/scripts". Returns
+// 0 if the directory can't be opened -- callers only use this to guard
+// kMaxScriptCount, and an unreadable directory has bigger problems that
+// scripts_storage_mount already reported.
+static size_t scriptCount() {
+  DIR* d = opendir("/scripts");
+  if (!d) return 0;
+  size_t count = 0;
+  struct dirent* ent;
+  while ((ent = readdir(d)) != nullptr) {
+    if (ent->d_type != DT_REG) continue;
+    if (isTempFile(ent->d_name)) continue;
+    ++count;
+  }
+  closedir(d);
+  return count;
+}
+
 bool scripts_storage_mount(void) {
-  // TODO:
-  // esp_vfs_littlefs_conf_t conf = {
-  //     .base_path = "/scripts",
-  //     .partition_label = SCRIPTS_PARTITION_LABEL,
-  //     .format_if_mount_failed = true,
-  //     .dont_mount = false,
-  // };
-  // esp_err_t err = esp_vfs_littlefs_register(&conf);
-  // s_mounted = (err == ESP_OK);
-  // if (!s_mounted) ESP_LOGE(TAG, "littlefs mount failed: %s", esp_err_to_name(err));
-  // return s_mounted;
-  ESP_LOGW(TAG, "scripts_storage_mount: not yet implemented (needs hardware to verify)");
-  return false;
+  esp_vfs_littlefs_conf_t conf = {};
+  conf.base_path = "/scripts";
+  conf.partition_label = SCRIPTS_PARTITION_LABEL;
+  conf.format_if_mount_failed = true;
+  conf.dont_mount = false;
+
+  esp_err_t err = esp_vfs_littlefs_register(&conf);
+  s_mounted = (err == ESP_OK);
+  if (!s_mounted) {
+    ESP_LOGE(TAG, "littlefs mount failed: %s", esp_err_to_name(err));
+  }
+  return s_mounted;
 }
 
 bool scripts_storage_read_boot(char* buf, size_t bufCap, size_t* outLen) {
-  // TODO:
-  // if (!s_mounted) return false;
-  // FILE* f = fopen("/scripts/" SCRIPTS_BOOT_FILENAME, "rb");
-  // if (!f) return false;
-  // size_t n = fread(buf, 1, bufCap, f);
-  // bool truncated = !feof(f);
-  // fclose(f);
-  // if (truncated) return false;  // never hand back a silently-truncated boot script
-  // *outLen = n;
-  // return true;
-  (void)buf;
-  (void)bufCap;
-  (void)outLen;
-  return false;
+  if (!s_mounted) return false;
+  FILE* f = fopen("/scripts/" SCRIPTS_BOOT_FILENAME, "rb");
+  if (!f) return false;
+  size_t n = fread(buf, 1, bufCap, f);
+  bool truncated = (feof(f) == 0);
+  fclose(f);
+  if (truncated) return false;  // never hand back a silently-truncated boot script
+  *outLen = n;
+  return true;
 }
 
 bool scripts_storage_save(const char* name, const char* src, size_t len) {
   if (!s_mounted) return false;
   if (!scriptNameIsValid(name, std::strlen(name))) return false;
-  // TODO: write to a temp file and rename over the target (see header:
-  // never partially overwrite on failure).
-  // char tmpPath[320], finalPath[320];
-  // snprintf(tmpPath, sizeof(tmpPath), "/scripts/.%s.tmp", name);
-  // snprintf(finalPath, sizeof(finalPath), "/scripts/%s", name);
-  // FILE* f = fopen(tmpPath, "wb");
-  // if (!f) return false;
-  // size_t written = fwrite(src, 1, len, f);
-  // bool ok = (written == len) && (fclose(f) == 0);
-  // if (ok) ok = (rename(tmpPath, finalPath) == 0);
-  // if (!ok) remove(tmpPath);
-  // return ok;
-  (void)src;
-  (void)len;
-  return false;
+  if (len > kMaxScriptBytes) return false;
+
+  char finalPath[320];
+  std::snprintf(finalPath, sizeof(finalPath), "/scripts/%s", name);
+
+  // Only a NEW file counts against kMaxScriptCount -- overwriting an
+  // existing script doesn't grow the partition's file count.
+  struct stat st {};
+  bool isNewFile = (stat(finalPath, &st) != 0);
+  if (isNewFile && scriptCount() >= kMaxScriptCount) return false;
+
+  char tmpPath[320];
+  std::snprintf(tmpPath, sizeof(tmpPath), "/scripts/.%s.tmp", name);
+
+  FILE* f = fopen(tmpPath, "wb");
+  if (!f) return false;
+  size_t written = fwrite(src, 1, len, f);
+  bool closedOk = (fclose(f) == 0);  // always close, even if the write was short
+  bool ok = (written == len) && closedOk;
+  if (ok) {
+    ok = (rename(tmpPath, finalPath) == 0);
+  }
+  if (!ok) {
+    remove(tmpPath);
+  }
+  return ok;
 }
 
 bool scripts_storage_list(ScriptListCallback cb, void* ctx) {
   if (!s_mounted) return false;
-  // TODO:
-  // DIR* d = opendir("/scripts");
-  // if (!d) return false;
-  // struct dirent* ent;
-  // while ((ent = readdir(d)) != nullptr) {
-  //   if (ent->d_type != DT_REG) continue;  // flat root only, no subdirs
-  //   if (!cb(ent->d_name, ctx)) break;
-  // }
-  // closedir(d);
-  // return true;
-  (void)cb;
-  (void)ctx;
+  DIR* d = opendir("/scripts");
+  if (!d) return false;
+  struct dirent* ent;
+  while ((ent = readdir(d)) != nullptr) {
+    if (ent->d_type != DT_REG) continue;  // flat root only, no subdirs
+    if (isTempFile(ent->d_name)) continue;
+    if (!cb(ent->d_name, ctx)) break;
+  }
+  closedir(d);
   return true;
 }
 
 bool scripts_storage_load(const char* name, char* buf, size_t bufCap, size_t* outLen) {
   if (!s_mounted) return false;
   if (!scriptNameIsValid(name, std::strlen(name))) return false;
-  // TODO: same shape as scripts_storage_read_boot, generalized to `name`.
-  // char path[320];
-  // snprintf(path, sizeof(path), "/scripts/%s", name);
-  // FILE* f = fopen(path, "rb");
-  // if (!f) return false;
-  // size_t n = fread(buf, 1, bufCap, f);
-  // bool truncated = !feof(f);
-  // fclose(f);
-  // if (truncated) return false;
-  // *outLen = n;
-  // return true;
-  (void)buf;
-  (void)bufCap;
-  (void)outLen;
-  return false;
+
+  char path[320];
+  std::snprintf(path, sizeof(path), "/scripts/%s", name);
+  FILE* f = fopen(path, "rb");
+  if (!f) return false;
+  size_t n = fread(buf, 1, bufCap, f);
+  bool truncated = (feof(f) == 0);
+  fclose(f);
+  if (truncated) return false;
+  *outLen = n;
+  return true;
 }
 
 bool scripts_storage_delete(const char* name) {
   if (!s_mounted) return false;
   if (!scriptNameIsValid(name, std::strlen(name))) return false;
-  // TODO:
-  // char path[320];
-  // snprintf(path, sizeof(path), "/scripts/%s", name);
-  // return remove(path) == 0;
-  return false;
+
+  char path[320];
+  std::snprintf(path, sizeof(path), "/scripts/%s", name);
+  return remove(path) == 0;
 }
 
 #endif  // ESP_PLATFORM

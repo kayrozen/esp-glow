@@ -48,6 +48,11 @@ CONFIG_LWIP_SO_REUSE=y
 CONFIG_LWIP_MAX_SOCKETS=16
 
 # --- HTTP server (WebSocket endpoint + console serving in F4) ---
+# CONFIG_HTTPD_WS_SUPPORT gates ALL of esp_http_server's websocket API
+# (httpd_ws_frame_t, HTTPD_WS_TYPE_*, httpd_ws_recv_frame/send_frame[_async],
+# httpd_uri_t::is_websocket) behind #ifdef in esp_http_server.h -- without
+# it, web_input.cpp's /ws handler fails to compile, not just to link.
+CONFIG_HTTPD_WS_SUPPORT=y
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 CONFIG_HTTPD_MAX_URI_LEN=512
 
