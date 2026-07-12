@@ -9,15 +9,24 @@
 #   ota_1      3 MB   OTA application (A/B slot B)
 #   show      ~1 MB   raw SHW1 show bundle (no filesystem; see storage_manager.cpp)
 #   coredump  512 KB  panic core dumps (robustness)
+#   scripts   256 KB  LittleFS: Fennel/Lua scripts, writable at runtime
+#                     (see scripts_storage.h, README_LUA_FENNEL.md)
 #
-# Total: ~7.6 MB, fits in 8 MB flash. For 16 MB boards, enlarge ota_0/ota_1
-# and/or show.
+# Total: ~7.85 MB, fits in 8 MB flash (128 KB headroom left). For 16 MB
+# boards, enlarge ota_0/ota_1 and/or show.
 #
 # `show` is a raw `data` partition (subtype 0x40), not a filesystem: the
 # SHW1 bundle is a single opaque blob, so a filesystem buys nothing and the
 # web flasher (esptool-js, browser-side) can't construct one anyway. The
 # device reads it with esp_partition_read(); the browser writes it with
 # esptool-js flashing raw bytes straight at this partition's offset.
+#
+# `scripts` is the opposite: it's the ONE thing on this device meant to
+# change at runtime without a reflash (live-coded Fennel/Lua, a boot.fnl
+# evaluated at startup — see design doc phases 2/6/8). LittleFS earns its
+# keep here because scripts are many small named files the device itself
+# creates/overwrites (glow.save), not a single opaque blob written from
+# outside.
 
 # Name,     Type, SubType,  Offset,   Size,    Flags
 nvs,        data, nvs,      0x9000,   0x6000,
@@ -27,3 +36,4 @@ ota_0,      app,  ota_0,    0x20000,  0x300000,
 ota_1,      app,  ota_1,    0x320000, 0x300000,
 show,       data, 0x40,     0x620000, 0x100000,
 coredump,   data, coredump, 0x720000, 0x80000,
+scripts,    data, spiffs,   0x7A0000, 0x40000,

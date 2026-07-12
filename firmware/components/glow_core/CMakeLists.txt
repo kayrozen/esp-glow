@@ -17,7 +17,16 @@
 #   F1: render_pacing.cpp, dmx_sink.cpp (already listed? no — added in F1)
 #   F3: apply_loaded_show.cpp
 #   F4: midi_parser.cpp, osc_parser.cpp, web_protocol.cpp, web_input_handler.cpp,
-#       live_control.cpp, midi_input.cpp, osc_input.cpp, web_input.cpp
+#       midi_input.cpp, osc_input.cpp, web_input.cpp (the actual hardware
+#       transports remain TODO stubs; see their own file headers)
+#   F6: the Lua/Fennel live-coding layer (see README_LUA_FENNEL.md), plus
+#       live_control.cpp/control_queue*.cpp pulled forward from F4: cues
+#       need a real ShowController, and ShowController needs a real
+#       LiveControl + control-event queue feeding it for Lua, the web
+#       console, and MIDI/OSC to converge on the same controller (see
+#       main.cpp). Only the actual transports (web httpd, MIDI UART, OSC
+#       UDP) remain TODO stubs — the queue, the pump, and the wiring
+#       contract are real and reachable from main.cpp now.
 
 set(GLOW_ROOT ${CMAKE_CURRENT_LIST_DIR}/../../..)
 
@@ -47,9 +56,33 @@ idf_component_register(
         ${GLOW_ROOT}/dmx_sink.cpp
         # device-only Art-Net sink (#ifdef ESP_PLATFORM guarded; filled in F2)
         ${GLOW_ROOT}/artnet_sink.cpp
+        # F6: the Lua/Fennel live-coding layer
+        ${GLOW_ROOT}/lua_vm.cpp
+        ${GLOW_ROOT}/glow_lua_api.cpp
+        ${GLOW_ROOT}/lua_effect.cpp
+        ${GLOW_ROOT}/glow_fennel.cpp
+        ${GLOW_ROOT}/eval_queue.cpp
+        # device-only eval-queue backend (#ifdef ESP_PLATFORM guarded; TODO
+        # stub, same status as control_queue_freertos.cpp — see its header)
+        ${GLOW_ROOT}/eval_queue_freertos.cpp
+        # scripts partition (LittleFS): host-tested scriptNameIsValid +
+        # device-only mount/read/save (#ifdef ESP_PLATFORM guarded; TODO
+        # stub -- same status as storage_manager.cpp's raw-partition read
+        # was before F3 hardware validation)
+        ${GLOW_ROOT}/scripts_storage.cpp
+        # pulled forward from F4: LiveControl + the control-event queue,
+        # so glow.cue.*/the web console/MIDI/OSC all drive one
+        # ShowController via one queue (see main.cpp's g_controller)
+        ${GLOW_ROOT}/live_control.cpp
+        ${GLOW_ROOT}/control_queue.cpp
+        # device-only FreeRTOS queue backend (#ifdef ESP_PLATFORM guarded;
+        # TODO stub -- see control_queue_freertos.cpp's header)
+        ${GLOW_ROOT}/control_queue_freertos.cpp
     INCLUDE_DIRS
         ${GLOW_ROOT}
-    REQUIRES esp_dmx esp_wifi lwip
+        ${GLOW_ROOT}/third_party/lua
+    REQUIRES esp_dmx esp_wifi lwip lua
+    PRIV_REQUIRES littlefs
 )
 
 # Match the host build flags: no exceptions, no RTTI, full warnings.

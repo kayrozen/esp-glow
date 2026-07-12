@@ -8,6 +8,16 @@
 // renderFrame, so callers can fill Raw universes (e.g. render a PixelMatrix
 // pattern and writeRawUniverse it into the Show). This keeps matrix driving
 // inside the same paced loop instead of a second racing task.
+//
+// F6 adds an optional post_render hook: a callback invoked each frame AFTER
+// renderFrame, given however much slack is left before the next deadline
+// (0 if the frame ran behind and there is none). This is where the Lua VM's
+// GC gets its only chance to run (see lua_vm.h's LuaVM::gcStepSlack): the
+// GC is created stopped and never runs automatically, specifically so it
+// can be confined to this bounded, measured window instead of causing an
+// uncontrolled pause on the render path. The loop re-measures the clock
+// after this hook returns before computing how long to sleep, so time the
+// hook spends is never double-counted on top of the frame's own sleep.
 #pragma once
 
 #include "show.h"
@@ -25,6 +35,12 @@ extern "C" {
 // universes (writeRawUniverse) from a PixelMatrix or similar.
 typedef void (*render_pre_render_fn)(void* ctx, float t_sec, Show* show);
 
+// Optional per-frame callback, called AFTER renderFrame with the
+// microseconds of slack remaining before the next deadline (see the F6
+// comment above). slack_us is 0 on a frame that ran behind — the callback
+// must treat that as "do nothing", not "do a full unbounded pass".
+typedef void (*render_post_render_fn)(void* ctx, uint32_t slack_us);
+
 struct RenderTaskConfig {
   Show*    show;            // borrowed, must outlive the task
   uint32_t targetHz;        // 0 => use glow::DEFAULT_RENDER_HZ (44)
@@ -33,6 +49,8 @@ struct RenderTaskConfig {
   UBaseType_t priority;     // default 20 (above WiFi, below ISR)
   render_pre_render_fn pre_render;  // optional, may be nullptr
   void*               pre_render_ctx;
+  render_post_render_fn post_render;  // optional, may be nullptr
+  void*                post_render_ctx;
 };
 
 // Start the render task. Returns true on success. The task runs until

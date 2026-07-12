@@ -82,3 +82,34 @@ size_t buildConfigJson(const WebCueInfo* cues, size_t nCues,
 // `activeIds` may be nullptr only if nActive is 0.
 size_t buildStateJson(const uint16_t* activeIds, size_t nActive,
                       char* buf, size_t bufLen);
+
+//
+// Live-coding eval channel (see README_LUA_FENNEL.md, design doc section 8):
+//
+//   UI -> device:
+//     { "type":"eval", "id":1, "src":"(glow.cue.go :chorus)" }
+//
+//   Device -> UI:
+//     { "type":"eval_result", "id":1, "ok":true }
+//     { "type":"eval_result", "id":1, "ok":false, "err":"...:1: unexpected symbol" }
+//
+// `id` is an opaque request id the UI picks (e.g. an increasing counter) so
+// out-of-order replies can be matched back to their request; it is not a
+// cue/scene id. `src` is arbitrary Fennel source text, so — unlike every
+// other string in this protocol — it needs real JSON escape handling
+// (parseWebCommand's strings deliberately reject backslash escapes because
+// labels/names never need them; script source does).
+//
+
+// Parse a UI->device `{"type":"eval", ...}` message. On success, the
+// unescaped source is written into srcBuf (NUL-terminated if it fits) and
+// outSrcLen is its length; outRequestId is the `id` field (0 if absent).
+// Returns false if this is not an `eval` message, srcBuf is too small for
+// the unescaped source, or the message is malformed.
+bool parseEvalCommand(const char* json, size_t len, uint32_t& outRequestId,
+                      char* srcBuf, size_t srcBufCap, size_t& outSrcLen);
+
+// Build an `eval_result` JSON message into `buf`. `err` is ignored when ok
+// is true; may be nullptr when ok is false (omits the "err" field).
+size_t buildEvalResultJson(uint32_t requestId, bool ok, const char* err,
+                          char* buf, size_t bufLen);

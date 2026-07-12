@@ -3,8 +3,13 @@
 #
 # esp_dmx  — DMX driver for dmx_sink.cpp (F1+).
 # esp_wifi / lwip — implicit for artnet_sink.cpp UDP networking (F2+).
+# joltwallet/littlefs — the "scripts" partition's filesystem
+#   (scripts_storage.cpp, F6). PRIV_REQUIRES in CMakeLists.txt: only the
+#   .cpp internals touch esp_littlefs, not scripts_storage.h's public API.
 dependencies:
   idf: ">=5.1"
   esp_dmx:
     git: https://github.com/someweisguy/esp_dmx.git
     version: "v3.1.0"
+  joltwallet/littlefs:
+    version: "^1.14"

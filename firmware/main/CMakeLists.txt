@@ -7,6 +7,9 @@
 #   F3: + raw "show" partition + load SHW1 bundle via applyLoadedShow
 #   F4: + web/MIDI/OSC inputs + console serving
 #   F5: + OTA + watchdog + safe-blackout fallback
+#   F6: + Lua/Fennel live-coding layer (see README_LUA_FENNEL.md) -- the
+#       vendored Fennel compiler is embedded here (EMBED_FILES) the same
+#       way F0 already embeds the web console's index.html.
 
 idf_component_register(
     SRCS
@@ -20,6 +23,7 @@ idf_component_register(
     REQUIRES glow_core
     EMBED_FILES
         "data/console/index.html"
+        "../../third_party/fennel/fennel.lua"
 )
 
 # Write the demo SHW1 bundle straight into the raw "show" partition (see

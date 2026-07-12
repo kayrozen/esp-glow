@@ -39,6 +39,9 @@
 #include "storage_manager.h"
 
 #include "show.h"
+#include "show_control.h"
+#include "live_control.h"
+#include "control_queue.h"
 #include "effects.h"
 #include "fixture_profile.h"
 #include "dmx_sink.h"
@@ -47,6 +50,18 @@
 #include "pixel_patterns.h"
 #include "show_bundle.h"
 #include "apply_loaded_show.h"
+
+#include "glow_fennel.h"
+#include "glow_lua_api.h"
+#include "lua_vm.h"  // complete LuaVM type -- glow_fennel.h only forward-declares it (glowLuaVM().gcStepSlack(...) needs the full definition)
+#include "scripts_storage.h"
+
+// The vendored Fennel compiler, embedded via EMBED_FILES (see
+// firmware/main/CMakeLists.txt). ESP-IDF's convention: a file's basename
+// with non-alphanumeric characters replaced by '_', wrapped in
+// _binary_..._start/_end.
+extern "C" const uint8_t fennel_lua_start[] asm("_binary_fennel_lua_start");
+extern "C" const uint8_t fennel_lua_end[] asm("_binary_fennel_lua_end");
 
 #ifdef ESP_PLATFORM
 #include "esp_dmx.h"
@@ -84,6 +99,39 @@ static Show         g_show;
 static DmxSink*      g_dmx = nullptr;
 static ArtNetSink*   g_artnet = nullptr;
 
+// F6: ShowController is itself an IEffect (show_control.h) -- it does not
+// sit "beside" Show, it plugs INTO it as an effect, the same way any other
+// IEffect does. It is the ONE effect g_show ever gets (see app_main's
+// g_show.addEffect(&g_controller)): everything downstream of it -- cues,
+// scenes, fades, HTP/LTP -- funnels through this one instance, and it in
+// turn is what emits the resolved intents Show::renderFrame consumes. Any
+// effect added to g_show directly instead would run permanently, outside
+// every cue, invisible and unstoppable from Lua/the web console/MIDI/OSC
+// -- which is exactly what the old hardcoded-fallback DimmerEffect used to
+// do (removed in setup_hardcoded_fallback; it's a cue now, like everything
+// else).
+//
+// Three things converge on this one instance: glow.cue.*/glow.scene.*
+// (glow_lua_api.cpp, via glowLuaInit below), the web console, and MIDI/OSC
+// (via g_liveControl below) -- all of F4/F6's trigger sources share the
+// same ShowController, not separate ones.
+static ShowController g_controller;
+
+// F4 (pulled forward, see glow_core's CMakeLists.txt comment): the web
+// console and MIDI/OSC bind cue/scene triggers here; it mutates
+// g_controller only from the render task, via pumpControlEvents below --
+// never directly from a transport task (see control_queue.h's rationale).
+static LiveControl g_liveControl(g_controller);
+
+// F4 (pulled forward): the control-event queue itself. The actual
+// transports (web httpd, MIDI UART, OSC UDP) that would push into this are
+// still TODO stubs (web_input.cpp, midi_input.cpp, osc_input.cpp), and so
+// is the FreeRTOS queue this factory returns (control_queue_freertos.cpp)
+// -- pop() always reports empty until that's filled in. But the consumer
+// side (this pointer + the pumpControlEvents call in on_pre_render) is
+// real now, so wiring up a transport later is purely additive.
+static IControlEventQueue* g_controlQueue = nullptr;
+
 // Matrix driver: owns the PixelMatrix + pattern objects built from the bundle
 // (or the hardcoded fallback). The pre_render hook iterates this list.
 struct MatrixDriver {
@@ -111,6 +159,16 @@ public:
 
 static void on_pre_render(void* /*ctx*/, float t, Show* show) {
   if (!show) return;
+
+  // F4 (pulled forward): drain queued web-console/MIDI/OSC events into
+  // g_liveControl -> g_controller BEFORE renderFrame, at the top of the
+  // frame, on the render task -- exactly control_queue.h's contract. This
+  // must not move after renderFrame: doing so would apply this frame's
+  // input a frame late every frame, not just occasionally.
+  if (g_controlQueue) {
+    pumpControlEvents(*g_controlQueue, g_liveControl, t);
+  }
+
   for (PixelMatrix* m : g_md.matrices) {
     m->render(t);
     for (uint8_t i = 0; i < m->universeCount(); ++i) {
@@ -119,6 +177,71 @@ static void on_pre_render(void* /*ctx*/, float t, Show* show) {
       show->writeRawUniverse(uidx, m->universeData(i), DMX_UNIVERSE_SIZE);
     }
   }
+}
+
+// F6: exposes g_md's matrices to glow.matrix.* by index (see glow_lua_api.h).
+class MainMatrixRegistry : public IMatrixRegistry {
+public:
+  PixelMatrix* matrix(int index) override {
+    if (index < 0 || static_cast<size_t>(index) >= g_md.matrices.size()) return nullptr;
+    return g_md.matrices[static_cast<size_t>(index)];
+  }
+};
+static MainMatrixRegistry g_matrixRegistry;
+
+// F6: the render task's post_render hook. This is the ONLY place the Lua
+// VM's GC ever runs (see lua_vm.h) -- it is created stopped specifically
+// so it can be confined to this bounded, measured window instead of
+// causing an uncontrolled pause on the render path. Skipping the call
+// entirely when the VM never initialized (g_luaReady false) is the
+// correct behavior, not an oversight: there is nothing to collect.
+static bool g_luaReady = false;
+static void on_post_render(void* /*ctx*/, uint32_t slack_us) {
+  if (!g_luaReady || slack_us == 0) return;
+  glow::glowLuaVM().gcStepSlack(slack_us);
+}
+
+// F6: initialize the single process-wide Lua VM, install glow.*, load the
+// vendored Fennel compiler, and evaluate boot.fnl if the "scripts"
+// partition has one. A missing/corrupt boot.fnl (or no "scripts"
+// partition mounted yet -- scripts_storage_mount is still a TODO stub;
+// see its header) is not fatal: boot.fnl only ever ADDS Lua-defined cues
+// on top of whatever setup_show_from_bundle/setup_hardcoded_fallback
+// already patched, so skipping it just means no Lua-driven cue goes
+// active -- the base show still renders. This is this phase's version of
+// "fall back to blackout, never boot into a broken show": there is
+// nothing partially-applied to unwind, because boot.fnl failing leaves
+// the Lua layer simply inactive, not the render loop.
+static void setup_lua() {
+  const char* fennelSrc = reinterpret_cast<const char*>(fennel_lua_start);
+  size_t fennelLen = static_cast<size_t>(fennel_lua_end - fennel_lua_start);
+
+  char err[256];
+  g_luaReady = glow::glowLuaInit(g_controller, &g_matrixRegistry, fennelSrc, fennelLen, err, sizeof(err));
+  if (!g_luaReady) {
+    ESP_LOGE(TAG, "Lua/Fennel init failed (scripts disabled this boot): %s", err);
+    return;
+  }
+  ESP_LOGI(TAG, "Lua/Fennel VM ready (Fennel compiler loaded, %u bytes source)",
+           (unsigned)fennelLen);
+
+  if (!scripts_storage_mount()) {
+    ESP_LOGW(TAG, "scripts partition not mounted; no boot.fnl this boot.");
+    return;
+  }
+
+  static char bootBuf[16 * 1024];  // generous for a hand-written boot script
+  size_t bootLen = 0;
+  if (!scripts_storage_read_boot(bootBuf, sizeof(bootBuf), &bootLen)) {
+    ESP_LOGI(TAG, "no boot.fnl found; nothing to evaluate this boot.");
+    return;
+  }
+
+  if (!glow_lua_eval_fennel(bootBuf, bootLen, err, sizeof(err))) {
+    ESP_LOGE(TAG, "boot.fnl failed, base show still renders: %s", err);
+    return;
+  }
+  ESP_LOGI(TAG, "boot.fnl evaluated successfully.");
 }
 
 static FixtureProfile makeDimmerProfile() {
@@ -130,6 +253,13 @@ static FixtureProfile makeDimmerProfile() {
 }
 
 // F1/F2 fallback: hardcoded dimmer + 16x8 rainbow matrix. Used when no bundle.
+//
+// The dimmer goes through a cue on g_controller, not a bare g_show.addEffect
+// -- an effect added straight to g_show would run permanently, outside any
+// cue, invisible and unstoppable from Lua/the web console/MIDI/OSC (see the
+// comment on g_controller). go()ing it immediately at boot preserves the
+// original "board does something without a bundle" behavior, just through
+// the same path every other cue takes.
 static void setup_hardcoded_fallback() {
   ESP_LOGW(TAG, "using hardcoded fallback patch (no bundle found).");
   g_show.setUniverseCount(3);
@@ -141,7 +271,8 @@ static void setup_hardcoded_fallback() {
   g_show.patch(dimmer, 0, 0);
   static uint16_t ids[] = { 0 };
   static DimmerEffect fx(std::vector<uint16_t>{ids[0]}, 0.5f);
-  g_show.addEffect(&fx);
+  uint16_t cueId = g_controller.addCue({&fx}, /*fadeInSec=*/0.0f, /*fadeOutSec=*/0.0f, /*priority=*/0);
+  g_controller.go(cueId, 0.0f);
 
   MatrixMap mm = {};
   mm.width = 16; mm.height = 8; mm.serpentine = true; mm.vertical = false;
@@ -246,7 +377,23 @@ extern "C" void app_main(void) {
     setup_hardcoded_fallback();
   }
 
-  // --- Render task (core 1, 44 Hz, pre_render drives all matrices) ---
+  // --- F6: g_controller is g_show's ONE effect (see its declaration's
+  // comment). Must happen before the render task starts, and before
+  // anything (Lua, LiveControl) is asked to drive g_controller, so it's
+  // already part of every frame from the first one rendered. ---
+  g_show.addEffect(&g_controller);
+
+  // --- F4 (pulled forward): the control-event queue LiveControl drains
+  // into g_controller from (see on_pre_render). Sized generously (64) so
+  // overflow never happens at human event rates, matching
+  // control_queue.h's own guidance. ---
+  g_controlQueue = createDeviceControlEventQueue(64);
+
+  // --- F6: Lua/Fennel VM + boot.fnl (see setup_lua's comment) ---
+  setup_lua();
+
+  // --- Render task (core 1, 44 Hz, pre_render drives all matrices,
+  // post_render paces the Lua VM's GC) ---
   RenderTaskConfig rcfg = {};
   rcfg.show       = &g_show;
   rcfg.targetHz   = 44;
@@ -255,6 +402,8 @@ extern "C" void app_main(void) {
   rcfg.priority   = 20;
   rcfg.pre_render = on_pre_render;
   rcfg.pre_render_ctx = nullptr;
+  rcfg.post_render = on_post_render;
+  rcfg.post_render_ctx = nullptr;
   if (!render_task_start(&rcfg)) {
     ESP_LOGE(TAG, "render task start failed; halting.");
     led_status_set(LED_ERROR);

@@ -1,7 +1,35 @@
 .PHONY: test clean
 
 # Compiler flags: C++17, warnings, sanitizer
-CXXFLAGS = -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -g
+# -Ithird_party/lua: the vendored Lua 5.4.6 headers (lua_glow_include.h),
+# needed by the Lua/Fennel layer (lua_vm.cpp, glow_lua_api.cpp,
+# lua_effect.cpp, glow_fennel.cpp) and their tests. Harmless for every
+# other target -- just an extra include search path.
+CXXFLAGS = -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -g -Ithird_party/lua
+
+# Vendored Lua 5.4.6 (third_party/lua/, LUA_32BITS=1 -- see
+# scripts/vendor_lua.sh). Curated to exactly the libraries the sandbox
+# opens (base/math/string/table + their aux lib): no io/os/debug/
+# package/utf8/coroutine/ltests/onelua/lua.c compiled in at all, so an
+# accidental attempt to open one of those would be a link error, not a
+# silent sandbox regression.
+LUA_CFLAGS = -std=c99 -Wall -Wextra -Werror -O2 -Ithird_party/lua
+LUA_C_SOURCES = third_party/lua/lapi.c third_party/lua/lcode.c third_party/lua/lctype.c \
+                third_party/lua/ldebug.c third_party/lua/ldo.c third_party/lua/ldump.c \
+                third_party/lua/lfunc.c third_party/lua/lgc.c third_party/lua/llex.c \
+                third_party/lua/lmem.c third_party/lua/lobject.c third_party/lua/lopcodes.c \
+                third_party/lua/lparser.c third_party/lua/lstate.c third_party/lua/lstring.c \
+                third_party/lua/ltable.c third_party/lua/ltm.c third_party/lua/lundump.c \
+                third_party/lua/lvm.c third_party/lua/lzio.c third_party/lua/lauxlib.c \
+                third_party/lua/lbaselib.c third_party/lua/lmathlib.c third_party/lua/lstrlib.c \
+                third_party/lua/ltablib.c
+LUA_C_OBJECTS = $(LUA_C_SOURCES:.c=.o)
+
+# Modules shared by every Lua/Fennel test target.
+GLOW_LUA_SOURCES = lua_vm.cpp glow_lua_api.cpp lua_effect.cpp glow_fennel.cpp eval_queue.cpp \
+                   vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp show.cpp \
+                   oscillator.cpp color.cpp effects.cpp show_control.cpp pixel_matrix.cpp \
+                   pixel_patterns.cpp
 
 # --- test_aim: aim/vec_math geometry tests ---
 AIM_SOURCES = vec_math.cpp aim.cpp test_aim.cpp
@@ -65,6 +93,37 @@ CONTROL_QUEUE_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder
                         show_control.cpp live_control.cpp control_queue.cpp test_control_queue.cpp
 CONTROL_QUEUE_TARGET  = test_control_queue
 
+# --- test_lua_vm: LuaVM unit tests (allocator cap, sandbox, GC pacing,
+# instruction budget). Fennel-free by design -- see lua_vm.cpp's header.
+LUA_VM_SOURCES = lua_vm.cpp test_lua_vm.cpp
+LUA_VM_OBJECTS = $(LUA_VM_SOURCES:.cpp=.o)
+LUA_VM_TARGET  = test_lua_vm
+
+# --- test_lua_effect: LuaEffect + GlowLuaApi + Fennel integration --
+# the emit pattern, the error-disable contract, zero allocation.
+LUA_EFFECT_SOURCES = $(GLOW_LUA_SOURCES) test_lua_effect.cpp
+LUA_EFFECT_OBJECTS = $(LUA_EFFECT_SOURCES:.cpp=.o)
+LUA_EFFECT_TARGET  = test_lua_effect
+
+# --- test_glow_lua_api: the glow.* API surface (cue/scene state, glow.fx.*
+# handles, glow.matrix.* via a fake registry).
+GLOW_LUA_API_SOURCES = $(GLOW_LUA_SOURCES) test_glow_lua_api.cpp
+GLOW_LUA_API_OBJECTS = $(GLOW_LUA_API_SOURCES:.cpp=.o)
+GLOW_LUA_API_TARGET  = test_glow_lua_api
+
+# --- test_glow_fennel: the process-wide VM singleton, glow_lua_eval_fennel,
+# the eval submission queue drain -- the syntax-error/runtime-error/
+# infinite-loop/OOM "rig keeps rendering" guarantees.
+GLOW_FENNEL_SOURCES = $(GLOW_LUA_SOURCES) test_glow_fennel.cpp
+GLOW_FENNEL_OBJECTS = $(GLOW_FENNEL_SOURCES:.cpp=.o)
+GLOW_FENNEL_TARGET  = test_glow_fennel
+
+# --- test_scripts_storage: scriptNameIsValid (the host-testable core of
+# the "scripts" LittleFS partition; mount/read/save need real hardware).
+SCRIPTS_STORAGE_SOURCES = scripts_storage.cpp test_scripts_storage.cpp
+SCRIPTS_STORAGE_OBJECTS = $(SCRIPTS_STORAGE_SOURCES:.cpp=.o)
+SCRIPTS_STORAGE_TARGET  = test_scripts_storage
+
 $(AIM_TARGET): $(AIM_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(AIM_OBJECTS) -o $(AIM_TARGET) -lm
 
@@ -95,9 +154,29 @@ $(WEB_PROTOCOL_TARGET): $(WEB_PROTOCOL_OBJECTS)
 $(CONTROL_QUEUE_TARGET): $(CONTROL_QUEUE_SOURCES)
 	$(CXX) $(CONTROL_QUEUE_CXXFLAGS) $(CONTROL_QUEUE_SOURCES) -o $(CONTROL_QUEUE_TARGET) -lm -pthread
 
+$(LUA_VM_TARGET): $(LUA_VM_OBJECTS) $(LUA_C_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(LUA_VM_OBJECTS) $(LUA_C_OBJECTS) -o $(LUA_VM_TARGET) -lm
+
+$(LUA_EFFECT_TARGET): $(LUA_EFFECT_OBJECTS) $(LUA_C_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(LUA_EFFECT_OBJECTS) $(LUA_C_OBJECTS) -o $(LUA_EFFECT_TARGET) -lm
+
+$(GLOW_LUA_API_TARGET): $(GLOW_LUA_API_OBJECTS) $(LUA_C_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(GLOW_LUA_API_OBJECTS) $(LUA_C_OBJECTS) -o $(GLOW_LUA_API_TARGET) -lm
+
+$(GLOW_FENNEL_TARGET): $(GLOW_FENNEL_OBJECTS) $(LUA_C_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(GLOW_FENNEL_OBJECTS) $(LUA_C_OBJECTS) -o $(GLOW_FENNEL_TARGET) -lm
+
+$(SCRIPTS_STORAGE_TARGET): $(SCRIPTS_STORAGE_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(SCRIPTS_STORAGE_OBJECTS) -o $(SCRIPTS_STORAGE_TARGET) -lm
+
 # Compile object files
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# Vendored Lua (third_party/lua/*.c) is C, compiled with its own flags --
+# see LUA_CFLAGS above.
+third_party/lua/%.o: third_party/lua/%.c
+	$(CC) $(LUA_CFLAGS) -c $< -o $@
 
 # Run tests
 # --- test_render_pacing: firmware render-loop pacing math (host-tested) ---
@@ -115,7 +194,7 @@ APPLY_TARGET  = test_apply_loaded_show
 $(APPLY_TARGET): $(APPLY_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(APPLY_OBJECTS) -o $(APPLY_TARGET) -lm
 
-test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET) $(LIVE_CONTROL_TARGET) $(WEB_PROTOCOL_TARGET) $(CONTROL_QUEUE_TARGET) $(PACING_TARGET) $(APPLY_TARGET)
+test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET) $(LIVE_CONTROL_TARGET) $(WEB_PROTOCOL_TARGET) $(CONTROL_QUEUE_TARGET) $(PACING_TARGET) $(APPLY_TARGET) $(LUA_VM_TARGET) $(LUA_EFFECT_TARGET) $(GLOW_LUA_API_TARGET) $(GLOW_FENNEL_TARGET) $(SCRIPTS_STORAGE_TARGET)
 	./$(AIM_TARGET)
 	./$(FP_TARGET)
 	./$(SHOW_TARGET)
@@ -128,6 +207,11 @@ test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL
 	./$(CONTROL_QUEUE_TARGET)
 	./$(PACING_TARGET)
 	./$(APPLY_TARGET)
+	./$(LUA_VM_TARGET)
+	./$(LUA_EFFECT_TARGET)
+	./$(GLOW_LUA_API_TARGET)
+	./$(GLOW_FENNEL_TARGET)
+	./$(SCRIPTS_STORAGE_TARGET)
 
 # Clean build artifacts
 clean:
@@ -136,7 +220,13 @@ clean:
 	      $(PIXEL_MATRIX_OBJECTS) $(PIXEL_MATRIX_TARGET) $(PROVISION_OBJECTS) $(PROVISION_TARGET) \
 	      $(LIVE_CONTROL_OBJECTS) $(LIVE_CONTROL_TARGET) \
 	      $(WEB_PROTOCOL_OBJECTS) $(WEB_PROTOCOL_TARGET) \
-	      $(CONTROL_QUEUE_TARGET)
+	      $(CONTROL_QUEUE_TARGET) \
+	      $(LUA_VM_OBJECTS) $(LUA_VM_TARGET) \
+	      $(LUA_EFFECT_OBJECTS) $(LUA_EFFECT_TARGET) \
+	      $(GLOW_LUA_API_OBJECTS) $(GLOW_LUA_API_TARGET) \
+	      $(GLOW_FENNEL_OBJECTS) $(GLOW_FENNEL_TARGET) \
+	      $(SCRIPTS_STORAGE_OBJECTS) $(SCRIPTS_STORAGE_TARGET) \
+	      $(LUA_C_OBJECTS)
 
 # Rebuild
 rebuild: clean test

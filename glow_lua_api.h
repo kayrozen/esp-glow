@@ -1,0 +1,125 @@
+// glow_lua_api.h — the `glow.*` C API surface exposed to sandboxed Fennel
+// scripts (see README_LUA_FENNEL.md, design doc section 5).
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "lua_glow_include.h"
+#include "show.h"  // IEffect, CapIntent, AimIntent
+
+class ShowController;
+class PixelMatrix;
+class IPixelPattern;
+class LuaEffect;
+namespace glow {
+class LuaVM;
+}
+
+// Injected lookup for glow.matrix.*. nullptr disables matrix control (the
+// calls then lua_error with a clear message instead of reaching for a
+// registry that doesn't exist). Device wiring supplies a registry backed by
+// main.cpp's matrix driver; host tests supply a small fake.
+class IMatrixRegistry {
+public:
+  virtual ~IMatrixRegistry() = default;
+  virtual PixelMatrix* matrix(int index) = 0;  // nullptr if index is out of range
+};
+
+// Installs and implements the `glow` global table:
+//   glow.set / glow.aim        — frame-context-gated, zero allocation
+//   glow.CAP.*                 — integer capability constants
+//   glow.cue.define/go/release — wraps ShowController, string name -> id
+//   glow.scene.define/go/release
+//   glow.fx.hue-rotate/chase/sweep — wraps the existing C++ effect library,
+//                                    returns opaque handles usable in
+//                                    cue.define's :effects list
+//   glow.matrix.pattern/brightness — wraps PixelMatrix via IMatrixRegistry
+//
+// One instance per LuaVM (see lua_vm.h — there is exactly one VM, owned by
+// the render task; see control_queue.h's rationale, which this reuses).
+class GlowLuaApi {
+public:
+  // matrices may be nullptr if this device has no pixel matrices.
+  GlowLuaApi(glow::LuaVM& vm, ShowController& show, IMatrixRegistry* matrices);
+  ~GlowLuaApi();
+
+  GlowLuaApi(const GlowLuaApi&) = delete;
+  GlowLuaApi& operator=(const GlowLuaApi&) = delete;
+
+  // Registers the `glow` table into the VM's trusted _G. Call once, before
+  // LuaVM::loadFennelCompiler/pushSandboxEnv (the sandboxed env is a
+  // snapshot of _G taken on first use — glow must already be present).
+  void install();
+
+  glow::LuaVM& vm() { return vm_; }
+  ShowController& show() { return show_; }
+
+  // Frame context read by glow.set/glow.aim. beginFrame/endFrame bracket a
+  // LuaEffect::evaluate call (or any effect callback in general).
+  // noteEvalTime is used by the eval-submission drain (glow_fennel.cpp):
+  // there is no effect callback there, so glow.set/glow.aim stay invalid,
+  // but cue.go/release/define (which only need "now") are fine.
+  void beginFrame(float t, std::vector<CapIntent>* caps, std::vector<AimIntent>* aims);
+  void endFrame();
+  void noteEvalTime(float t);
+
+  float currentTime() const { return currentT_; }
+
+  // Look up a cue/scene id previously registered by glow.cue.define /
+  // glow.scene.define. Returns false if name is unknown. Exposed for
+  // wiring the web console / MIDI / OSC bindings (LiveControl/ShowController
+  // already address cues/scenes by these numeric ids).
+  bool cueIdForName(const std::string& name, uint16_t& idOut) const;
+  bool sceneIdForName(const std::string& name, uint16_t& idOut) const;
+
+  size_t ownedEffectCount() const { return ownedEffects_.size(); }
+  size_t luaEffectCount() const { return luaEffects_.size(); }
+
+private:
+  static int l_set(lua_State* L);
+  static int l_aim(lua_State* L);
+  static int l_cue_define(lua_State* L);
+  static int l_cue_go(lua_State* L);
+  static int l_cue_release(lua_State* L);
+  static int l_scene_define(lua_State* L);
+  static int l_scene_go(lua_State* L);
+  static int l_scene_release(lua_State* L);
+  static int l_fx_hue_rotate(lua_State* L);
+  static int l_fx_chase(lua_State* L);
+  static int l_fx_sweep(lua_State* L);
+  static int l_matrix_pattern(lua_State* L);
+  static int l_matrix_brightness(lua_State* L);
+
+  static GlowLuaApi& self(lua_State* L);
+
+  // Resolves each entry of the Lua array-table on top of the stack (either
+  // a Lua function, wrapped in a freshly-owned LuaEffect, or a
+  // glow.effect_handle userdata from glow.fx.*) into a raw IEffect*,
+  // appending to `out`. lua_error()s (never returns) on an invalid entry.
+  void resolveEffectsList(lua_State* L, int idx, std::vector<IEffect*>& out);
+
+  // Wraps `effect` in a glow.effect_handle userdata pushed on top of the
+  // stack, taking ownership (kept alive in ownedEffects_ for the VM's
+  // lifetime).
+  void pushEffectHandle(std::unique_ptr<IEffect> effect);
+
+  glow::LuaVM& vm_;
+  ShowController& show_;
+  IMatrixRegistry* matrices_;
+
+  float currentT_ = 0.0f;
+  std::vector<CapIntent>* frameCaps_ = nullptr;
+  std::vector<AimIntent>* frameAims_ = nullptr;
+
+  std::unordered_map<std::string, uint16_t> cueIdByName_;
+  std::unordered_map<std::string, uint16_t> sceneIdByName_;
+
+  std::vector<std::unique_ptr<IEffect>> ownedEffects_;         // glow.fx.* handles
+  std::vector<std::unique_ptr<LuaEffect>> luaEffects_;         // wrapped bare Lua fns
+  std::vector<std::unique_ptr<IPixelPattern>> ownedPatterns_;  // glow.matrix.pattern
+};
