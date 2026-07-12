@@ -137,7 +137,7 @@ static void setup_hardcoded_fallback() {
   FixtureProfile dimmer = makeDimmerProfile();
   g_show.patch(dimmer, 0, 0);
   static uint16_t ids[] = { 0 };
-  static DimmerEffect fx({ids, 1}, 0.5f);
+  static DimmerEffect fx(std::vector<uint16_t>{ids[0]}, 0.5f);
   g_show.addEffect(&fx);
 
   MatrixMap mm = {};
@@ -205,7 +205,7 @@ extern "C" void app_main(void) {
   ESP_LOGI(TAG, "psram:  enabled (octal=%d)", CONFIG_SPIRAM_MODE_OCT ? 1 : 0);
 #endif
 
-  led_status_init(GLOW_STATUS_LED_GPIO);
+  led_status_init(CONFIG_GLOW_STATUS_LED_GPIO);
   led_status_set(LED_BLINK_SLOW);
 
   esp_err_t nvs = nvs_flash_init();
@@ -215,7 +215,7 @@ extern "C" void app_main(void) {
   }
 
   // --- F1: DMX sink ---
-  g_dmx = new DmxSink(DMX_NUM_1, GLOW_DMX_TX_GPIO, GLOW_DMX_RX_GPIO, GLOW_DMX_RTS_GPIO);
+  g_dmx = new DmxSink(DMX_NUM_1, CONFIG_GLOW_DMX_TX_GPIO, CONFIG_GLOW_DMX_RX_GPIO, CONFIG_GLOW_DMX_RTS_GPIO);
   if (!g_dmx->begin()) {
     ESP_LOGE(TAG, "DMX bring-up failed; halting.");
     led_status_set(LED_ERROR);
@@ -224,13 +224,13 @@ extern "C" void app_main(void) {
 
   // --- F2: WiFi (STA) ---
   WifiStaConfig wc = {};
-  wc.ssid = GLOW_WIFI_SSID;
-  wc.password = GLOW_WIFI_PASS;
+  wc.ssid = CONFIG_GLOW_WIFI_SSID;
+  wc.password = CONFIG_GLOW_WIFI_PASS;
   wc.ap_fallback = false;
   wifi_start_sta(&wc);
 
   // --- F2: Art-Net sink ---
-  uint32_t bridge = GLOW_ARTNET_BRIDGE_IP;
+  uint32_t bridge = CONFIG_GLOW_ARTNET_BRIDGE_IP;
   if (bridge == 0) bridge = 0xFFFFFFFFu;
   g_artnet = new ArtNetSink(bridge, 6454);
   if (!g_artnet->begin()) {

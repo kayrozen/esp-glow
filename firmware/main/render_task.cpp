@@ -59,7 +59,8 @@ static void render_loop(void*) {
 
     frames++;
     if (now - lastReport >= 5'000'000u) {
-      ESP_LOGI(TAG, "stats: %u frames, %u behind in last 5s", frames, behindCount);
+      ESP_LOGI(TAG, "stats: %u frames, %u behind in last 5s",
+               (unsigned)frames, (unsigned)behindCount);
       frames = 0;
       behindCount = 0;
       lastReport = now;
