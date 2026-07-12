@@ -74,6 +74,85 @@ struct Parser {
     return true;
   }
 
+  // Parse a JSON string literal WITH escape handling, decoding into
+  // outBuf (standard escapes plus \uXXXX, encoded as UTF-8; no surrogate
+  // pairs -- script source essentially never needs them). Unlike
+  // parseStringRaw, this is for values that are genuine free text (eval's
+  // `src` field), not protocol labels/names. Returns false on a malformed
+  // escape, an unterminated string, or if outBuf is too small to hold the
+  // fully-decoded string (never writes a truncated-but-silent result).
+  bool parseStringEscaped(char* outBuf, size_t outCap, size_t& outLen) {
+    skipWs();
+    if (eof() || *p != '"') return false;
+    ++p;
+    size_t w = 0;
+    bool overflow = false;
+    auto put = [&](char c) {
+      if (w < outCap) outBuf[w] = c;
+      else overflow = true;
+      ++w;
+    };
+    while (!eof() && *p != '"') {
+      unsigned char c = (unsigned char)*p;
+      if (c < 0x20) return false;  // raw control char in a JSON string
+      if (c != '\\') {
+        put((char)c);
+        ++p;
+        continue;
+      }
+      ++p;
+      if (eof()) return false;
+      char esc = *p;
+      switch (esc) {
+        case '"': put('"'); ++p; break;
+        case '\\': put('\\'); ++p; break;
+        case '/': put('/'); ++p; break;
+        case 'b': put('\b'); ++p; break;
+        case 'f': put('\f'); ++p; break;
+        case 'n': put('\n'); ++p; break;
+        case 'r': put('\r'); ++p; break;
+        case 't': put('\t'); ++p; break;
+        case 'u': {
+          ++p;
+          if (end - p < 4) return false;
+          unsigned cp = 0;
+          for (int i = 0; i < 4; ++i) {
+            char h = p[i];
+            unsigned digit;
+            if (h >= '0' && h <= '9') digit = (unsigned)(h - '0');
+            else if (h >= 'a' && h <= 'f') digit = (unsigned)(10 + (h - 'a'));
+            else if (h >= 'A' && h <= 'F') digit = (unsigned)(10 + (h - 'A'));
+            else return false;
+            cp = (cp << 4) | digit;
+          }
+          p += 4;
+          if (cp < 0x80) {
+            put((char)cp);
+          } else if (cp < 0x800) {
+            put((char)(0xC0 | (cp >> 6)));
+            put((char)(0x80 | (cp & 0x3F)));
+          } else {
+            put((char)(0xE0 | (cp >> 12)));
+            put((char)(0x80 | ((cp >> 6) & 0x3F)));
+            put((char)(0x80 | (cp & 0x3F)));
+          }
+          break;
+        }
+        default:
+          return false;
+      }
+    }
+    if (eof()) return false;  // unterminated
+    ++p;  // closing quote
+    if (overflow) return false;
+    outLen = w;
+    if (outCap > 0) {
+      size_t termPos = (w < outCap) ? w : outCap - 1;
+      outBuf[termPos] = '\0';
+    }
+    return true;
+  }
+
   // Parse a number into a double. Accepts optional leading '-', digits,
   // optional '.', optional exponent. Used for master `value` and for `id`.
   bool parseNumber(double& out) {
@@ -389,6 +468,77 @@ size_t buildStateJson(const uint16_t* activeIds, size_t nActive,
     w = appendUInt(buf, bufLen, w, activeIds[i]);
   }
   w = appendRaw(buf, bufLen, w, "]}");
+
+  if (buf != nullptr && bufLen > 0) {
+    size_t termPos = w < bufLen ? w : bufLen - 1;
+    buf[termPos] = '\0';
+  }
+  return w;
+}
+
+// ---------------------------------------------------------------------------
+// parseEvalCommand / buildEvalResultJson
+// ---------------------------------------------------------------------------
+
+bool parseEvalCommand(const char* json, size_t len, uint32_t& outRequestId,
+                      char* srcBuf, size_t srcBufCap, size_t& outSrcLen) {
+  if (json == nullptr || len == 0) return false;
+
+  View typeStr{nullptr, 0};
+  bool hasType = false, hasSrc = false;
+  double idVal = 0.0;
+  outRequestId = 0;
+  outSrcLen = 0;
+
+  Parser ps{json, json + len};
+  ps.skipWs();
+  if (!ps.consume('{')) return false;
+  ps.skipWs();
+  if (ps.consume('}')) return false;  // empty object is not a valid command
+
+  while (true) {
+    View k;
+    if (!ps.parseStringRaw(k)) return false;
+    if (!ps.consume(':')) return false;
+
+    if (k == "type") {
+      if (!ps.parseStringRaw(typeStr)) return false;
+      hasType = true;
+    } else if (k == "id") {
+      if (!ps.parseNumber(idVal)) return false;
+    } else if (k == "src") {
+      size_t n = 0;
+      if (!ps.parseStringEscaped(srcBuf, srcBufCap, n)) return false;
+      outSrcLen = n;
+      hasSrc = true;
+    } else {
+      if (!ps.skipValue(1)) return false;
+    }
+
+    if (ps.consume(',')) continue;
+    if (ps.consume('}')) break;
+    return false;
+  }
+
+  if (!hasType || !(typeStr == "eval")) return false;
+  if (!hasSrc) return false;
+  if (idVal < 0.0 || idVal > 4294967295.0) return false;
+  outRequestId = (uint32_t)idVal;
+  return true;
+}
+
+size_t buildEvalResultJson(uint32_t requestId, bool ok, const char* err,
+                          char* buf, size_t bufLen) {
+  size_t w = 0;
+  w = appendRaw(buf, bufLen, w, "{\"type\":\"eval_result\",\"id\":");
+  w = appendUInt(buf, bufLen, w, requestId);
+  w = appendRaw(buf, bufLen, w, ",\"ok\":");
+  w = appendBool(buf, bufLen, w, ok);
+  if (!ok && err != nullptr) {
+    w = appendRaw(buf, bufLen, w, ",\"err\":");
+    w = appendString(buf, bufLen, w, err);
+  }
+  w = appendChar(buf, bufLen, w, '}');
 
   if (buf != nullptr && bufLen > 0) {
     size_t termPos = w < bufLen ? w : bufLen - 1;

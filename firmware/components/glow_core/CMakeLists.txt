@@ -18,6 +18,11 @@
 #   F3: apply_loaded_show.cpp
 #   F4: midi_parser.cpp, osc_parser.cpp, web_protocol.cpp, web_input_handler.cpp,
 #       live_control.cpp, midi_input.cpp, osc_input.cpp, web_input.cpp
+#   F6: the Lua/Fennel live-coding layer (see README_LUA_FENNEL.md). Unlike
+#       F4's transports, this is wired into the SRCS list below because it
+#       has no hardware dependency of its own (it's a sandboxed VM sitting
+#       on top of the `lua` component) — the still-TODO piece is F4's web
+#       httpd carrying eval submissions to it, not this code.
 
 set(GLOW_ROOT ${CMAKE_CURRENT_LIST_DIR}/../../..)
 
@@ -47,9 +52,25 @@ idf_component_register(
         ${GLOW_ROOT}/dmx_sink.cpp
         # device-only Art-Net sink (#ifdef ESP_PLATFORM guarded; filled in F2)
         ${GLOW_ROOT}/artnet_sink.cpp
+        # F6: the Lua/Fennel live-coding layer
+        ${GLOW_ROOT}/lua_vm.cpp
+        ${GLOW_ROOT}/glow_lua_api.cpp
+        ${GLOW_ROOT}/lua_effect.cpp
+        ${GLOW_ROOT}/glow_fennel.cpp
+        ${GLOW_ROOT}/eval_queue.cpp
+        # device-only eval-queue backend (#ifdef ESP_PLATFORM guarded; TODO
+        # stub, same status as control_queue_freertos.cpp — see its header)
+        ${GLOW_ROOT}/eval_queue_freertos.cpp
+        # scripts partition (LittleFS): host-tested scriptNameIsValid +
+        # device-only mount/read/save (#ifdef ESP_PLATFORM guarded; TODO
+        # stub -- same status as storage_manager.cpp's raw-partition read
+        # was before F3 hardware validation)
+        ${GLOW_ROOT}/scripts_storage.cpp
     INCLUDE_DIRS
         ${GLOW_ROOT}
-    REQUIRES esp_dmx esp_wifi lwip
+        ${GLOW_ROOT}/third_party/lua
+    REQUIRES esp_dmx esp_wifi lwip lua
+    PRIV_REQUIRES littlefs
 )
 
 # Match the host build flags: no exceptions, no RTTI, full warnings.

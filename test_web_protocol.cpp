@@ -323,6 +323,143 @@ void test_roundtrip_master_dispatches() {
 }
 
 // ---------------------------------------------------------------------------
+// parseEvalCommand / buildEvalResultJson — the live-coding eval channel
+// ---------------------------------------------------------------------------
+
+void test_parse_eval_basic() {
+  TEST("parse eval: basic src, no id");
+  const char* json = R"JSON({"type":"eval","src":"(glow.cue.go :chorus)"})JSON";
+  uint32_t id;
+  char buf[128];
+  size_t n;
+  CHECK(parseEvalCommand(json, std::strlen(json), id, buf, sizeof(buf), n));
+  CHECK(id == 0);
+  CHECK(n == std::strlen("(glow.cue.go :chorus)"));
+  CHECK(std::memcmp(buf, "(glow.cue.go :chorus)", n) == 0);
+}
+
+void test_parse_eval_with_id() {
+  TEST("parse eval: id field carried through");
+  const char* json = R"JSON({"type":"eval","id":17,"src":"(+ 1 2)"})JSON";
+  uint32_t id;
+  char buf[64];
+  size_t n;
+  CHECK(parseEvalCommand(json, std::strlen(json), id, buf, sizeof(buf), n));
+  CHECK(id == 17);
+  CHECK(n == 7);
+  CHECK(std::memcmp(buf, "(+ 1 2)", 7) == 0);
+}
+
+void test_parse_eval_id_before_src() {
+  TEST("parse eval: field order doesn't matter");
+  const char* json = R"({"id":3,"src":"nil","type":"eval"})";
+  uint32_t id;
+  char buf[64];
+  size_t n;
+  CHECK(parseEvalCommand(json, std::strlen(json), id, buf, sizeof(buf), n));
+  CHECK(id == 3);
+  CHECK(n == 3);
+}
+
+void test_parse_eval_escapes() {
+  TEST("parse eval: JSON escapes decoded (quote, newline, tab, backslash)");
+  const char* json = R"({"type":"eval","src":"(print \"hi\")\nline2\t\\end"})";
+  uint32_t id;
+  char buf[128];
+  size_t n;
+  CHECK(parseEvalCommand(json, std::strlen(json), id, buf, sizeof(buf), n));
+  std::string expected = "(print \"hi\")\nline2\t\\end";
+  CHECK(n == expected.size());
+  CHECK(std::memcmp(buf, expected.data(), n) == 0);
+}
+
+void test_parse_eval_unicode_escape() {
+  TEST("parse eval: \\u escape decoded as UTF-8");
+  const char* json = R"({"type":"eval","src":"é"})";  // e-acute
+  uint32_t id;
+  char buf[16];
+  size_t n;
+  CHECK(parseEvalCommand(json, std::strlen(json), id, buf, sizeof(buf), n));
+  CHECK(n == 2);
+  CHECK((unsigned char)buf[0] == 0xC3 && (unsigned char)buf[1] == 0xA9);
+}
+
+void test_parse_eval_rejects_wrong_type() {
+  TEST("parse eval: rejects non-eval type");
+  uint32_t id;
+  char buf[32];
+  size_t n;
+  CHECK(!parseEvalCommand(R"({"type":"hello"})", 16, id, buf, sizeof(buf), n));
+}
+
+void test_parse_eval_rejects_missing_src() {
+  TEST("parse eval: rejects missing src");
+  const char* json = R"({"type":"eval","id":1})";
+  uint32_t id;
+  char buf[32];
+  size_t n;
+  CHECK(!parseEvalCommand(json, std::strlen(json), id, buf, sizeof(buf), n));
+}
+
+void test_parse_eval_rejects_buffer_too_small() {
+  TEST("parse eval: rejects when srcBuf can't hold the decoded source");
+  const char* json = R"({"type":"eval","src":"0123456789"})";
+  uint32_t id;
+  char buf[4];
+  size_t n;
+  CHECK(!parseEvalCommand(json, std::strlen(json), id, buf, sizeof(buf), n));
+}
+
+void test_parse_eval_rejects_bad_escape() {
+  TEST("parse eval: rejects an unknown escape sequence");
+  const char* json = R"({"type":"eval","src":"\q"})";
+  uint32_t id;
+  char buf[32];
+  size_t n;
+  CHECK(!parseEvalCommand(json, std::strlen(json), id, buf, sizeof(buf), n));
+}
+
+void test_parse_eval_rejects_malformed() {
+  TEST("parse eval: rejects malformed / empty input");
+  uint32_t id;
+  char buf[32];
+  size_t n;
+  CHECK(!parseEvalCommand(nullptr, 0, id, buf, sizeof(buf), n));
+  CHECK(!parseEvalCommand("", 0, id, buf, sizeof(buf), n));
+  CHECK(!parseEvalCommand("not json", 8, id, buf, sizeof(buf), n));
+}
+
+void test_build_eval_result_ok() {
+  TEST("build eval_result: ok=true omits err");
+  char buf[128];
+  size_t w = buildEvalResultJson(7, true, nullptr, buf, sizeof(buf));
+  CHECK(std::string(buf) == R"({"type":"eval_result","id":7,"ok":true})");
+  CHECK(w == std::strlen(buf));
+}
+
+void test_build_eval_result_err() {
+  TEST("build eval_result: ok=false includes escaped err");
+  char buf[128];
+  buildEvalResultJson(7, false, "1:1: unexpected \"x\"", buf, sizeof(buf));
+  CHECK(std::string(buf) ==
+       R"({"type":"eval_result","id":7,"ok":false,"err":"1:1: unexpected \"x\""})");
+}
+
+void test_build_eval_result_false_no_err() {
+  TEST("build eval_result: ok=false, err=nullptr omits the field");
+  char buf[128];
+  buildEvalResultJson(3, false, nullptr, buf, sizeof(buf));
+  CHECK(std::string(buf) == R"({"type":"eval_result","id":3,"ok":false})");
+}
+
+void test_build_eval_result_truncation_reported() {
+  TEST("build eval_result: too-small buffer reports the full would-be length");
+  char buf[8];
+  size_t w = buildEvalResultJson(1, false, "a very long error message", buf, sizeof(buf));
+  CHECK(w >= sizeof(buf));
+}
+
+// ---------------------------------------------------------------------------
 
 int main() {
   // Parser — valid inputs
@@ -368,6 +505,24 @@ int main() {
   // Round-trip into LiveControl shape
   test_roundtrip_cue_toggle_dispatches();
   test_roundtrip_master_dispatches();
+
+  // Eval channel — parser
+  test_parse_eval_basic();
+  test_parse_eval_with_id();
+  test_parse_eval_id_before_src();
+  test_parse_eval_escapes();
+  test_parse_eval_unicode_escape();
+  test_parse_eval_rejects_wrong_type();
+  test_parse_eval_rejects_missing_src();
+  test_parse_eval_rejects_buffer_too_small();
+  test_parse_eval_rejects_bad_escape();
+  test_parse_eval_rejects_malformed();
+
+  // Eval channel — builder
+  test_build_eval_result_ok();
+  test_build_eval_result_err();
+  test_build_eval_result_false_no_err();
+  test_build_eval_result_truncation_reported();
 
   if (g_failCount == 0) {
     printf("\nAll tests passed.\n");
