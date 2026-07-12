@@ -26,6 +26,8 @@
 // cannot be verified without hardware.
 //
 
+#include "web_input.h"
+
 #include "web_protocol.h"
 #include "control_queue.h"   // IControlEventQueue, ControlEvent (transitively)
 #include "eval_queue.h"      // IEvalSubmissionQueue, EvalSubmission
@@ -111,15 +113,7 @@ size_t web_input_build_state(const uint16_t* activeIds, size_t nActive,
   return buildStateJson(activeIds, nActive, buf, bufLen);
 }
 
-// What the caller should do after web_input_handle_text_frame returns.
-enum WebInputAction {
-  WEB_INPUT_IGNORED       = 0,  // malformed/unknown frame; nothing to do
-  WEB_INPUT_CONTROL_EVENT = 1,  // cue/scene/master; already pushed to the control queue
-  WEB_INPUT_SEND_HELLO    = 2,  // caller should send `config` to this client
-  WEB_INPUT_EVAL_QUEUED   = 3,  // already pushed to the eval queue; eval_result comes later
-                                 // (via glow::pumpEvalSubmissions on the render task)
-  WEB_INPUT_REPLY         = 4,  // outBuf/outLen holds a message; send to THIS client only
-};
+// WebInputAction is declared in web_input.h.
 
 // Handle one inbound WebSocket text frame. Script CRUD (list/load/save/
 // delete) is handled synchronously right here on the WS task -- LittleFS,
@@ -214,8 +208,8 @@ WebInputAction web_input_handle_text_frame(const char* json, size_t len,
 // message (web_protocol.h's buildFxErrorJson); the caller's contract is to
 // broadcast it to every connected client (not just one), since any of
 // them may be running the live REPL that needs to see it. Returns the
-// number of notifications delivered this call.
-using FxErrorReplyFn = void (*)(void* ctx, const char* json, size_t len);
+// number of notifications delivered this call. FxErrorReplyFn is declared
+// in web_input.h.
 int web_input_poll_fx_error(GlowLuaApi& api, FxErrorReplyFn onFxError, void* ctx) {
   std::vector<std::pair<std::string, std::string>> notifications;
   api.pollNewlyDisabledEffects(notifications);

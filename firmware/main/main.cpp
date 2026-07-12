@@ -55,6 +55,7 @@
 #include "glow_lua_api.h"
 #include "lua_vm.h"  // complete LuaVM type -- glow_fennel.h only forward-declares it (glowLuaVM().gcStepSlack(...) needs the full definition)
 #include "scripts_storage.h"
+#include "web_input.h"
 
 // The vendored Fennel compiler, embedded via EMBED_FILES (see
 // firmware/main/CMakeLists.txt). ESP-IDF's convention: a file's basename
@@ -196,8 +197,24 @@ static MainMatrixRegistry g_matrixRegistry;
 // entirely when the VM never initialized (g_luaReady false) is the
 // correct behavior, not an oversight: there is nothing to collect.
 static bool g_luaReady = false;
+
+// Fx-error broadcast: the real WS httpd (web_server_task, still `// TODO`
+// in web_input.cpp) doesn't exist yet, so there is no client list to push
+// to. Log it instead so a Lua effect throwing mid-show is at least visible
+// on the serial console rather than silently disabled -- swap this for a
+// real broadcast once web_server_task tracks connected clients.
+static void send_fx_error_to_ws(void* /*ctx*/, const char* json, size_t len) {
+  ESP_LOGW(TAG, "fx_error: %.*s", (int)len, json);
+}
+
 static void on_post_render(void* /*ctx*/, uint32_t slack_us) {
-  if (!g_luaReady || slack_us == 0) return;
+  if (!g_luaReady) return;
+
+  // Poll every frame, independent of slack: an effect that just threw
+  // needs to be reported promptly, not only when there's GC time to spare.
+  web_input_poll_fx_error(glow::glowLuaApi(), send_fx_error_to_ws, nullptr);
+
+  if (slack_us == 0) return;
   glow::glowLuaVM().gcStepSlack(slack_us);
 }
 
