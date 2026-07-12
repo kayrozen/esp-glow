@@ -280,9 +280,15 @@ more C++:
   only the innermost `xQueueSend`/`xQueueReceive` calls remain.
 - The actual transports that would push into those queues: the web httpd
   endpoint, MIDI UART, OSC UDP (`web_input.cpp`, `midi_input.cpp`,
-  `osc_input.cpp`).
-- LittleFS mount/read/write (`scripts_storage.cpp`'s device half), for
-  the same reason `storage_manager.cpp` was before F3's hardware
+  `osc_input.cpp`). `web_input.cpp`'s message *dispatch* (parse → queue /
+  `scripts_storage_*` call / reply-JSON build, covering the console's
+  `eval`/`script_list`/`script_load`/`script_save`/`script_delete`/
+  `fx_error` — see README_WEB_CONSOLE.md) is written and documented; only
+  the httpd URI handler and its `xQueueSend`/`fopen`/`readdir` innards
+  remain hardware-only TODOs.
+- LittleFS mount/read/write (`scripts_storage.cpp`'s device half — now
+  including `list`/`load`/`delete`, not just `mount`/`read_boot`/`save`),
+  for the same reason `storage_manager.cpp` was before F3's hardware
   validation.
 
 ## What is HIL-only (cannot be verified in this environment)

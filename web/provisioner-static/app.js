@@ -11,6 +11,9 @@
 
 import createModule from "./wasm/provision-wasm.js";
 import { serialSupported, secureContextOk, flash as flashDevice } from "./flash.js";
+import { createFennelEditor, getEditorDoc, lintFootguns } from "../shared/fennel-editor.js";
+import { checkFennelSyntax } from "./fennel-check.js";
+import { buildScriptsImage } from "./boot-image.js";
 
 // --- tiny DOM helper ----------------------------------------------------
 
@@ -105,6 +108,17 @@ FIXTURE par.fdef 0 20
 MATRIX 1 0 16 16 SERP H GRB
 `,
   },
+  boot: {
+    name: "boot.fnl",
+    text: `;; boot.fnl -- evaluated once at startup; authored here, baked into
+;; the flash image's "scripts" partition by the Flash step below.
+(fn breathe [t]
+  (glow.set 1 :dimmer (* 0.5 (+ 1 (math.sin (* t 2))))))
+
+(glow.cue.define :breathe {:effects [breathe] :priority 0})
+(glow.cue.go :breathe)
+`,
+  },
   fdefs: [
     {
       name: "torrent.fdef",
@@ -142,15 +156,19 @@ CAP White 4
 
 const state = {
   workspace: structuredClone(DEFAULT_WORKSPACE),
-  selection: { kind: "show" },  // {kind:"show"} | {kind:"fdef", name}
+  selection: { kind: "show" },  // {kind:"show"} | {kind:"fdef", name} | {kind:"boot"}
   diagnostics: {
     show: { ok: false, err: "Not compiled yet", bundleBytes: null, loaded: null },
     fdefs: {},
+    // boot.fnl: syntax-checked via the real Fennel compiler in-browser
+    // (fennel-check.js), not the WASM show compiler above.
+    boot: { checking: false, checked: false, ok: null, err: null },
   },
   wasmReady: false,
   compiling: false,
   module: null,
   compiledBundle: null,  // Uint8Array of the last successful compile, for flashing
+  bootEditorView: null,  // lazily-created CodeMirror view; survives re-renders (see getBootEditorView)
   flash: {
     open: false,
     busy: false,
@@ -163,6 +181,7 @@ const state = {
     progress: 0,
     eraseFirst: false,
     includeShow: true,
+    includeBoot: false,
     baud: 460800,
   },
 };
@@ -295,18 +314,21 @@ async function reparseFdefs() {
 
 function currentText() {
   if (state.selection.kind === "show") return state.workspace.show.text;
+  if (state.selection.kind === "boot") return state.workspace.boot.text;
   const f = state.workspace.fdefs.find((x) => x.name === state.selection.name);
   return f ? f.text : "";
 }
 function currentName() {
-  return state.selection.kind === "show"
-    ? state.workspace.show.name
-    : state.selection.name;
+  if (state.selection.kind === "show") return state.workspace.show.name;
+  if (state.selection.kind === "boot") return state.workspace.boot.name;
+  return state.selection.name;
 }
 
 function setText(text) {
   if (state.selection.kind === "show") {
     state.workspace.show.text = text;
+  } else if (state.selection.kind === "boot") {
+    state.workspace.boot.text = text;
   } else {
     const f = state.workspace.fdefs.find((x) => x.name === state.selection.name);
     if (f) f.text = text;
@@ -322,6 +344,33 @@ function setText(text) {
       render();
     }, 250);
   }
+}
+
+// --- boot.fnl: CodeMirror editor (persists across render()'s DOM churn) --
+
+function getBootEditorView() {
+  if (!state.bootEditorView) {
+    state.bootEditorView = createFennelEditor({
+      parent: document.createElement("div"),  // detached; renderBootEditorPane moves .dom into place
+      doc: state.workspace.boot.text,
+      onChange: (text) => {
+        state.workspace.boot.text = text;
+        state.diagnostics.boot.checked = false;  // stale after an edit
+      },
+    });
+  }
+  return state.bootEditorView;
+}
+
+async function checkBootSyntax() {
+  state.diagnostics.boot.checking = true;
+  render();
+  const result = await checkFennelSyntax(getEditorDoc(getBootEditorView()));
+  state.diagnostics.boot.checking = false;
+  state.diagnostics.boot.checked = true;
+  state.diagnostics.boot.ok = result.ok;
+  state.diagnostics.boot.err = result.ok ? null : result.err;
+  render();
 }
 
 function downloadBlob(filename, mime, data) {
@@ -496,6 +545,22 @@ function renderSidebar() {
       null,
     ),
   );
+  // Show script (boot.fnl) row -- the Fennel show, baked into the flash
+  // image's scripts partition by the Flash step (B3).
+  list.appendChild(el("div", { class: "sidebar-section" }, "Show script"));
+  list.appendChild(
+    fileRow(
+      state.workspace.boot.name,
+      state.selection.kind === "boot",
+      "fnl",
+      state.diagnostics.boot.checked ? state.diagnostics.boot.ok : null,
+      () => (state.selection = { kind: "boot" }, render()),
+      () => downloadBlob(state.workspace.boot.name, "text/plain", state.workspace.boot.text),
+      () => copyText(state.workspace.boot.text),
+      null,
+    ),
+  );
+
   // Separator + section header
   list.appendChild(el("div", { class: "sidebar-section" }, "Fixture library"));
   // Fdef rows
@@ -583,6 +648,8 @@ function fileRow(name, active, badge, ok, onClick, onDownload, onCopy, onDelete)
 }
 
 function renderEditorPane() {
+  if (state.selection.kind === "boot") return renderBootEditorPane();
+
   const header = el(
     "div",
     { class: "editor-header" },
@@ -618,6 +685,77 @@ function renderEditorPane() {
   });
   textarea.value = currentText();
   return el("div", { class: "editor-pane" }, header, textarea);
+}
+
+// boot.fnl gets the shared CodeMirror editor (bracket matching, auto-close,
+// Parinfer, Fennel-ish highlighting -- same component as the device
+// console's REPL/editor, see web/shared/fennel-editor.js) instead of the
+// plain textarea above, plus a "Check syntax" action running the real
+// vendored Fennel compiler in-browser (fennel-check.js). This is a syntax
+// check only -- glow.* is stubbed, not the real render loop -- and the UI
+// says so explicitly rather than implying a dry run.
+function renderBootEditorPane() {
+  const view = getBootEditorView();
+  const d = state.diagnostics.boot;
+
+  const header = el(
+    "div",
+    { class: "editor-header" },
+    el("span", { class: "file-icon", html: ICON.file }),
+    el("span", {}, state.workspace.boot.name),
+    el("span", { class: "badge" }, ".fnl"),
+    el("div", { class: "spacer" }),
+    el(
+      "div",
+      { class: "actions" },
+      el(
+        "button",
+        { class: "btn", disabled: d.checking, onclick: checkBootSyntax },
+        d.checking ? icon("spin") : icon("package"),
+        el("span", {}, d.checking ? "Checking…" : "Check syntax"),
+      ),
+      el("button", { title: "Copy contents", onclick: () => copyText(getEditorDoc(view)) }, icon("copy")),
+      el(
+        "button",
+        { title: "Download boot.fnl", onclick: () => downloadBlob(state.workspace.boot.name, "text/plain", getEditorDoc(view)) },
+        icon("download"),
+      ),
+    ),
+  );
+
+  const host = el("div", { class: "script-editor-host boot-editor-host" });
+  host.appendChild(view.dom);  // move the live view into this render's tree, never destroy/recreate it
+
+  const panels = [];
+  panels.push(
+    el(
+      "div",
+      { class: "boot-scope-note" },
+      "Syntax check only: this runs the real Fennel compiler and calls stubbed glow.* functions " +
+        "once, so a compile error or a top-level typo (e.g. glow.st) is caught -- but argument " +
+        "types, fixture ids, and anything inside a function that's never called at the top level " +
+        "are not. It is not a dry run of the show.",
+    ),
+  );
+  if (d.checked) {
+    panels.push(
+      d.ok
+        ? el("div", { class: "boot-check-ok" }, icon("ok"), " No syntax errors found.")
+        : el("div", { class: "boot-check-err" }, icon("err"), " ", d.err),
+    );
+  }
+  const lints = lintFootguns(getEditorDoc(view));
+  if (lints.length > 0) {
+    panels.push(
+      el(
+        "div",
+        { class: "lint-hints" },
+        ...lints.map((w) => el("div", { class: "lint-hint" }, `line ${w.line}: ${w.message}`)),
+      ),
+    );
+  }
+
+  return el("div", { class: "editor-pane" }, header, host, ...panels);
 }
 
 function renderPreviewPane() {
@@ -836,8 +974,14 @@ async function doFlash() {
   render();
   try {
     const bundleBytes = f.includeShow && state.compiledBundle ? state.compiledBundle : null;
+    let scriptsImageBytes = null;
+    if (f.includeBoot) {
+      appendFlashLog("Building scripts-partition image from boot.fnl...\n");
+      scriptsImageBytes = await buildScriptsImage(state.workspace.boot.text);
+    }
     await flashDevice({
       bundleBytes,
+      scriptsImageBytes,
       eraseFirst: f.eraseFirst,
       baudrate: f.baud,
       onLog: (line) => appendFlashLog(line),
@@ -908,6 +1052,21 @@ function renderFlashModal() {
             state.compiledBundle
               ? `Include my compiled show (${state.compiledBundle.byteLength} bytes)`
               : "Include my compiled show (Compile it first — using the CI demo show for now)",
+          ),
+        ),
+        el(
+          "label",
+          { class: "flash-check" },
+          el("input", {
+            type: "checkbox",
+            checked: f.includeBoot,
+            disabled: f.busy,
+            onchange: (e) => { f.includeBoot = e.target.checked; render(); },
+          }),
+          el(
+            "span",
+            {},
+            "Bake boot.fnl into the scripts partition (board comes up already running this show)",
           ),
         ),
         el(

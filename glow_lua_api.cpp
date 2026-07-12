@@ -161,16 +161,18 @@ void GlowLuaApi::pushEffectHandle(std::unique_ptr<IEffect> effect) {
   lua_setmetatable(L, -2);
 }
 
-void GlowLuaApi::resolveEffectsList(lua_State* L, int idx, std::vector<IEffect*>& out) {
+void GlowLuaApi::resolveEffectsList(lua_State* L, int idx, const char* cueName, std::vector<IEffect*>& out) {
   idx = lua_absindex(L, idx);
   lua_Integer n = luaL_len(L, idx);
   for (lua_Integer i = 1; i <= n; ++i) {
     lua_geti(L, idx, i);
     if (lua_isfunction(L, -1)) {
       int ref = luaL_ref(L, LUA_REGISTRYINDEX);  // pops the function value
-      auto fx = std::make_unique<LuaEffect>(*this, ref, "cue-effect");
+      std::string effectName = std::string(cueName) + "#" + std::to_string(i - 1);
+      auto fx = std::make_unique<LuaEffect>(*this, ref, std::move(effectName));
       out.push_back(fx.get());
       luaEffects_.push_back(std::move(fx));
+      luaEffectReported_.push_back(false);
       continue;
     }
     void* ud = luaL_testudata(L, -1, kEffectHandleMeta);
@@ -248,7 +250,7 @@ int GlowLuaApi::l_cue_define(lua_State* L) {
   lua_getfield(L, 2, "effects");
   if (!lua_isnil(L, -1)) {
     luaL_checktype(L, -1, LUA_TTABLE);
-    api.resolveEffectsList(L, -1, effects);
+    api.resolveEffectsList(L, -1, name, effects);
   }
   lua_pop(L, 1);
 
@@ -483,4 +485,13 @@ void GlowLuaApi::install() {
   lua_setfield(L, glowIdx, "matrix");
 
   lua_setglobal(L, "glow");
+}
+
+void GlowLuaApi::pollNewlyDisabledEffects(std::vector<std::pair<std::string, std::string>>& out) {
+  for (size_t i = 0; i < luaEffects_.size(); ++i) {
+    if (luaEffects_[i]->disabled() && !luaEffectReported_[i]) {
+      luaEffectReported_[i] = true;
+      out.emplace_back(luaEffects_[i]->name(), luaEffects_[i]->lastError());
+    }
+  }
 }

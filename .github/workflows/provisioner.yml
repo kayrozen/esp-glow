@@ -31,6 +31,9 @@ on:
     paths:
       - "web/provision-wasm/**"
       - "web/provisioner-static/**"
+      - "web/shared/**"
+      - "web/vendor/**"
+      - "web/littlefs-image/**"
       - "provision.cpp"
       - "provision.h"
       - "fixture_profile.*"
@@ -116,6 +119,24 @@ jobs:
           path: web/provisioner-static/firmware/
           workflow_conclusion: success
           if_no_artifact_found: warn
+
+      - name: Copy shared assets (CodeMirror/parinfer/wasmoon/littlefs-image bundles)
+        run: |
+          # web/shared/ (the CodeMirror+parinfer editor component) and
+          # web/vendor/ (its bundled dependencies, plus wasmoon + the
+          # littlefs-image WASM module for boot.fnl authoring/compile-check/
+          # bake-in) are shared with the device console (embedded on-device
+          # instead), so they live as siblings of web/provisioner-static/ in
+          # the repo, not inside it. Pages only publishes the upload-pages-
+          # artifact path below, so copy them in before that upload -- same
+          # reasoning as the wasm/ and firmware/ downloads above.
+          cp -r web/shared web/provisioner-static/shared
+          cp -r web/vendor web/provisioner-static/vendor
+          test -f web/provisioner-static/shared/fennel-editor.js
+          test -f web/provisioner-static/vendor/editor-bundle.mjs
+          test -f web/provisioner-static/vendor/wasmoon-bundle.mjs
+          test -f web/provisioner-static/vendor/fennel.lua
+          test -f web/provisioner-static/vendor/littlefs-image.wasm
 
       - name: Build static site
         run: |

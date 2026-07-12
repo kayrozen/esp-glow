@@ -1,0 +1,4 @@
+web/vendor/wasmoon-bundle.mjs + glue.wasm are a bundled build of wasmoon
+1.16.0 (real Lua 5.4 compiled to WebAssembly via Emscripten).
+Copyright (c) ceifa and contributors. https://github.com/ceifa/wasmoon
+MIT License. Full text: https://opensource.org/licenses/MIT

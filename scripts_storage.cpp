@@ -85,4 +85,51 @@ bool scripts_storage_save(const char* name, const char* src, size_t len) {
   return false;
 }
 
+bool scripts_storage_list(ScriptListCallback cb, void* ctx) {
+  if (!s_mounted) return false;
+  // TODO:
+  // DIR* d = opendir("/scripts");
+  // if (!d) return false;
+  // struct dirent* ent;
+  // while ((ent = readdir(d)) != nullptr) {
+  //   if (ent->d_type != DT_REG) continue;  // flat root only, no subdirs
+  //   if (!cb(ent->d_name, ctx)) break;
+  // }
+  // closedir(d);
+  // return true;
+  (void)cb;
+  (void)ctx;
+  return true;
+}
+
+bool scripts_storage_load(const char* name, char* buf, size_t bufCap, size_t* outLen) {
+  if (!s_mounted) return false;
+  if (!scriptNameIsValid(name, std::strlen(name))) return false;
+  // TODO: same shape as scripts_storage_read_boot, generalized to `name`.
+  // char path[320];
+  // snprintf(path, sizeof(path), "/scripts/%s", name);
+  // FILE* f = fopen(path, "rb");
+  // if (!f) return false;
+  // size_t n = fread(buf, 1, bufCap, f);
+  // bool truncated = !feof(f);
+  // fclose(f);
+  // if (truncated) return false;
+  // *outLen = n;
+  // return true;
+  (void)buf;
+  (void)bufCap;
+  (void)outLen;
+  return false;
+}
+
+bool scripts_storage_delete(const char* name) {
+  if (!s_mounted) return false;
+  if (!scriptNameIsValid(name, std::strlen(name))) return false;
+  // TODO:
+  // char path[320];
+  // snprintf(path, sizeof(path), "/scripts/%s", name);
+  // return remove(path) == 0;
+  return false;
+}
+
 #endif  // ESP_PLATFORM

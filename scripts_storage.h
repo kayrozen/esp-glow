@@ -65,6 +65,34 @@ bool scripts_storage_read_boot(char* buf, size_t bufCap, size_t* outLen);
 // and rename, so a power loss mid-write can't corrupt an existing script).
 bool scripts_storage_save(const char* name, const char* src, size_t len);
 
+// Called once per script file present in the "scripts" partition (flat
+// root only -- there are no subdirectories), in whatever order the
+// underlying directory listing returns them. `name` is NUL-terminated and
+// does not include a path. Return true to keep listing, false to stop
+// early. Used by the console's script_list message (web_protocol.h's
+// buildScriptsJson) -- the WS layer supplies a callback that appends into
+// a fixed-size name buffer and returns false once it's full, so a
+// pathological number of files on the partition can't grow the response
+// message unboundedly.
+typedef bool (*ScriptListCallback)(const char* name, void* ctx);
+
+// Lists every script file. Returns false if not mounted or the underlying
+// directory listing fails; returns true (even with zero files found)
+// otherwise, including when `cb` returned false to stop early.
+bool scripts_storage_list(ScriptListCallback cb, void* ctx);
+
+// Read a script file named `name` in one call (same contract as
+// scripts_storage_read_boot, generalized to any name). On success, fills
+// `buf` (NOT NUL-terminated -- treat as `*outLen` raw bytes) and returns
+// true. On any failure (not mounted, invalid name, file absent, read
+// error, doesn't fit in bufCap), returns false.
+bool scripts_storage_load(const char* name, char* buf, size_t bufCap, size_t* outLen);
+
+// Delete a script file named `name`. Returns false on any failure (not
+// mounted, invalid name, file absent, or a filesystem error); true if the
+// file no longer exists afterward.
+bool scripts_storage_delete(const char* name);
+
 #ifdef __cplusplus
 }
 #endif

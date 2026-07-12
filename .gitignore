@@ -74,6 +74,7 @@ Testing/
 # Test executables
 test_*
 !test_*.cpp
+!test_*.c
 
 # WASM build artifacts (rebuilt in CI, not committed)
 web/provision-wasm/build/

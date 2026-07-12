@@ -14,12 +14,21 @@
 //   Device -> UI:
 //     { type: "config", cues: [{id,label,color,mode}], scenes: [{id,label}], hasMaster }
 //     { type: "state",  active: [0,3,5] }
+//     { type: "eval_result", seq: 7, ok: true|false, err?: "..." }
+//     { type: "scripts", names: ["boot","verse"] }
+//     { type: "script",  name: "verse", src: "..." }
+//     { type: "fx_error", effect: "verse#1", err: "..." }  // unsolicited
 //
 //   UI -> device:
 //     { type: "cue",    id: 0, pressed: true }
 //     { type: "scene",  id: 0, pressed: true }
 //     { type: "master", value: 0.5 }
 //     { type: "hello" }
+//     { type: "eval", src: "(glow.cue.go :chorus)", seq: 7 }
+//     { type: "script_list" }
+//     { type: "script_load",   name: "verse" }
+//     { type: "script_save",   name: "verse", src: "..." }
+//     { type: "script_delete", name: "verse" }
 //
 
 const DEFAULT_URL = (() => {
@@ -82,17 +91,25 @@ export class WsClient {
     // Callbacks. Single-callback per channel — UI layer manages its own
     // listener fan-out if needed.
     this.cb = {
-      config: null,    // (cfg)  -> void
-      state:  null,    // (activeIds) -> void
-      status: null,    // (status, info?) -> void
+      config:     null,  // (cfg)  -> void
+      state:      null,  // (activeIds) -> void
+      status:     null,  // (status, info?) -> void
+      evalResult: null,  // ({seq, ok, err}) -> void
+      scripts:    null,  // (names: string[]) -> void
+      script:     null,  // ({name, src}) -> void
+      fxError:    null,  // ({effect, err}) -> void
     };
   }
 
   // --- callback registration --------------------------------------------
 
-  onConfig(fn) { this.cb.config = fn; return this; }
-  onState(fn)  { this.cb.state  = fn; return this; }
-  onStatus(fn) { this.cb.status = fn; return this; }
+  onConfig(fn)     { this.cb.config     = fn; return this; }
+  onState(fn)      { this.cb.state      = fn; return this; }
+  onStatus(fn)     { this.cb.status     = fn; return this; }
+  onEvalResult(fn) { this.cb.evalResult = fn; return this; }
+  onScripts(fn)    { this.cb.scripts    = fn; return this; }
+  onScript(fn)     { this.cb.script     = fn; return this; }
+  onFxError(fn)    { this.cb.fxError    = fn; return this; }
 
   // --- lifecycle ---------------------------------------------------------
 
@@ -165,6 +182,34 @@ export class WsClient {
     return this._send({ type: "master", value: clamp01(value) });
   }
 
+  // Evaluates a Fennel form. `seq` is an opaque id the caller picks (e.g.
+  // an increasing counter) so the eventual (asynchronous, possibly
+  // out-of-order) eval_result can be matched back to this request.
+  sendEval(src, seq) {
+    if (typeof src !== "string") return false;
+    return this._send({ type: "eval", src, seq });
+  }
+
+  sendScriptList() {
+    return this._send({ type: "script_list" });
+  }
+
+  sendScriptLoad(name) {
+    if (typeof name !== "string" || name.length === 0) return false;
+    return this._send({ type: "script_load", name });
+  }
+
+  sendScriptSave(name, src) {
+    if (typeof name !== "string" || name.length === 0) return false;
+    if (typeof src !== "string") return false;
+    return this._send({ type: "script_save", name, src });
+  }
+
+  sendScriptDelete(name) {
+    if (typeof name !== "string" || name.length === 0) return false;
+    return this._send({ type: "script_delete", name });
+  }
+
   // --- internal ----------------------------------------------------------
 
   _send(obj) {
@@ -196,6 +241,31 @@ export class WsClient {
         ? msg.active.filter((x) => Number.isInteger(x) && x >= 0 && x <= 65535)
         : [];
       if (this.cb.state) this.cb.state(active);
+      return;
+    }
+    if (msg.type === "eval_result") {
+      if (this.cb.evalResult) {
+        this.cb.evalResult({
+          seq: Number.isInteger(msg.seq) ? msg.seq : 0,
+          ok: msg.ok === true,
+          err: typeof msg.err === "string" ? msg.err : null,
+        });
+      }
+      return;
+    }
+    if (msg.type === "scripts") {
+      const names = Array.isArray(msg.names) ? msg.names.filter((n) => typeof n === "string") : [];
+      if (this.cb.scripts) this.cb.scripts(names);
+      return;
+    }
+    if (msg.type === "script") {
+      if (typeof msg.name !== "string") return;
+      if (this.cb.script) this.cb.script({ name: msg.name, src: typeof msg.src === "string" ? msg.src : "" });
+      return;
+    }
+    if (msg.type === "fx_error") {
+      if (typeof msg.effect !== "string") return;
+      if (this.cb.fxError) this.cb.fxError({ effect: msg.effect, err: typeof msg.err === "string" ? msg.err : "" });
       return;
     }
     // Unknown device->UI message — ignore silently.

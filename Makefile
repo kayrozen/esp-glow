@@ -124,6 +124,29 @@ SCRIPTS_STORAGE_SOURCES = scripts_storage.cpp test_scripts_storage.cpp
 SCRIPTS_STORAGE_OBJECTS = $(SCRIPTS_STORAGE_SOURCES:.cpp=.o)
 SCRIPTS_STORAGE_TARGET  = test_scripts_storage
 
+# --- test_fx_error_pipeline: the FULL fx_error path in one test -- a real
+# LuaEffect throws -> disabled_=true -> GlowLuaApi::pollNewlyDisabledEffects
+# -> web_protocol.cpp's buildFxErrorJson -> the exact wire-format message.
+# Links glow_lua_api.cpp (GLOW_LUA_SOURCES) with web_protocol.cpp
+# specifically to prove the seam between them (see the file's own header
+# comment for why test_glow_lua_api/test_web_protocol don't already cover
+# this on their own).
+FX_ERROR_PIPELINE_SOURCES = $(GLOW_LUA_SOURCES) web_protocol.cpp test_fx_error_pipeline.cpp
+FX_ERROR_PIPELINE_OBJECTS = $(FX_ERROR_PIPELINE_SOURCES:.cpp=.o)
+FX_ERROR_PIPELINE_TARGET  = test_fx_error_pipeline
+
+# --- test_littlefs_image: round-trip proof for the provisioner's in-browser
+# "scripts" partition image builder (web/littlefs-image/shim.c, wrapping
+# real vendored littlefs C sources -- see scripts/vendor_littlefs_image_wasm.sh).
+# Plain C99, its own compile line (not $(CXX)/$(CXXFLAGS)) since it's C, not
+# C++, and needs LFS_NO_MALLOC + friends that no other target uses.
+LITTLEFS_IMAGE_CFLAGS = -std=c99 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
+                        -Iweb/littlefs-image \
+                        -DLFS_NO_MALLOC -DLFS_NO_ASSERT -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR
+LITTLEFS_IMAGE_SOURCES = web/littlefs-image/shim.c web/littlefs-image/lfs.c \
+                         web/littlefs-image/lfs_util.c test_littlefs_image.c
+LITTLEFS_IMAGE_TARGET  = test_littlefs_image
+
 $(AIM_TARGET): $(AIM_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(AIM_OBJECTS) -o $(AIM_TARGET) -lm
 
@@ -169,6 +192,12 @@ $(GLOW_FENNEL_TARGET): $(GLOW_FENNEL_OBJECTS) $(LUA_C_OBJECTS)
 $(SCRIPTS_STORAGE_TARGET): $(SCRIPTS_STORAGE_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(SCRIPTS_STORAGE_OBJECTS) -o $(SCRIPTS_STORAGE_TARGET) -lm
 
+$(FX_ERROR_PIPELINE_TARGET): $(FX_ERROR_PIPELINE_OBJECTS) $(LUA_C_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(FX_ERROR_PIPELINE_OBJECTS) $(LUA_C_OBJECTS) -o $(FX_ERROR_PIPELINE_TARGET) -lm
+
+$(LITTLEFS_IMAGE_TARGET): $(LITTLEFS_IMAGE_SOURCES)
+	$(CC) $(LITTLEFS_IMAGE_CFLAGS) $(LITTLEFS_IMAGE_SOURCES) -o $(LITTLEFS_IMAGE_TARGET) -lm
+
 # Compile object files
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
@@ -194,7 +223,7 @@ APPLY_TARGET  = test_apply_loaded_show
 $(APPLY_TARGET): $(APPLY_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(APPLY_OBJECTS) -o $(APPLY_TARGET) -lm
 
-test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET) $(LIVE_CONTROL_TARGET) $(WEB_PROTOCOL_TARGET) $(CONTROL_QUEUE_TARGET) $(PACING_TARGET) $(APPLY_TARGET) $(LUA_VM_TARGET) $(LUA_EFFECT_TARGET) $(GLOW_LUA_API_TARGET) $(GLOW_FENNEL_TARGET) $(SCRIPTS_STORAGE_TARGET)
+test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET) $(LIVE_CONTROL_TARGET) $(WEB_PROTOCOL_TARGET) $(CONTROL_QUEUE_TARGET) $(PACING_TARGET) $(APPLY_TARGET) $(LUA_VM_TARGET) $(LUA_EFFECT_TARGET) $(GLOW_LUA_API_TARGET) $(GLOW_FENNEL_TARGET) $(SCRIPTS_STORAGE_TARGET) $(FX_ERROR_PIPELINE_TARGET) $(LITTLEFS_IMAGE_TARGET)
 	./$(AIM_TARGET)
 	./$(FP_TARGET)
 	./$(SHOW_TARGET)
@@ -212,6 +241,8 @@ test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL
 	./$(GLOW_LUA_API_TARGET)
 	./$(GLOW_FENNEL_TARGET)
 	./$(SCRIPTS_STORAGE_TARGET)
+	./$(FX_ERROR_PIPELINE_TARGET)
+	./$(LITTLEFS_IMAGE_TARGET)
 
 # Clean build artifacts
 clean:
@@ -226,6 +257,8 @@ clean:
 	      $(GLOW_LUA_API_OBJECTS) $(GLOW_LUA_API_TARGET) \
 	      $(GLOW_FENNEL_OBJECTS) $(GLOW_FENNEL_TARGET) \
 	      $(SCRIPTS_STORAGE_OBJECTS) $(SCRIPTS_STORAGE_TARGET) \
+	      $(FX_ERROR_PIPELINE_OBJECTS) $(FX_ERROR_PIPELINE_TARGET) \
+	      $(LITTLEFS_IMAGE_TARGET) \
 	      $(LUA_C_OBJECTS)
 
 # Rebuild
