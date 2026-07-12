@@ -43,18 +43,39 @@ void test_rejects_path_separator() {
   CHECK(!valid("a/"));
 }
 
-void test_rejects_dot_and_dotdot() {
-  TEST("rejects exactly '.' and '..' but allows dots elsewhere");
+void test_rejects_path_traversal_attempts() {
+  TEST("rejects path-traversal attempts (a script_save/load/delete name is "
+       "a single flat path component, never a path)");
+  CHECK(!valid("../evil"));
+  CHECK(!valid("../../show"));      // would otherwise land on the "show" partition's data
+  CHECK(!valid("../../../etc/passwd"));
+  CHECK(!valid("a/../../b"));
+}
+
+void test_rejects_leading_dot() {
+  TEST("rejects any leading dot, not just exactly '.' and '..'");
   CHECK(!valid("."));
   CHECK(!valid(".."));
-  CHECK(valid("..fnl"));       // starts with dots but isn't exactly ".."
-  CHECK(valid(".hidden.fnl"));  // a leading dot elsewhere is fine
+  CHECK(!valid("..fnl"));       // starts with dots but isn't exactly ".."
+  CHECK(!valid(".hidden.fnl"));  // would otherwise risk colliding with
+                                 // scripts_storage_save's ".<name>.tmp"
+                                 // staging file -- see its own comment
 }
 
 void test_rejects_embedded_nul() {
   TEST("rejects a name with an embedded NUL byte");
   char withNul[] = {'a', '\0', 'b'};
   CHECK(!scriptNameIsValid(withNul, sizeof(withNul)));
+}
+
+void test_rejects_characters_outside_the_whitelist() {
+  TEST("rejects whitespace, control characters, and other punctuation "
+       "outside the [A-Za-z0-9_.-] whitelist");
+  CHECK(!valid("has space.fnl"));
+  CHECK(!valid("semi;colon.fnl"));
+  CHECK(!valid("back\\slash.fnl"));
+  char withControlChar[] = {'a', '\x01', 'b'};
+  CHECK(!scriptNameIsValid(withControlChar, sizeof(withControlChar)));
 }
 
 void test_rejects_too_long() {
@@ -74,8 +95,10 @@ int main() {
   test_ordinary_names_are_valid();
   test_rejects_empty_and_null();
   test_rejects_path_separator();
-  test_rejects_dot_and_dotdot();
+  test_rejects_path_traversal_attempts();
+  test_rejects_leading_dot();
   test_rejects_embedded_nul();
+  test_rejects_characters_outside_the_whitelist();
   test_rejects_too_long();
   test_boot_filename_itself_is_valid();
 

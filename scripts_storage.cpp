@@ -9,12 +9,33 @@ static constexpr size_t kMaxNameLen = 255;
 
 bool scriptNameIsValid(const char* name, size_t len) {
   if (name == nullptr || len == 0 || len > kMaxNameLen) return false;
-  if (len == 1 && name[0] == '.') return false;
-  if (len == 2 && name[0] == '.' && name[1] == '.') return false;
+
+  // Whitelist, not a blacklist: '/' and an embedded NUL are the only
+  // characters that could actually enable path traversal against
+  // scripts_storage_save/load/delete's flat "/scripts/<name>" construction
+  // (see their own comments -- rejecting '/' alone already makes escaping
+  // the single path component structurally impossible), but a whitelist
+  // also closes off control characters, whitespace, and anything else
+  // that could cause trouble elsewhere a name gets used (logged, shown in
+  // the console UI) without anyone having to enumerate them one by one.
   for (size_t i = 0; i < len; ++i) {
-    if (name[i] == '/') return false;
-    if (name[i] == '\0') return false;  // embedded NUL: not a valid filename
+    char c = name[i];
+    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+    if (!ok) return false;
   }
+
+  // No leading dot at all (stricter than just rejecting "." and ".."):
+  // scripts_storage_save stages writes at "/scripts/.<name>.tmp" before
+  // rename()ing over the final path (see its own comment). If dotfile
+  // script names were allowed, a script literally named e.g. ".foo.tmp"
+  // could collide with -- and get clobbered by -- an unrelated save of a
+  // script named "foo". Banning the leading dot entirely removes that
+  // collision by construction instead of trying to pattern-match around
+  // it, and costs nothing: nothing in this system treats dotfiles as
+  // actually hidden (scripts_storage_list returns everything).
+  if (name[0] == '.') return false;
+
   return true;
 }
 
@@ -46,9 +67,10 @@ static constexpr size_t kMaxScriptCount = 64;
 // scripts_storage_save writes to "/scripts/.<name>.tmp" then rename()s
 // over the final path (never partially overwrites on failure -- see the
 // header's contract). That temp file must not show up as a script in
-// listings or count against kMaxScriptCount; scriptNameIsValid otherwise
-// allows leading dots (see its own tests), so a suffix check is what
-// actually distinguishes our own staging file from a real script.
+// listings or count against kMaxScriptCount. scriptNameIsValid now rejects
+// every leading dot, so nothing this system itself creates can produce a
+// dotfile other than this staging file -- the ".tmp" suffix check is a
+// second, cheap confirmation, not the only thing telling them apart.
 static bool isTempFile(const char* name) {
   size_t n = std::strlen(name);
   constexpr char kSuffix[] = ".tmp";
