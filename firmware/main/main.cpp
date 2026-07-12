@@ -53,6 +53,7 @@
 
 #include "glow_fennel.h"
 #include "glow_lua_api.h"
+#include "lua_vm.h"  // complete LuaVM type -- glow_fennel.h only forward-declares it (glowLuaVM().gcStepSlack(...) needs the full definition)
 #include "scripts_storage.h"
 
 // The vendored Fennel compiler, embedded via EMBED_FILES (see
