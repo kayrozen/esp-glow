@@ -17,10 +17,8 @@ idf_component_register(
         storage_manager.cpp
     INCLUDE_DIRS
         "."
+    REQUIRES glow_core
 )
-
-# Pull in the host-tested lighting core as a component dependency.
-idf_component_requires(PRIVATE glow_core)
 
 # Pack the LittleFS partition image at build time. The data/ directory ships:
 #   - show.shw1     the demo SHW1 bundle (replace with your own; see samples/)
