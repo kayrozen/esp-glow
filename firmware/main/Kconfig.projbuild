@@ -45,4 +45,26 @@ config GLOW_ARTNET_BRIDGE_IP
         192.168.1.50 => (192<<24)|(168<<16)|(1<<8)|50 = 0xC0A80132 = 3232235826.
         0 means LAN broadcast (255.255.255.255), the Art-Net default.
 
+config GLOW_MIDI_UART_NUM
+    int "MIDI UART port number"
+    default 2
+    help
+        UART peripheral for DIN-MIDI input. Must differ from the DMX UART
+        (UART_NUM_1, see GLOW_DMX_*_GPIO) and from UART0 (console/log).
+
+config GLOW_MIDI_RX_GPIO
+    int "MIDI RX GPIO"
+    default 4
+    help
+        GPIO wired to a standard opto-isolated MIDI IN circuit (6N137 output,
+        DIN-5 pins 4/5 through the usual 220-ohm current-limiting resistors).
+        TX is left unconnected -- this device only ever receives MIDI.
+
+config GLOW_OSC_UDP_PORT
+    int "OSC UDP listen port"
+    default 9000
+    help
+        UDP port the device listens on for incoming OSC control messages
+        (cue/scene/fader). 9000 matches common OSC client defaults.
+
 endmenu
