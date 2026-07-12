@@ -55,8 +55,6 @@ static bool                  g_hasMaster    = false;
 // TODO: add an httpd_handle_t / socket set here when the real server lands.
 // static httpd_handle_t g_server = nullptr;
 
-extern "C" {
-
 // Lists every script and builds a `scripts` reply directly into buf --
 // shared by script_list and by script_save/script_delete, both of which
 // reply with the refreshed list so the sidebar updates in one round trip
@@ -268,7 +266,5 @@ void web_server_task() {
   // handler that maps "/" -> the embedded index.html, etc. No filesystem
   // partition is involved.
 }
-
-}  // extern "C"
 
 #endif  // ESP_PLATFORM

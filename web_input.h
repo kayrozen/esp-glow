@@ -16,16 +16,11 @@ class GlowLuaApi;
 // web_input_poll_fx_error, and a Lua effect throwing mid-show gets disabled
 // with nobody ever finding out.
 //
-// The functions below are extern "C" because web_input.cpp defines them
-// that way (matching scripts_storage.h's C-linkage convention even though
-// several signatures here take C++ reference/class types) -- the
-// declaration here must match that linkage or the two translation units
-// disagree on how to call them.
+// Plain C++ linkage: every caller and callee here is C++ (unlike
+// scripts_storage.h, which is a real C-callable surface), and several
+// signatures take C++ reference/class types, so extern "C" would buy
+// nothing but an unusual reading experience.
 //
-
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 // Initialize the web input layer with the queues it pushes to, plus the
 // cue/scene metadata used to build `config` messages. All pointers are
@@ -72,7 +67,3 @@ int web_input_poll_fx_error(GlowLuaApi& api, FxErrorReplyFn onFxError, void* ctx
 
 // Starts the WebSocket server task (hardware-specific; see web_input.cpp).
 void web_server_task();
-
-#ifdef __cplusplus
-}  // extern "C"
-#endif
