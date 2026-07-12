@@ -21,9 +21,9 @@
 // GlowLuaApi::pollNewlyDisabledEffects (glow_lua_api.h) — see
 // web_input_poll_fx_error below.
 //
-// Hardware wiring (httpd ws endpoint, console file serving) is left as
-// `// TODO` for the same reasons as midi_input.cpp and osc_input.cpp: it
-// cannot be verified without hardware.
+// The httpd WS endpoint and the console's static-file serving are real
+// (F4 T3) -- see web_server_task below. Untestable without hardware, same
+// status as midi_input.cpp / osc_input.cpp's transports.
 //
 
 #include "web_input.h"
@@ -35,12 +35,19 @@
 #include "live_control.h"    // ControlType (for parseWebCommand's out param)
 #include "scripts_storage.h"
 
+#include "esp_http_server.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <utility>
 #include <vector>
+
+static const char* TAG = "web_input";
 
 // --- borrowed state set up at init time ----------------------------------
 
@@ -52,8 +59,45 @@ static const WebSceneInfo*   g_scenes       = nullptr;
 static size_t                g_nScenes      = 0;
 static bool                  g_hasMaster    = false;
 
-// TODO: add an httpd_handle_t / socket set here when the real server lands.
-// static httpd_handle_t g_server = nullptr;
+static httpd_handle_t g_server = nullptr;
+
+// --- WS client tracking ----------------------------------------------------
+//
+// A tiny fixed-size fd list, written by the httpd (WS) task on connect and
+// read by the render task via web_ws_broadcast (post-render, alongside
+// gcStepSlack/web_input_poll_fx_error -- see main.cpp). Protected by a
+// FreeRTOS mutex: it's the only state shared across that boundary here, and
+// it's small enough that a plain mutex is simpler than anything lock-free.
+// Dead fds are dropped lazily, on the next failed broadcast send -- there's
+// no eager on-close callback (see web_ws_broadcast).
+
+constexpr int kMaxWsClients = 8;
+static int g_wsClientFds[kMaxWsClients];
+static bool g_wsClientUsed[kMaxWsClients];
+static SemaphoreHandle_t g_wsClientsMutex = nullptr;
+
+static void wsClientAdd(int fd) {
+  xSemaphoreTake(g_wsClientsMutex, portMAX_DELAY);
+  for (int i = 0; i < kMaxWsClients; ++i) {
+    if (!g_wsClientUsed[i]) {
+      g_wsClientUsed[i] = true;
+      g_wsClientFds[i] = fd;
+      break;
+    }
+  }
+  xSemaphoreGive(g_wsClientsMutex);
+}
+
+static void wsClientRemove(int fd) {
+  xSemaphoreTake(g_wsClientsMutex, portMAX_DELAY);
+  for (int i = 0; i < kMaxWsClients; ++i) {
+    if (g_wsClientUsed[i] && g_wsClientFds[i] == fd) {
+      g_wsClientUsed[i] = false;
+      break;
+    }
+  }
+  xSemaphoreGive(g_wsClientsMutex);
+}
 
 // Lists every script and builds a `scripts` reply directly into buf --
 // shared by script_list and by script_save/script_delete, both of which
@@ -219,52 +263,206 @@ int web_input_poll_fx_error(GlowLuaApi& api, FxErrorReplyFn onFxError, void* ctx
   return (int)notifications.size();
 }
 
-// --- WebSocket server task (hardware-specific, scaffold only) -------------
+// Sends `json` to every tracked client via httpd_ws_send_frame_async (safe
+// to call from the render task -- unlike httpd_ws_send_frame, the _async
+// variant queues the send onto the httpd worker instead of running it
+// inline, so this never blocks on network I/O). A fd whose send fails is
+// dropped from the list -- the client already disconnected or is wedged;
+// there is no on-close callback registered, so this is the only place fds
+// actually get cleaned up (see the client-tracking comment above).
+void web_ws_broadcast(const char* json, size_t len) {
+  if (g_server == nullptr) return;
 
-void web_server_task() {
-  // TODO: Start an ESP-IDF httpd instance with a WebSocket handler on a
-  // known URI (e.g. "/ws"). For each inbound text frame:
-  //
-  //   char reply[EVAL_SRC_MAX + 128];
-  //   size_t replyLen = 0;
-  //   WebInputAction action = web_input_handle_text_frame(frame, len, reply, sizeof(reply), &replyLen);
-  //   switch (action) {
-  //     case WEB_INPUT_SEND_HELLO: {
-  //       char buf[512];
-  //       size_t n = web_input_build_config(buf, sizeof(buf));
-  //       httpd_ws_send_frame(req, buf, n, TEXT);
-  //       break;
-  //     }
-  //     case WEB_INPUT_REPLY:
-  //       httpd_ws_send_frame(req, reply, replyLen, TEXT);
-  //       break;
-  //     default:
-  //       break;  // CONTROL_EVENT/EVAL_QUEUED/IGNORED need no reply here
-  //   }
-  //
-  // On a new client connection (before any message), also push config.
-  //
-  // Optionally (Phase 4) push `state` whenever the show controller's
-  // active-cue set changes; the controller already knows this set.
-  //
-  // The render task's frame-slack hook should also call
-  // web_input_poll_fx_error(glow::glowLuaApi(), onFxError, ctx) once per
-  // frame, where onFxError broadcasts each (json, len) it's given to every
-  // connected client -- e.g.:
-  //
-  //   web_input_poll_fx_error(glow::glowLuaApi(),
-  //     [](void*, const char* json, size_t len) {
-  //       for (auto& client : g_wsClients) httpd_ws_send_frame_async(g_server, client, json, len, TEXT);
-  //     }, nullptr);
-  //
-  // It may call onFxError more than once per poll (one broken effect per
-  // call) -- see its own header comment for why.
-  //
-  // The static files for the console bundle (index.html, app.js,
-  // styles.css, vendor/) are embedded into the app binary via EMBED_FILES
-  // (firmware/main/CMakeLists.txt) and served from a separate httpd URI
-  // handler that maps "/" -> the embedded index.html, etc. No filesystem
-  // partition is involved.
+  int fds[kMaxWsClients];
+  int n = 0;
+  xSemaphoreTake(g_wsClientsMutex, portMAX_DELAY);
+  for (int i = 0; i < kMaxWsClients; ++i) {
+    if (g_wsClientUsed[i]) fds[n++] = g_wsClientFds[i];
+  }
+  xSemaphoreGive(g_wsClientsMutex);
+
+  httpd_ws_frame_t frame = {};
+  frame.type = HTTPD_WS_TYPE_TEXT;
+  frame.payload = reinterpret_cast<uint8_t*>(const_cast<char*>(json));
+  frame.len = len;
+
+  for (int i = 0; i < n; ++i) {
+    esp_err_t err = httpd_ws_send_frame_async(g_server, fds[i], &frame);
+    if (err != ESP_OK) {
+      wsClientRemove(fds[i]);
+    }
+  }
+}
+
+// --- /ws WebSocket endpoint -------------------------------------------------
+
+// Largest inbound frame we accept: the biggest message on the wire is a
+// script save (name + full source), JSON-escaped. Ordinary Fennel/Lua
+// source needs at most a couple of extra characters per escaped quote/
+// backslash/control char, not the pathological 6x (\u00XX) blowup, so 2x
+// EVAL_SRC_MAX plus room for the name field and JSON envelope is a
+// generous practical margin, not a hard worst-case bound. Static: the
+// httpd default config runs exactly one worker task, so handlers never
+// execute concurrently and reusing one buffer across calls is safe (see
+// httpd_config_t::task_priority / max_open_sockets in web_server_task --
+// this relies on the default single-worker behavior, not a custom config).
+constexpr size_t kWsBufCap = EVAL_SRC_MAX * 2 + 512;
+
+static esp_err_t ws_handler(httpd_req_t* req) {
+  if (req->method == HTTP_GET) {
+    // The initial GET is the WS handshake, delivered once per new
+    // connection (is_websocket=true on the uri registration below) --
+    // esp-idf's documented way to detect "a client just connected".
+    int fd = httpd_req_to_sockfd(req);
+    wsClientAdd(fd);
+
+    static char cfgBuf[kWsBufCap];
+    size_t n = web_input_build_config(cfgBuf, sizeof(cfgBuf));
+    httpd_ws_frame_t out = {};
+    out.type = HTTPD_WS_TYPE_TEXT;
+    out.payload = reinterpret_cast<uint8_t*>(cfgBuf);
+    out.len = n;
+    httpd_ws_send_frame(req, &out);
+    return ESP_OK;
+  }
+
+  httpd_ws_frame_t frame = {};
+  frame.type = HTTPD_WS_TYPE_TEXT;
+  esp_err_t ret = httpd_ws_recv_frame(req, &frame, 0);  // length-only probe
+  if (ret != ESP_OK) return ret;
+  if (frame.len == 0 || frame.len >= kWsBufCap) {
+    return ESP_OK;  // empty control frame, or bigger than anything we ever
+                     // send -- drop rather than risk a truncated parse
+  }
+
+  static char rxBuf[kWsBufCap];
+  frame.payload = reinterpret_cast<uint8_t*>(rxBuf);
+  ret = httpd_ws_recv_frame(req, &frame, frame.len);
+  if (ret != ESP_OK) return ret;
+  if (frame.type != HTTPD_WS_TYPE_TEXT) return ESP_OK;  // ping/pong/close: nothing to parse
+
+  static char outBuf[kWsBufCap];
+  size_t outLen = 0;
+  WebInputAction action = web_input_handle_text_frame(rxBuf, frame.len, outBuf, sizeof(outBuf), &outLen);
+
+  httpd_ws_frame_t out = {};
+  out.type = HTTPD_WS_TYPE_TEXT;
+  switch (action) {
+    case WEB_INPUT_SEND_HELLO: {
+      // Reuses outBuf (not otherwise live at this point -- the switch's
+      // other case fills it from web_input_handle_text_frame instead).
+      out.len = web_input_build_config(outBuf, sizeof(outBuf));
+      out.payload = reinterpret_cast<uint8_t*>(outBuf);
+      httpd_ws_send_frame(req, &out);
+      break;
+    }
+    case WEB_INPUT_REPLY:
+      out.payload = reinterpret_cast<uint8_t*>(outBuf);
+      out.len = outLen;
+      httpd_ws_send_frame(req, &out);
+      break;
+    default:
+      break;  // CONTROL_EVENT/EVAL_QUEUED/IGNORED need no reply here
+  }
+  return ESP_OK;
+}
+
+// --- console static files ---------------------------------------------------
+//
+// The console bundle (firmware/main/data/console/) is embedded into the app
+// binary via EMBED_FILES (firmware/main/CMakeLists.txt), same mechanism as
+// the vendored Fennel compiler (see main.cpp's fennel_lua_start). ESP-IDF
+// names each blob's symbols after the file's base name with non-alnum
+// characters replaced by '_' -- e.g. "ws-client.js" -> _binary_ws_client_js_*.
+
+extern "C" const uint8_t index_html_start[]        asm("_binary_index_html_start");
+extern "C" const uint8_t index_html_end[]          asm("_binary_index_html_end");
+extern "C" const uint8_t app_js_start[]             asm("_binary_app_js_start");
+extern "C" const uint8_t app_js_end[]               asm("_binary_app_js_end");
+extern "C" const uint8_t styles_css_start[]         asm("_binary_styles_css_start");
+extern "C" const uint8_t styles_css_end[]           asm("_binary_styles_css_end");
+extern "C" const uint8_t ws_client_js_start[]       asm("_binary_ws_client_js_start");
+extern "C" const uint8_t ws_client_js_end[]         asm("_binary_ws_client_js_end");
+extern "C" const uint8_t script_panel_js_start[]    asm("_binary_script_panel_js_start");
+extern "C" const uint8_t script_panel_js_end[]      asm("_binary_script_panel_js_end");
+extern "C" const uint8_t fennel_editor_js_start[]   asm("_binary_fennel_editor_js_start");
+extern "C" const uint8_t fennel_editor_js_end[]     asm("_binary_fennel_editor_js_end");
+extern "C" const uint8_t preact_mjs_start[]         asm("_binary_preact_mjs_start");
+extern "C" const uint8_t preact_mjs_end[]           asm("_binary_preact_mjs_end");
+extern "C" const uint8_t preact_hooks_mjs_start[]   asm("_binary_preact_hooks_mjs_start");
+extern "C" const uint8_t preact_hooks_mjs_end[]     asm("_binary_preact_hooks_mjs_end");
+extern "C" const uint8_t htm_mjs_start[]            asm("_binary_htm_mjs_start");
+extern "C" const uint8_t htm_mjs_end[]              asm("_binary_htm_mjs_end");
+extern "C" const uint8_t editor_bundle_mjs_start[]  asm("_binary_editor_bundle_mjs_start");
+extern "C" const uint8_t editor_bundle_mjs_end[]    asm("_binary_editor_bundle_mjs_end");
+
+namespace {
+struct StaticFile {
+  const char* uri;
+  const uint8_t* start;
+  const uint8_t* end;
+  const char* contentType;
+};
+}  // namespace
+
+static const StaticFile kStaticFiles[] = {
+  {"/",                        index_html_start,      index_html_end,      "text/html"},
+  {"/index.html",              index_html_start,      index_html_end,      "text/html"},
+  {"/app.js",                  app_js_start,           app_js_end,          "application/javascript"},
+  {"/styles.css",              styles_css_start,       styles_css_end,      "text/css"},
+  {"/ws-client.js",            ws_client_js_start,     ws_client_js_end,    "application/javascript"},
+  {"/script-panel.js",         script_panel_js_start,  script_panel_js_end, "application/javascript"},
+  {"/shared/fennel-editor.js", fennel_editor_js_start, fennel_editor_js_end, "application/javascript"},
+  {"/vendor/preact.mjs",       preact_mjs_start,       preact_mjs_end,       "application/javascript"},
+  {"/vendor/preact-hooks.mjs", preact_hooks_mjs_start, preact_hooks_mjs_end, "application/javascript"},
+  {"/vendor/htm.mjs",          htm_mjs_start,          htm_mjs_end,          "application/javascript"},
+  {"/vendor/editor-bundle.mjs", editor_bundle_mjs_start, editor_bundle_mjs_end, "application/javascript"},
+};
+constexpr size_t kNumStaticFiles = sizeof(kStaticFiles) / sizeof(kStaticFiles[0]);
+
+static esp_err_t static_file_handler(httpd_req_t* req) {
+  const StaticFile* f = static_cast<const StaticFile*>(req->user_ctx);
+  httpd_resp_set_type(req, f->contentType);
+  httpd_resp_send(req, reinterpret_cast<const char*>(f->start),
+                  static_cast<ssize_t>(f->end - f->start));
+  return ESP_OK;
+}
+
+// --- server bring-up ---------------------------------------------------------
+
+void web_server_task(void* /*ctx*/) {
+  if (g_wsClientsMutex == nullptr) {
+    g_wsClientsMutex = xSemaphoreCreateMutex();
+  }
+
+  httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+  // Every URI registered below is an exact path (no wildcards needed), so
+  // this stays at IDF's default single-worker, exact-match config --
+  // handlers above rely on running one at a time (see kWsBufCap).
+  config.max_uri_handlers = kNumStaticFiles + 1;  // +1 for /ws
+
+  if (httpd_start(&g_server, &config) != ESP_OK) {
+    ESP_LOGE(TAG, "httpd_start failed");
+    return;
+  }
+
+  httpd_uri_t wsUri = {};
+  wsUri.uri = "/ws";
+  wsUri.method = HTTP_GET;
+  wsUri.handler = ws_handler;
+  wsUri.is_websocket = true;
+  httpd_register_uri_handler(g_server, &wsUri);
+
+  for (size_t i = 0; i < kNumStaticFiles; ++i) {
+    httpd_uri_t uri = {};
+    uri.uri = kStaticFiles[i].uri;
+    uri.method = HTTP_GET;
+    uri.handler = static_file_handler;
+    uri.user_ctx = const_cast<void*>(static_cast<const void*>(&kStaticFiles[i]));
+    httpd_register_uri_handler(g_server, &uri);
+  }
+
+  ESP_LOGI(TAG, "web console + /ws ready");
 }
 
 #endif  // ESP_PLATFORM

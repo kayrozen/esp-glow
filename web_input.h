@@ -65,5 +65,19 @@ WebInputAction web_input_handle_text_frame(const char* json, size_t len,
 using FxErrorReplyFn = void (*)(void* ctx, const char* json, size_t len);
 int web_input_poll_fx_error(GlowLuaApi& api, FxErrorReplyFn onFxError, void* ctx);
 
-// Starts the WebSocket server task (hardware-specific; see web_input.cpp).
-void web_server_task();
+// Starts the httpd server (console static files + the /ws WebSocket
+// endpoint) and returns once it's listening. Unlike midi_uart_task/
+// osc_server_task, this is NOT meant to be handed to xTaskCreate: httpd
+// spins up its own internal worker task to handle requests, so call this
+// directly from app_main (the `ctx` parameter exists only so its shape
+// matches the other transports' entry points; it's unused).
+void web_server_task(void* ctx);
+
+// Sends `json` (`len` bytes) to every currently-connected WS client.
+// Called from the render task (post-render, alongside gcStepSlack/
+// web_input_poll_fx_error) for fx_error and eval_result -- both need every
+// client to see them, not just whichever one triggered them, since any
+// connected client's REPL may be waiting on a result or watching for
+// errors. Safe to call before the server has started (a no-op then). Drops
+// any fd whose send fails rather than retrying -- see web_input.cpp.
+void web_ws_broadcast(const char* json, size_t len);

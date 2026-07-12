@@ -23,6 +23,15 @@ idf_component_register(
     REQUIRES glow_core
     EMBED_FILES
         "data/console/index.html"
+        "data/console/app.js"
+        "data/console/styles.css"
+        "data/console/ws-client.js"
+        "data/console/script-panel.js"
+        "data/console/shared/fennel-editor.js"
+        "data/console/vendor/preact.mjs"
+        "data/console/vendor/preact-hooks.mjs"
+        "data/console/vendor/htm.mjs"
+        "data/console/vendor/editor-bundle.mjs"
         "../../third_party/fennel/fennel.lua"
 )
 
