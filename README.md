@@ -1,4 +1,4 @@
-# esp-glow
+# esp-glow - it's like wled dated afterglow
 
 A native C++ DMX lighting control system for the ESP32-S3 — a from-scratch
 reimplementation of an Afterglow-style show engine, with no JVM, running standalone on
