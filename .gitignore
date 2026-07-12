@@ -53,12 +53,13 @@ Makefile
 install_manifest.txt
 compile_commands.json
 
-# Temporary files
+# Temporary files & merge cruft
 *.tmp
 *.log
 *.bak
 *.swp
 *.rej
+*.orig
 
 # vcpkg
 vcpkg_installed/
@@ -79,3 +80,7 @@ web/provision-wasm/build/
 web/provision-wasm/provision-wasm.js
 web/provision-wasm/provision-wasm.wasm
 web/provisioner-static/wasm/
+
+# Firmware build artifacts (rebuilt in CI, not committed)
+firmware/build/
+firmware/main/data/show.shw1

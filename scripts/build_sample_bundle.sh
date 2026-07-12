@@ -4,7 +4,7 @@
 #
 # Output: firmware/main/data/show.shw1
 set -euo pipefail
-cd /home/z/my-project/work/esp-glow
+cd "$(git rev-parse --show-toplevel)"
 
 # Compile the provision compiler (provision_main + provision + profile_encoder
 # + their deps). The Makefile does not build this binary, so we do it here.
