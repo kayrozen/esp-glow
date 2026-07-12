@@ -16,7 +16,7 @@ bool storage_mount(void) {
 
   esp_vfs_littlefs_conf_t conf = {};
   conf.partition_label = "littlefs";
-  conf.mount_point = "/littlefs";
+  conf.base_path = "/littlefs";
   conf.format_if_mount_failed = true;  // first boot: format, then it's empty
 
   esp_err_t e = esp_vfs_littlefs_register(&conf);
