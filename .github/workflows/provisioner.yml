@@ -1,18 +1,27 @@
-# Provisioning editor — build WASM + deploy static site to GitHub Pages.
+# Provisioning editor + web flasher — build WASM + deploy static site to
+# GitHub Pages.
 #
-# Two jobs:
+# Three jobs:
 #   1. build-wasm: installs emsdk, compiles provision.cpp + wasm-glue.cpp
 #      to provision-wasm.{js,wasm}, runs the 14 C++ tests under Node to
 #      verify the WASM build matches the host build, uploads the artifacts.
-#   2. deploy-pages: downloads the WASM artifacts, builds the static
+#   2. fetch-firmware: grabs the latest successful "Firmware build" run's
+#      firmware-esp32s3 artifact (bootloader, partition table, otadata, app,
+#      demo show bundle, flasher_args.json) so the web flasher can fetch it
+#      same-origin — no CORS, and no hardcoded offsets (flasher_args.json is
+#      authoritative).
+#   3. deploy-pages: downloads both artifact sets, assembles the static
 #      editor bundle (web/provisioner-static/), deploys to GitHub Pages.
 #
-# The editor is plain HTML/JS/CSS — no build step. The WASM artifacts are
-# copied alongside it. The whole thing is served as static files.
+# The editor is plain HTML/JS/CSS — no build step. The WASM + firmware
+# artifacts are copied alongside it. The whole thing is served as static
+# files.
 #
 # Trigger: push to main touching web/provision-wasm/**, web/provisioner-static/**,
 # provision.cpp, provision.h, fixture_profile.*, profile_encoder.*, show_bundle.*,
-# or the workflow itself. Also manual dispatch.
+# or the workflow itself; also whenever the Firmware build workflow finishes on
+# main (so a firmware change republishes fresh binaries to the flasher). Also
+# manual dispatch.
 
 name: Build & deploy provisioner
 
@@ -29,10 +38,15 @@ on:
       - "show_bundle.*"
       - "vec_math.*"
       - ".github/workflows/provisioner.yml"
+  workflow_run:
+    workflows: ["Firmware build"]
+    branches: [main]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read    # dawidd6/action-download-artifact: fetch firmware-esp32s3 from another workflow's run
   pages: write
   id-token: write
 
@@ -44,6 +58,7 @@ concurrency:
 jobs:
   build-wasm:
     name: Build WASM + run tests
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -92,16 +107,33 @@ jobs:
           name: provision-wasm
           path: web/provisioner-static/wasm/
 
+      - name: Download latest firmware artifacts (for the web flasher)
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: firmware.yml
+          branch: main
+          name: firmware-esp32s3
+          path: web/provisioner-static/firmware/
+          workflow_conclusion: success
+          if_no_artifact_found: warn
+
       - name: Build static site
         run: |
           # The static site is web/provisioner-static/ — plain HTML/JS/CSS,
-          # plus the WASM artifacts we just downloaded into wasm/.
-          # No build step; just verify the structure.
+          # plus the WASM artifacts we just downloaded into wasm/ and the
+          # firmware binaries downloaded into firmware/. No build step; just
+          # verify the structure.
           ls -la web/provisioner-static/
           ls -la web/provisioner-static/wasm/
           test -f web/provisioner-static/index.html
           test -f web/provisioner-static/wasm/provision-wasm.js
           test -f web/provisioner-static/wasm/provision-wasm.wasm
+          if [ -d web/provisioner-static/firmware ]; then
+            echo "firmware artifacts:"
+            find web/provisioner-static/firmware -maxdepth 3 -type f
+          else
+            echo "::warning::no firmware artifacts found; the web flasher's Flash step will be unavailable on this deploy."
+          fi
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

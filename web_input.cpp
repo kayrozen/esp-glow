@@ -14,9 +14,9 @@
 // touches LiveControl/ShowController directly, eliminating the cross-core
 // data race. See control_queue.h for the rationale.
 //
-// Hardware wiring (httpd ws endpoint, LittleFS/SPIFFS file serving) is left
-// as `// TODO` for the same reasons as midi_input.cpp and osc_input.cpp:
-// it cannot be verified without hardware.
+// Hardware wiring (httpd ws endpoint, console file serving) is left as
+// `// TODO` for the same reasons as midi_input.cpp and osc_input.cpp: it
+// cannot be verified without hardware.
 //
 // Architecture:
 //   - The device's setup code calls web_input_init(queue, cues, nCues,
@@ -128,8 +128,10 @@ void web_server_task() {
   // active-cue set changes; the controller already knows this set.
   //
   // The static files for the Phase-2 console bundle (index.html, app.js,
-  // styles.css, vendor/) live in LittleFS/SPIFFS and are served from a
-  // separate httpd URI handler that maps "/" -> "/spiffs/index.html" etc.
+  // styles.css, vendor/) are embedded into the app binary via EMBED_FILES
+  // (firmware/main/CMakeLists.txt) and served from a separate httpd URI
+  // handler that maps "/" -> the embedded index.html, etc. No filesystem
+  // partition is involved.
   //
   // The render task (separate from this httpd task) calls
   //   pumpControlEvents(queue, live, t);
