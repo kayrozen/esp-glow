@@ -123,14 +123,14 @@ bool loadShow(const uint8_t* data, size_t len, LoadedShow& out) {
     if (!reader.readU16(profileIndex)) return false;
     if (profileIndex >= profiles.size()) return false;
 
-    uint8_t universe;
+    uint8_t universe = 0;
     if (!reader.readU8(universe)) return false;
     if (universe >= 8) return false;
 
     uint16_t base;
     if (!reader.readU16(base)) return false;
 
-    uint8_t isHeadByte;
+    uint8_t isHeadByte = 0;
     if (!reader.readU8(isHeadByte)) return false;
     bool isHead = (isHeadByte != 0);
 

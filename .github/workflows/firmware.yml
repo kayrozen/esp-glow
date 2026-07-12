@@ -1,0 +1,41 @@
+name: Firmware build
+on:
+  push:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache ESP Component Manager packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.espressif
+          key: ${{ runner.os }}-esp-components-${{ hashFiles('firmware/main/idf_component.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-esp-components-
+
+      - name: Build the show bundle (LittleFS image input)
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror -O2 \
+              provision_main.cpp provision.cpp profile_encoder.cpp \
+              fixture_profile.cpp pixel_matrix.cpp color.cpp vec_math.cpp \
+              aim.cpp show_bundle.cpp -o /tmp/provision -lm
+          mkdir -p firmware/main/data
+          /tmp/provision samples/demo.show firmware/main/data/show.shw1
+
+      - name: ESP-IDF build
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.1
+          target: esp32s3
+          path: 'firmware'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-esp32s3
+          path: |
+            firmware/build/*.bin
+            firmware/build/*.elf
+            firmware/build/flash_args

@@ -49,6 +49,7 @@ idf_component_register(
         ${GLOW_ROOT}/artnet_sink.cpp
     INCLUDE_DIRS
         ${GLOW_ROOT}
+    REQUIRES esp_dmx esp_wifi lwip
 )
 
 # Match the host build flags: no exceptions, no RTTI, full warnings.
@@ -58,5 +59,5 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wall
     -Wextra
     -Werror
-    -std=c++17
+    -std=gnu++17
 )

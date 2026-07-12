@@ -1,0 +1,19 @@
+name: Hygiene
+on:
+  push:
+  pull_request:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No conflict markers
+        run: |
+          if git grep -nE '^(<<<<<<<|>>>>>>>) ' -- '*.cpp' '*.h' '*.js' '*.md'; then
+            echo "::error::unresolved conflict markers committed"; exit 1
+          fi
+      - name: No merge/patch cruft
+        run: |
+          if git ls-files | grep -E '\.(rej|orig)$|^patches/|fix_makefile'; then
+            echo "::error::merge cruft committed (.rej/.orig/patches/fix_makefile)"; exit 1
+          fi

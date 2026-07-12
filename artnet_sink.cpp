@@ -53,15 +53,17 @@ bool ArtNetSink::begin() {
   dst.sin_port = htons(port_);
   dst.sin_addr.s_addr = htonl(ip_);
   if (connect(sock_, (struct sockaddr*)&dst, sizeof(dst)) != 0) {
+    ip4_addr_t addr = {ip_};
     ESP_LOGE(TAG, "connect(%s:%u): errno %d",
-             ipaddr_ntoa((const ip4_addr_t*)&ip_), (unsigned)port_, errno);
+             ip4addr_ntoa(&addr), (unsigned)port_, errno);
     close(sock_);
     sock_ = -1;
     return false;
   }
 
+  ip4_addr_t addr = {ip_};
   ESP_LOGI(TAG, "Art-Net -> %s:%u (ready)",
-           ipaddr_ntoa((const ip4_addr_t*)&ip_), (unsigned)port_);
+           ip4addr_ntoa(&addr), (unsigned)port_);
   return true;
 }
 
