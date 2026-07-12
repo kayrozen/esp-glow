@@ -8,6 +8,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cache ESP Component Manager packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.espressif
+          key: ${{ runner.os }}-esp-components-${{ hashFiles('firmware/main/idf_component.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-esp-components-
+
       - name: Build the show bundle (LittleFS image input)
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror -O2 \
