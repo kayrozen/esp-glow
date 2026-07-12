@@ -41,6 +41,7 @@ for (let i = 0; i < args.length; i++) {
 }
 
 const CONSOLE_DIR = path.join(__dirname, "console");
+const WEB_DIR = __dirname;  // fallback root for /shared/** and /vendor/**, shared with the provisioner
 
 // --- sample config (mirrors README_LIVE_CONTROL.md example) ------------
 
@@ -73,16 +74,39 @@ const MIME = {
   ".css":  "text/css; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".map":  "application/json; charset=utf-8",
+  ".wasm": "application/wasm",
 };
+
+// The console bundle (web/console/**) is the served root; /shared/** and
+// /vendor/** (the CodeMirror/parinfer/wasmoon bundles shared with the
+// provisioner — see web/shared/fennel-editor.js) fall back to the web/
+// parent directory, since neither lives under web/console/. This mirrors
+// how the eventual device httpd and the provisioner's GitHub Pages deploy
+// both need to expose those two directories at the served root alongside
+// each front's own files (see .github/workflows/provisioner.yml's "Build
+// static site" step, which copies them into web/provisioner-static/ before
+// upload for exactly this reason).
+// Returns the resolved path to serve, or null if it's outside both allowed
+// roots (path traversal) -- the caller 403s on null.
+function resolveStaticPath(urlPath) {
+  const rel = path.normalize(urlPath).replace(/^([/\\])+/, "");
+  const underConsole = path.join(CONSOLE_DIR, rel);
+  if (!underConsole.startsWith(CONSOLE_DIR)) return null;
+  if (fs.existsSync(underConsole) && fs.statSync(underConsole).isFile()) return underConsole;
+  if (rel.startsWith("shared" + path.sep) || rel.startsWith("vendor" + path.sep)) {
+    const underWeb = path.join(WEB_DIR, rel);
+    if (!underWeb.startsWith(WEB_DIR)) return null;
+    return underWeb;
+  }
+  return underConsole;  // 404s below if it doesn't exist
+}
 
 function serveStatic(req, res) {
   let urlPath = req.url.split("?")[0];
   if (urlPath === "/") urlPath = "/index.html";
 
-  // Prevent path traversal.
-  const rel = path.normalize(urlPath).replace(/^([/\\])+/, "");
-  const abs = path.join(CONSOLE_DIR, rel);
-  if (!abs.startsWith(CONSOLE_DIR)) {
+  const abs = resolveStaticPath(urlPath);
+  if (abs === null) {
     res.writeHead(403); res.end("forbidden"); return;
   }
 
@@ -155,6 +179,18 @@ function readFrame(buf) {
   return { consumed: offset + len, opcode, payload };
 }
 
+// --- mock script store (mirrors scripts_storage.h's flat-root LittleFS
+// semantics: a name -> source map, "boot" is not special except by name) ---
+
+const mockScripts = new Map([
+  ["boot", "; runs at startup\n(fn breathe [t]\n  (glow.set 1 :dimmer (* 0.5 (+ 1 (math.sin (* t 2))))))\n"],
+  ["verse", "(fn verse-wash [t]\n  (glow.set 1 :dimmer 0.6))\n"],
+]);
+
+function scriptsMessage() {
+  return { type: "scripts", names: Array.from(mockScripts.keys()) };
+}
+
 function handleWs(req, sock) {
   // Complete the handshake.
   sock.write(
@@ -200,6 +236,56 @@ function handleWs(req, sock) {
           writeFrame(sock, JSON.stringify(stateMsg));
           console.log("[ws ->]", JSON.stringify(stateMsg));
         }
+      }
+
+      // --- Fennel scripting UI: eval + script CRUD (mirrors web_input.cpp) --
+
+      if (msg.type === "eval") {
+        // Mock semantics: a source containing "error" fails with a fake
+        // compile error, a source mentioning "boom" simulates an fx_error
+        // on a named effect (so the console's fx_error path is exercisable
+        // without hardware), everything else "succeeds".
+        const seq = Number.isInteger(msg.seq) ? msg.seq : 0;
+        const src = typeof msg.src === "string" ? msg.src : "";
+        let reply;
+        if (/\berror\b/.test(src)) {
+          reply = { type: "eval_result", seq, ok: false, err: "1:1: unexpected symbol near 'error'" };
+        } else {
+          reply = { type: "eval_result", seq, ok: true };
+        }
+        writeFrame(sock, JSON.stringify(reply));
+        console.log("[ws ->]", JSON.stringify(reply));
+        if (/\bboom\b/.test(src)) {
+          const fxErr = { type: "fx_error", effect: "verse#0", err: "attempt to call a nil value" };
+          writeFrame(sock, JSON.stringify(fxErr));
+          console.log("[ws ->]", JSON.stringify(fxErr));
+        }
+        continue;
+      }
+
+      if (msg.type === "script_list") {
+        writeFrame(sock, JSON.stringify(scriptsMessage()));
+        continue;
+      }
+
+      if (msg.type === "script_load" && typeof msg.name === "string") {
+        const src = mockScripts.get(msg.name) || "";
+        const reply = { type: "script", name: msg.name, src };
+        writeFrame(sock, JSON.stringify(reply));
+        console.log("[ws ->]", JSON.stringify(reply));
+        continue;
+      }
+
+      if (msg.type === "script_save" && typeof msg.name === "string") {
+        mockScripts.set(msg.name, typeof msg.src === "string" ? msg.src : "");
+        writeFrame(sock, JSON.stringify(scriptsMessage()));
+        continue;
+      }
+
+      if (msg.type === "script_delete" && typeof msg.name === "string") {
+        mockScripts.delete(msg.name);
+        writeFrame(sock, JSON.stringify(scriptsMessage()));
+        continue;
       }
     }
   });

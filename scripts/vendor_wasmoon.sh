@@ -49,3 +49,16 @@ MIT License. Full text: https://opensource.org/licenses/MIT
 LICEOF
 
 echo "Vendored web/vendor/wasmoon-bundle.mjs ($(wc -c < "$OLDPWD/web/vendor/wasmoon-bundle.mjs") bytes) + glue.wasm ($(wc -c < "$OLDPWD/web/vendor/glue.wasm") bytes), wasmoon $VERSION."
+
+# web/provisioner-static/fennel-check.js loads this Lua source text and
+# runs it against the wasmoon engine above -- a copy, not a symlink (Pages
+# artifact upload and some checkouts don't preserve symlinks reliably), so
+# it needs to travel with wasmoon in the same vendoring step. Source of
+# truth stays third_party/fennel/fennel.lua (see vendor_fennel.sh); this
+# is refreshed from it every time this script runs.
+if [ -f "$OLDPWD/third_party/fennel/fennel.lua" ]; then
+  cp "$OLDPWD/third_party/fennel/fennel.lua" "$OLDPWD/web/vendor/fennel.lua"
+  echo "Copied third_party/fennel/fennel.lua -> web/vendor/fennel.lua ($(wc -c < "$OLDPWD/web/vendor/fennel.lua") bytes)."
+else
+  echo "WARNING: third_party/fennel/fennel.lua not found; web/vendor/fennel.lua not refreshed." >&2
+fi

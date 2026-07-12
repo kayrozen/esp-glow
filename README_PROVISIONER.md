@@ -120,3 +120,53 @@ Serial:
 Same static-site deployment model: `.github/workflows/provisioner.yml`
 downloads the latest `firmware-esp32s3` artifact and publishes it alongside
 the editor at `web/provisioner-static/firmware/`.
+
+## Offline Fennel authoring (Show script tab)
+
+Why this lives here and not just in the device console: the console is
+served from the device over `ws://`, and this page is served over HTTPS
+(GitHub Pages). Browsers block insecure WebSockets from an HTTPS page, and
+the device can't present a valid TLS cert for a local IP — there's no
+clean workaround. So this half of the feature is deliberately **offline
+authoring + compile-check + bake-in**, not a live connection; see
+`README_WEB_CONSOLE.md` for the live REPL half.
+
+A "Show script" entry (`boot.fnl`) sits in the sidebar alongside the
+`.show`/`.fdef` files, using the same shared CodeMirror component as the
+device console (`web/shared/fennel-editor.js` — bracket matching,
+auto-close, Parinfer, Clojure-mode highlighting). Three pieces:
+
+1. **Author offline.** Plain text editing, no device needed; Save/
+   Download/Copy work the same as the other file types.
+2. **Check syntax** (`web/provisioner-static/fennel-check.js`) runs
+   [wasmoon](https://github.com/ceifa/wasmoon) (real Lua 5.4 compiled to
+   WASM, vendored at `web/vendor/wasmoon-bundle.mjs` + `glue.wasm`) loaded
+   with the *actual* vendored `third_party/fennel/fennel.lua` (copied to
+   `web/vendor/fennel.lua` by the same vendoring step) and calls
+   `fennel.eval` against it — so a compile error is byte-for-byte the same
+   error the device would report, because it's literally the same
+   compiler. `glow.*` is stubbed with every real field name as a no-op, so
+   a top-level typo like `glow.st` throws too (an unresolved field is
+   nil), but **this is a syntax check, not a dry run**: argument types,
+   fixture ids, and anything inside a function that's never called at the
+   top level aren't checked. The UI says so.
+3. **Bake into the flash image.** The Flash modal's "Bake boot.fnl into
+   the scripts partition" checkbox calls `boot-image.js`'s
+   `buildScriptsImage`, which drives `web/vendor/littlefs-image.wasm` — the
+   *real* upstream littlefs C library, pinned to the exact commit
+   `joltwallet/littlefs` vendors (firmware's LittleFS component), compiled
+   freestanding to wasm32 with clang+wasm-ld (no Emscripten, no libc; see
+   `web/littlefs-image/shim.c` and `scripts/vendor_littlefs_image_wasm.sh`
+   for how its geometry was read directly out of that pin's source rather
+   than guessed). `flash.js` resolves the "scripts" partition's flash
+   offset by fetching and parsing this build's actual
+   `partition-table.bin` (ESP-IDF's binary format, not hardcoded), then
+   writes the built image there alongside the bootloader/app/show parts.
+   A fresh board comes up already running the authored show — no
+   filesystem tooling needed on the flashing machine.
+
+One page: author patch → author show → flash → lights on.
+
+Scope note: baking only writes `boot.fnl`. Additional scripts saved later
+via `glow.save`/the console's Script tab live alongside it on the same
+LittleFS partition (this bake step doesn't touch or know about them).

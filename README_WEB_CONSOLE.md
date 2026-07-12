@@ -195,12 +195,54 @@ The Phase-2 console bundle (`web/console/**`) is served by a separate
 bundle is plain static files — no preprocessing, no gzip required (total
 size ≈ 35 KB uncompressed including the vendored Preact).
 
+## Fennel editor + REPL (Script tab)
+
+A second tab (`web/console/script-panel.js`, mounted from `app.js`'s
+`Header` tab switch) turns the console into a live-coding surface against
+the running rig. It only works here — served same-origin from the device
+over `ws://` — never in the HTTPS-served static provisioner; see
+README_PROVISIONER.md's mixed-content note for why.
+
+- **Editor**: CodeMirror 6 with bracket matching, auto-close, Parinfer
+  (structural paren balancing on every edit), and Clojure-mode syntax
+  highlighting (close enough for Fennel). Shared with the provisioner —
+  `web/shared/fennel-editor.js`, bundled from `web/vendor/editor-bundle.mjs`
+  (see `scripts/vendor_editor_bundle.sh`).
+- **REPL**: multi-line input (Enter evaluates, Shift+Enter newlines), a
+  scrolling transcript, and ↑/↓ history persisted to `localStorage`. Each
+  eval carries a `seq` so an out-of-order `eval_result` (they're queued and
+  drained on the render task — see `eval_queue.h`) still matches its input.
+- **Script sidebar**: lists scripts from `script_list`; `boot` is badged —
+  it's the one `scripts_storage_read_boot` runs at startup. Load/Save/New/
+  Delete round-trip through `script_load`/`script_save`/`script_delete`.
+- **Snippets**: a static, always-available panel of insertable forms for
+  `glow.set`/`aim`/`cue.define`/`fx.*`/`matrix.pattern` — nobody memorizes
+  an API from a README mid-set.
+- **Safety UX**: `fx_error` (an unsolicited push when a `LuaEffect` throws
+  and gets disabled — see `README_LUA_FENNEL.md`'s error policy) surfaces
+  as a persistent banner naming the effect (`"<cue>#<index>"`, since Lua
+  function values have no reliable name of their own —
+  `GlowLuaApi::pollNewlyDisabledEffects`) plus an inline REPL transcript
+  entry, not a quiet log line. A PANIC button is always reachable in the
+  toolbar (client-orchestrated for v1: drops the master fader to 0 and logs
+  it, using only the existing `master` message — no new device-side
+  protocol). A cheap regex lint flags the two documented real-time
+  footguns (string concatenation, `while` loops) as a hint, not a gate.
+
+Protocol additions (`web_protocol.h/.cpp`, host-tested): `eval`/
+`eval_result` (the `seq` field, not `id` — distinct from cue/scene ids),
+`script_list`/`script_load`/`script_save`/`script_delete`/`scripts`/
+`script`, and `fx_error`. Script CRUD hits `scripts_storage.h` (LittleFS)
+synchronously on the WS task — unlike eval, it never touches the single
+Lua VM, so it doesn't need the eval queue's single-owner discipline.
+
 ## Out of scope
 
 - **Manual cue crossfade** — would require `setManualLevel(cueId, level)`
   on `ShowController`; explicitly deferred to v2. The master fader is a
   grandmaster only.
-- **Provisioning UI** — a separate, larger project (Phase 5). Not part of
-  this MVP.
-- **Build step / bundler** — intentionally absent. The bundle is small
-  enough to serve from flash as-is.
+- **Auth on the device console** — it's a LAN device; noted, not solved.
+- **Build step / bundler** for the console's own files — intentionally
+  absent, small enough to serve from flash as-is. `web/vendor/*.mjs` are
+  themselves committed *build outputs* of a one-time vendoring step (see
+  `scripts/vendor_editor_bundle.sh`), same as `preact.mjs`/`htm.mjs`.

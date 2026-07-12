@@ -32,9 +32,11 @@
 // preserved across reconnects so the operator doesn't see flicker.
 //
 
-import { h, render, useState, useEffect, useRef, useCallback } from "./vendor/preact.mjs";
+import { h, render } from "./vendor/preact.mjs";
+import { useState, useEffect, useRef, useCallback } from "./vendor/preact-hooks.mjs";
 import htm from "./vendor/htm.mjs";
 import { WsClient, Status } from "./ws-client.js";
+import { ScriptPanel } from "./script-panel.js";
 
 const html = htm.bind(h);
 
@@ -58,6 +60,7 @@ function App() {
   // Connection + protocol state.
   const [status, setStatus] = useState(Status.Closed);
   const [config, setConfig] = useState(null);  // null = no config yet
+  const [tab, setTab] = useState("cues");  // "cues" | "script"
   // Per-cue local state. For flash cues: boolean "pressed". For toggle
   // cues: boolean "latched". Both stored under the same map keyed by id
   // so the cue grid can render a single "active" boolean per button.
@@ -158,30 +161,32 @@ function App() {
 
   return html`
     <div class="console">
-      <${Header} status=${status} hasConfig=${config !== null} />
-      ${config === null
-        ? html`<div class="empty">Waiting for config…</div>`
-        : html`
-            <${CueGrid} cues=${config.cues} activeCues=${activeCues}
-                        onPointerDown=${onCuePointerDown}
-                        onPointerUp=${onCuePointerUp} />
-            ${config.scenes.length > 0 && html`
-              <${SceneRow} scenes=${config.scenes} activeCues=${activeCues}
-                            onPointerDown=${onScenePointerDown}
-                            onPointerUp=${onScenePointerUp} />
-            `}
-            ${config.hasMaster && html`
-              <${MasterFader} value=${master}
-                              onChange=${(v) => { setMaster(v); sendMaster(v); }} />
-            `}
-          `}
+      <${Header} status=${status} hasConfig=${config !== null} tab=${tab} onTab=${setTab} />
+      ${tab === "cues"
+        ? (config === null
+            ? html`<div class="empty">Waiting for config…</div>`
+            : html`
+                <${CueGrid} cues=${config.cues} activeCues=${activeCues}
+                            onPointerDown=${onCuePointerDown}
+                            onPointerUp=${onCuePointerUp} />
+                ${config.scenes.length > 0 && html`
+                  <${SceneRow} scenes=${config.scenes} activeCues=${activeCues}
+                                onPointerDown=${onScenePointerDown}
+                                onPointerUp=${onScenePointerUp} />
+                `}
+                ${config.hasMaster && html`
+                  <${MasterFader} value=${master}
+                                  onChange=${(v) => { setMaster(v); sendMaster(v); }} />
+                `}
+              `)
+        : html`<${ScriptPanel} client=${client} status=${status} />`}
     </div>
   `;
 }
 
 // --- Header (status indicator) -----------------------------------------
 
-function Header({ status, hasConfig }) {
+function Header({ status, hasConfig, tab, onTab }) {
   const dotClass = classList(
     "status-dot",
     status === Status.Open       && "status-open",
@@ -199,6 +204,12 @@ function Header({ status, hasConfig }) {
       <span class=${dotClass}></span>
       <span class="status-label">${label}</span>
       <span class="brand">esp-glow</span>
+      <nav class="tab-switch">
+        <button class=${classList("tab-btn", tab === "cues" && "tab-btn-active")}
+                onClick=${() => onTab("cues")}>Cues</button>
+        <button class=${classList("tab-btn", tab === "script" && "tab-btn-active")}
+                onClick=${() => onTab("script")}>Script</button>
+      </nav>
     </header>
   `;
 }

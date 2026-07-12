@@ -64,6 +64,57 @@ function findShowPartitionOffset(args) {
   return null;
 }
 
+// Find partition-table.bin's own flash offset+filename from flasher_args.json
+// (unlike the "scripts" partition, the partition table itself always has a
+// CI-built file — it's part of every ESP-IDF build).
+function findPartitionTableFile(args) {
+  for (const [, file] of Object.entries(args.flash_files ?? {})) {
+    if (/partition-table\.bin$/i.test(file)) return file;
+  }
+  return null;
+}
+
+// Parses an ESP-IDF binary partition table (gen_esp32part.py's format:
+// repeated 32-byte little-endian entries, magic 0xAA 0x50, until an
+// all-0xFF or all-0x00 entry). Returns [{type, subtype, offset, size, label}].
+// See ESP-IDF's esp_partition_info_t / docs/en/api-guides/partition-tables.rst.
+function parsePartitionTable(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const entries = [];
+  for (let off = 0; off + 32 <= bytes.length; off += 32) {
+    if (view.getUint8(off) === 0xaa && view.getUint8(off + 1) === 0x50) {
+      const type = view.getUint8(off + 2);
+      const subtype = view.getUint8(off + 3);
+      const offset = view.getUint32(off + 4, true);
+      const size = view.getUint32(off + 8, true);
+      const labelBytes = bytes.subarray(off + 12, off + 28);
+      const nul = labelBytes.indexOf(0);
+      const label = new TextDecoder().decode(labelBytes.subarray(0, nul < 0 ? 16 : nul));
+      entries.push({ type, subtype, offset, size, label });
+    } else {
+      break;  // MD5 checksum entry (type 0xEB) or end-of-table padding
+    }
+  }
+  return entries;
+}
+
+// Resolves the "scripts" partition's flash offset by fetching and parsing
+// the real partition table binary the firmware was built with — not
+// hardcoded, since a board's actual partition layout is the only source
+// of truth for where writing "scripts region" bytes is safe (see
+// firmware/partitions.csv, which is what generates this binary at build
+// time). Returns { offset, size } or null if not found.
+async function findScriptsPartition(args, baseUrl) {
+  const file = findPartitionTableFile(args);
+  if (!file) return null;
+  const res = await fetch(new URL(file, baseUrl));
+  if (!res.ok) return null;
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  const entries = parsePartitionTable(bytes);
+  const scripts = entries.find((e) => e.label === "scripts");
+  return scripts ? { offset: scripts.offset, size: scripts.size } : null;
+}
+
 // Detect the chip's family name from esptool-js's `chip` string, e.g.
 // "ESP32-S3 (QFN56) (revision v0.2)" -> "ESP32-S3".
 function chipFamily(chipDescription) {
@@ -79,6 +130,13 @@ function chipFamily(chipDescription) {
 //   bundleBytes Uint8Array | null — the user's freshly-compiled SHW1 bundle.
 //               If provided, it's written at the show partition's offset
 //               instead of the CI-built demo bundle.
+//   scriptsImageBytes Uint8Array | null — a pre-built "scripts" partition
+//               LittleFS image (see boot-image.js's buildScriptsImage) to
+//               write at the scripts partition's offset, so a fresh board
+//               comes up already running the authored boot.fnl. Its size
+//               must exactly match the scripts partition's size (it does,
+//               if it came from buildScriptsImage against this same
+//               firmware build's partition table).
 //   eraseFirst  bool — erase the whole flash before writing.
 //   baudrate    number — defaults to 460800.
 //   onLog(line) called with esptool-js's terminal output.
@@ -88,6 +146,7 @@ export async function flash(opts) {
   const {
     baseUrl = new URL("firmware/", window.location.href),
     bundleBytes = null,
+    scriptsImageBytes = null,
     eraseFirst = false,
     baudrate = 460800,
     onLog = () => {},
@@ -152,6 +211,27 @@ export async function flash(opts) {
       );
     }
     fileArray.push({ address: offset, data: toBinaryString(bundleBytes) });
+  }
+
+  if (scriptsImageBytes) {
+    const scripts = await findScriptsPartition(args, baseUrl);
+    if (scripts == null) {
+      await transport.disconnect();
+      throw new Error(
+        "Couldn't find the \"scripts\" partition in this firmware build's partition table " +
+          "(expected a partition-table.bin in flasher_args.json). The firmware build may be out of date.",
+      );
+    }
+    if (scriptsImageBytes.length !== scripts.size) {
+      await transport.disconnect();
+      throw new Error(
+        `The built scripts-partition image is ${scriptsImageBytes.length} bytes, but this ` +
+          `board's "scripts" partition is ${scripts.size} bytes. The vendored littlefs image ` +
+          "builder and this firmware build's partition table have drifted apart — refusing to " +
+          "flash a mismatched image.",
+      );
+    }
+    fileArray.push({ address: scripts.offset, data: toBinaryString(scriptsImageBytes) });
   }
 
   if (eraseFirst) {
