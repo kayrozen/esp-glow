@@ -16,9 +16,10 @@
 # is written. Later phases append new sources to this list:
 #   F1: render_pacing.cpp, dmx_sink.cpp (already listed? no — added in F1)
 #   F3: apply_loaded_show.cpp
-#   F4: midi_parser.cpp, osc_parser.cpp, web_protocol.cpp, web_input_handler.cpp,
-#       midi_input.cpp, osc_input.cpp, web_input.cpp (the actual hardware
-#       transports remain TODO stubs; see their own file headers)
+#   F4: web_protocol.cpp, osc_parser.cpp (host-tested parsers/protocol) +
+#       web_input.cpp, midi_input.cpp, osc_input.cpp (the device transports
+#       that call them -- WS httpd, MIDI UART, OSC UDP; see each file's own
+#       header for what's real vs still-TODO)
 #   F6: the Lua/Fennel live-coding layer (see README_LUA_FENNEL.md), plus
 #       live_control.cpp/control_queue*.cpp pulled forward from F4: cues
 #       need a real ShowController, and ShowController needs a real
@@ -78,11 +79,21 @@ idf_component_register(
         # device-only FreeRTOS queue backend (#ifdef ESP_PLATFORM guarded;
         # TODO stub -- see control_queue_freertos.cpp's header)
         ${GLOW_ROOT}/control_queue_freertos.cpp
+        # F4: the testable protocol/parser cores (no ESP-IDF dependency —
+        # these already build and run under `make test`)
+        ${GLOW_ROOT}/web_protocol.cpp
+        ${GLOW_ROOT}/osc_parser.cpp
+        # F4: the device-only transports that call the above (#ifdef
+        # ESP_PLATFORM guarded; see each file's own header for what's real
+        # vs still-TODO hardware wiring)
+        ${GLOW_ROOT}/web_input.cpp
+        ${GLOW_ROOT}/midi_input.cpp
+        ${GLOW_ROOT}/osc_input.cpp
     INCLUDE_DIRS
         ${GLOW_ROOT}
         ${GLOW_ROOT}/third_party/lua
     REQUIRES esp_dmx esp_wifi lwip lua
-    PRIV_REQUIRES littlefs
+    PRIV_REQUIRES littlefs esp_http_server driver
 )
 
 # Match the host build flags: no exceptions, no RTTI, full warnings.
