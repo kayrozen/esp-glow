@@ -387,6 +387,117 @@ html, body {
   to   { opacity: 1; transform: translateY(0); }
 }
 
+/* --- flash modal -------------------------------------------------------- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+}
+
+.modal {
+  width: 480px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 64px);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  user-select: text;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.modal-header .title { font-weight: 600; color: var(--text-bright); }
+.modal-header .spacer { flex: 1; }
+.modal-header button { padding: 4px; }
+
+.modal-body {
+  padding: 16px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.flash-options {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.flash-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--text);
+  cursor: pointer;
+}
+.flash-check input { margin-top: 2px; }
+.flash-baud {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+}
+.flash-baud select {
+  background: var(--bg-elev-2);
+  color: var(--text-bright);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font: inherit;
+}
+
+.flash-chip { color: var(--info-2); }
+
+.flash-progress-label { color: var(--text); margin-bottom: 4px; }
+.flash-progress-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--bg-elev-2);
+  overflow: hidden;
+}
+.flash-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 150ms ease-out;
+}
+
+.flash-log {
+  max-height: 160px;
+  overflow-y: auto;
+  background: #000;
+  color: #9cdcfe;
+  padding: 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.flash-done { display: flex; align-items: center; gap: 8px; color: var(--ok); }
+
+.flash-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+
 /* --- responsive ------------------------------------------------------- */
 
 @media (max-width: 900px) {

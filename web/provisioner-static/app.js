@@ -10,6 +10,7 @@
 //
 
 import createModule from "./wasm/provision-wasm.js";
+import { serialSupported, secureContextOk, flash as flashDevice } from "./flash.js";
 
 // --- tiny DOM helper ----------------------------------------------------
 
@@ -149,6 +150,21 @@ const state = {
   wasmReady: false,
   compiling: false,
   module: null,
+  compiledBundle: null,  // Uint8Array of the last successful compile, for flashing
+  flash: {
+    open: false,
+    busy: false,
+    done: false,
+    error: null,
+    chip: null,
+    log: "",
+    fileIndex: 0,
+    fileCount: 0,
+    progress: 0,
+    eraseFirst: false,
+    includeShow: true,
+    baud: 460800,
+  },
 };
 
 let parseTimer = null;
@@ -250,6 +266,7 @@ async function compileShowNow() {
       bundleBytes: bundle.byteLength,
       loaded: summary,
     };
+    state.compiledBundle = bundle;
     toast(
       "Compiled",
       `${bundle.byteLength}-byte SHW1 bundle (${summary.fixtureCount} fixtures, ${summary.matrixCount} matrices)`,
@@ -385,6 +402,8 @@ const ICON = {
   plus: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`,
   upload: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`,
   spin: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="spin"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>`,
+  zap: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`,
+  close: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`,
 };
 function icon(name, extraClass = "") {
   return el("span", { class: `icon ${extraClass}`, html: ICON[name] });
@@ -396,6 +415,7 @@ function render() {
   const app = $("#app");
   app.innerHTML = "";
   app.appendChild(renderConsole());
+  if (state.flash.open) app.appendChild(renderFlashModal());
 }
 
 function renderConsole() {
@@ -440,6 +460,12 @@ function renderTopbar() {
       { class: "btn", onclick: () => $("#file-input").click() },
       icon("upload"),
       el("span", {}, "Import"),
+    ),
+    el(
+      "button",
+      { class: "btn", onclick: openFlashModal },
+      icon("zap"),
+      el("span", {}, "Flash device"),
     ),
     el("input", {
       id: "file-input",
@@ -767,6 +793,206 @@ function diagRow(label, ok, err, extra) {
       el("div", { class: "label" }, label),
       ok === false && err && el("div", { class: "detail" }, err),
       ok === true && extra && el("div", { class: "extra" }, extra),
+    ),
+  );
+}
+
+// --- USB flash modal (esptool-js over Web Serial) -----------------------
+
+function openFlashModal() {
+  state.flash.open = true;
+  state.flash.busy = false;
+  state.flash.done = false;
+  state.flash.error = null;
+  state.flash.chip = null;
+  state.flash.log = "";
+  state.flash.fileIndex = 0;
+  state.flash.fileCount = 0;
+  state.flash.progress = 0;
+  render();
+}
+
+function closeFlashModal() {
+  if (state.flash.busy) return;  // don't yank the modal mid-flash
+  state.flash.open = false;
+  render();
+}
+
+function appendFlashLog(line) {
+  state.flash.log += line;
+  render();
+}
+
+async function doFlash() {
+  const f = state.flash;
+  f.busy = true;
+  f.done = false;
+  f.error = null;
+  f.chip = null;
+  f.log = "";
+  f.fileIndex = 0;
+  f.fileCount = 0;
+  f.progress = 0;
+  render();
+  try {
+    const bundleBytes = f.includeShow && state.compiledBundle ? state.compiledBundle : null;
+    await flashDevice({
+      bundleBytes,
+      eraseFirst: f.eraseFirst,
+      baudrate: f.baud,
+      onLog: (line) => appendFlashLog(line),
+      onChip: (chip) => { f.chip = chip; render(); },
+      onProgress: (fileIndex, fileCount, fraction) => {
+        f.fileIndex = fileIndex;
+        f.fileCount = fileCount;
+        f.progress = fraction;
+        render();
+      },
+    });
+    f.done = true;
+    toast("Flashed", "Device is rebooting.", "ok");
+  } catch (e) {
+    f.error = e && e.message ? e.message : String(e);
+    toast("Flash failed", f.error, "err");
+  } finally {
+    f.busy = false;
+    render();
+  }
+}
+
+function renderFlashModal() {
+  const f = state.flash;
+  const supported = serialSupported() && secureContextOk();
+
+  const body = [];
+  if (!supported) {
+    body.push(
+      errorBlock(
+        !secureContextOk() ? "Requires HTTPS" : "Web Serial not available",
+        !secureContextOk()
+          ? "This page must be served over HTTPS (or localhost) to flash over USB."
+          : "Flashing over USB needs the Web Serial API, available in Chrome or Edge " +
+            "89+ on desktop (or Chrome on Android). Safari and iOS don't support it — " +
+            "use the \"Download compiled .shw1\" button and flash from the command line instead.",
+        "",
+      ),
+    );
+  } else {
+    body.push(
+      el(
+        "div",
+        { class: "flash-options" },
+        el(
+          "label",
+          { class: "flash-check" },
+          el("input", {
+            type: "checkbox",
+            checked: f.eraseFirst,
+            disabled: f.busy,
+            onchange: (e) => { f.eraseFirst = e.target.checked; render(); },
+          }),
+          el("span", {}, "Erase flash first (recommended for a fresh/wedged board)"),
+        ),
+        el(
+          "label",
+          { class: "flash-check" },
+          el("input", {
+            type: "checkbox",
+            checked: f.includeShow,
+            disabled: f.busy || !state.compiledBundle,
+            onchange: (e) => { f.includeShow = e.target.checked; render(); },
+          }),
+          el(
+            "span",
+            {},
+            state.compiledBundle
+              ? `Include my compiled show (${state.compiledBundle.byteLength} bytes)`
+              : "Include my compiled show (Compile it first — using the CI demo show for now)",
+          ),
+        ),
+        el(
+          "label",
+          { class: "flash-baud" },
+          el("span", {}, "Baud rate"),
+          el(
+            "select",
+            {
+              disabled: f.busy,
+              onchange: (e) => { f.baud = parseInt(e.target.value, 10); render(); },
+            },
+            el("option", { value: "460800", selected: f.baud === 460800 }, "460800 (fast)"),
+            el("option", { value: "115200", selected: f.baud === 115200 }, "115200 (safe)"),
+          ),
+        ),
+      ),
+    );
+
+    if (f.chip) {
+      body.push(el("div", { class: "flash-chip" }, `Detected: ${f.chip}`));
+    }
+
+    if (f.busy || f.fileCount > 0) {
+      const pct = Math.round((f.progress || 0) * 100);
+      body.push(
+        el(
+          "div",
+          { class: "flash-progress" },
+          el("div", { class: "flash-progress-label" },
+            f.fileCount > 0 ? `Writing part ${f.fileIndex + 1} of ${f.fileCount} — ${pct}%` : "Connecting…"),
+          el("div", { class: "flash-progress-bar" },
+            el("div", { class: "flash-progress-fill", style: `width:${pct}%` })),
+        ),
+      );
+    }
+
+    if (f.log) {
+      body.push(el("pre", { class: "flash-log" }, f.log));
+    }
+
+    if (f.error) {
+      body.push(errorBlock("Flash failed", f.error, ""));
+    }
+
+    if (f.done) {
+      body.push(
+        el("div", { class: "flash-done" }, icon("ok"), el("span", {}, "Done — device is rebooting.")),
+      );
+    }
+  }
+
+  const footer = el(
+    "div",
+    { class: "flash-footer" },
+    el("button", { class: "btn", disabled: f.busy, onclick: closeFlashModal }, "Close"),
+    supported &&
+      el(
+        "button",
+        {
+          class: "btn btn-primary",
+          disabled: f.busy,
+          onclick: doFlash,
+        },
+        f.busy ? icon("spin") : icon("zap"),
+        el("span", {}, f.busy ? "Flashing…" : "Connect device & flash"),
+      ),
+  );
+
+  return el(
+    "div",
+    { class: "modal-backdrop", onclick: (e) => { if (e.target === e.currentTarget) closeFlashModal(); } },
+    el(
+      "div",
+      { class: "modal" },
+      el(
+        "div",
+        { class: "modal-header" },
+        icon("zap"),
+        el("span", { class: "title" }, "Flash ESP32-S3 over USB"),
+        el("div", { class: "spacer" }),
+        el("button", { class: "btn btn-icon", onclick: closeFlashModal, disabled: f.busy }, icon("close")),
+      ),
+      el("div", { class: "modal-body" }, ...body),
+      footer,
     ),
   );
 }

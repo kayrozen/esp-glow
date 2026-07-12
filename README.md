@@ -35,7 +35,7 @@ There are two data paths, by design:
 | `pixel_matrix` | `Canvas`, pixel mapping (serpentine/order/multi-universe), patterns (solid/gradient/rainbow/plasma) |
 | `provision` / `show_bundle` | `.fdef`/`.show` text → `PFX1` profiles + `SHW1` bundle; device-side loader |
 | `live_control` / `control_queue` | input→cue bindings, `ControlEvent` queue, `pumpControlEvents` (concurrency-safe dispatch) |
-| `firmware/` | the ESP-IDF application (DMX driver, render task, WiFi/Art-Net, LittleFS, inputs, OTA) |
+| `firmware/` | the ESP-IDF application (DMX driver, render task, WiFi/Art-Net, raw show partition, inputs, OTA) |
 
 ---
 
@@ -74,10 +74,11 @@ idf.py menuconfig                # Component config → esp-glow:
 
 PSRAM (octal) and the C++ flags are already set in `sdkconfig.defaults`.
 
-### 3.2 Build the show bundle (LittleFS)
+### 3.2 Build the show bundle (raw partition)
 
-The device loads its patch from a `SHW1` bundle in the LittleFS partition. Compile the
-demo patch before building the firmware:
+The device loads its patch from a `SHW1` bundle in the raw `show` data partition — a
+single opaque blob, not a filesystem. Compile the demo patch before building the
+firmware:
 
 ```sh
 ./scripts/build_sample_bundle.sh      # → firmware/main/data/show.shw1
@@ -86,7 +87,8 @@ demo patch before building the firmware:
 > Note: fix the hard-coded `cd` line at the top of that script to point at your repo
 > root (e.g. `cd "$(git rev-parse --show-toplevel)"`). It compiles the `provision`
 > tool and runs `./provision samples/demo.show firmware/main/data/show.shw1`. CMake
-> then flashes `data/` into LittleFS via `littlefs_create_partition_image()`.
+> then writes `data/show.shw1` straight into the `show` partition at build time via
+> `esptool_py_flash_to_partition()`.
 
 ### 3.3 Flash & monitor
 
@@ -99,10 +101,15 @@ init result, the loaded fixture/matrix counts, and a per-5s frame-rate stat line
 the monitor with `Ctrl-]`. If a flash gets wedged: `idf.py -p <port> erase-flash` then
 reflash.
 
+No local toolchain? The deployed provisioner page can flash a blank ESP32-S3 straight
+from a Chrome/Edge tab over USB (`esptool-js` + Web Serial) — including a show bundle
+you just compiled in the same page. See "Web flasher" in `README_FIRMWARE.md`.
+
 ### 3.4 Partition layout
 
-`ota_0` / `ota_1` (3 MB each, A/B OTA), `littlefs` (1 MB, the show bundle + web
-console assets), `nvs`, and a `coredump` partition for post-mortem backtraces.
+`ota_0` / `ota_1` (3 MB each, A/B OTA), `show` (1 MB raw data partition, the SHW1 show
+bundle), `nvs`, and a `coredump` partition for post-mortem backtraces. Web console
+assets are embedded into the app binary (`EMBED_FILES`), not stored on a filesystem.
 
 ---
 
@@ -248,9 +255,10 @@ right and whether colors look right.
 - Web console (Preact + WebSocket protocol) and a browser provisioner (WASM).
 
 ### In progress — firmware
-- **F0–F3** (scaffold, DMX output + render task, WiFi + Art-Net, show-load from
-  LittleFS): clean, host seams green. **Next hardware step: F1 bring-up** — flash it
-  and watch a real fixture respond to the engine. Do this before any networked work.
+- **F0–F3** (scaffold, DMX output + render task, WiFi + Art-Net, show-load from the raw
+  `show` partition): clean, host seams green. **Next hardware step: F1 bring-up** —
+  flash it and watch a real fixture respond to the engine. Do this before any
+  networked work.
 - **F4 (inputs)**: spec'd to build on the existing `control_queue` (transports enqueue
   `ControlEvent`s, the render task drains via `pumpControlEvents` — the *only* place the
   controller is mutated). Adds an OSC parser (host-tested), the three transport tasks,

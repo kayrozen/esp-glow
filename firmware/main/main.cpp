@@ -1,21 +1,25 @@
 // main.cpp — esp-glow firmware entry point (ESP32-S3).
 //
-// Phase F3: load the show from storage. At boot we mount LittleFS, read
-// /littlefs/show.shw1, call the host-tested loadShow(), then applyLoadedShow()
-// to patch every fixture and route each universe's sink (Dmx->DmxSink,
-// ArtNet->ArtNetSink). The patch is now data-driven — swapping the bundle
-// changes the show with no code change.
+// Phase F3: load the show from storage. At boot we read the raw "show"
+// partition (see partitions.csv), call the host-tested loadShow(), then
+// applyLoadedShow() to patch every fixture and route each universe's sink
+// (Dmx->DmxSink, ArtNet->ArtNetSink). The patch is now data-driven —
+// reflashing the show partition changes the show with no code change.
+//
+// The show partition is raw (no filesystem): the browser-based web flasher
+// (esptool-js) writes the compiled SHW1 bundle directly at the partition's
+// flash offset, and the device just reads it back with esp_partition_read().
 //
 // If the bundle is missing or corrupt we fall back to the F1/F2 hardcoded
 // patch (one dimmer + a 16x8 rainbow matrix) so the board still does
 // something. F5 replaces this fallback with a safe blackout.
 //
 // What to observe (F3):
-//   - Serial: "LittleFS mounted ...", "read /littlefs/show.shw1 (N bytes)",
-//     "show loaded: U universes, F fixtures, M matrices", then
-//     "applied: U configured, F patched, H heads, R matrix universes".
-//   - Swapping the bundle file on LittleFS and rebooting changes the patch
-//     with no code change / no reflash.
+//   - Serial: "show loaded from partition 'show': U universes, F fixtures,
+//     M matrices", then "applied: U configured, F patched, H heads, R
+//     matrix universes".
+//   - Reflashing the show partition (idf.py or the web flasher) and
+//     rebooting changes the patch with no code change.
 //   - DMX fixtures respond per the bundle; matrices light per the bundle's
 //     MatrixMap entries.
 //   - Status LED: double-pulse (WiFi up) + fast blink (render).
@@ -73,7 +77,6 @@ static const char* TAG = "esp-glow";
 #define GLOW_ARTNET_BRIDGE_IP 0u
 #endif
 
-#define BUNDLE_PATH "/littlefs/show.shw1"
 #define BUNDLE_BUF_CAP (64 * 1024)  // 64 KB scratch in PSRAM
 
 // Globals: must outlive the render task.
@@ -160,7 +163,7 @@ static bool setup_show_from_bundle() {
   }
 
   LoadedShow ls;
-  if (!storage_load_show(BUNDLE_PATH, &ls, buf, BUNDLE_BUF_CAP)) {
+  if (!storage_load_show(&ls, buf, BUNDLE_BUF_CAP)) {
     free(buf);
     return false;
   }
@@ -237,7 +240,7 @@ extern "C" void app_main(void) {
     ESP_LOGE(TAG, "Art-Net socket failed; matrix output disabled.");
   }
 
-  // --- F3: load the show from LittleFS, else fall back ---
+  // --- F3: load the show from the raw "show" partition, else fall back ---
   bool from_bundle = setup_show_from_bundle();
   if (!from_bundle) {
     setup_hardcoded_fallback();
@@ -260,8 +263,8 @@ extern "C" void app_main(void) {
   led_status_set(LED_BLINK_FAST);
 
   ESP_LOGI(TAG, "F3 complete: show is %s.",
-           from_bundle ? "loaded from /littlefs/show.shw1" : "hardcoded fallback");
-  ESP_LOGI(TAG, "Swap the bundle file on LittleFS and reboot to change the patch.");
+           from_bundle ? "loaded from the 'show' partition" : "hardcoded fallback");
+  ESP_LOGI(TAG, "Reflash the 'show' partition and reboot to change the patch.");
 
   while (true) {
     led_status_set(wifi_is_connected() ? LED_BLINK_DOUBLE : LED_BLINK_FAST);

@@ -20,8 +20,10 @@ web/
   dev-server.js       # mock device + static server for offline iteration
 ```
 
-No build step. The bundle is plain static files — drop them in LittleFS /
-SPIFFS and serve with `httpd`.
+No build step. The bundle is plain static files. On-device (F4), they're
+embedded into the app binary via `EMBED_FILES` (`firmware/main/CMakeLists.txt`)
+and served with `httpd` — no filesystem partition, matching the raw `show`
+partition's no-filesystem approach (see README_FIRMWARE.md).
 
 ## Protocol
 

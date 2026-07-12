@@ -16,13 +16,13 @@ piece of firmware logic is extracted into a host-tested helper so the green
 ```
 firmware/
   CMakeLists.txt                 top-level ESP-IDF project
-  partitions.csv                 nvs / ota_0 / ota_1 / littlefs / coredump
+  partitions.csv                 nvs / ota_0 / ota_1 / show / coredump
   sdkconfig.defaults             octal PSRAM, -fno-exceptions/-fno-rtti, WiFi, lwIP
   main/
     CMakeLists.txt               app_main + per-phase modules
     main.cpp                     app_main() — grown phase by phase
     led_status.{h,cpp}           status LED blinker (the one feedback pre-serial)
-    console/                     Preact web console (F4), served from LittleFS
+    console/                     Preact web console (F4), embedded via EMBED_FILES
   components/
     glow_core/CMakeLists.txt     wraps the repo-root runtime modules as a component
 ```
@@ -38,7 +38,11 @@ idf.py flash monitor
 
 `idf.py menuconfig` lets you override the status LED GPIO and board-specific
 options. The defaults target an ESP32-S3 with 8 MB flash + octal PSRAM; for
-16 MB boards, enlarge `ota_0`/`ota_1`/`littlefs` in `partitions.csv`.
+16 MB boards, enlarge `ota_0`/`ota_1`/`show` in `partitions.csv`.
+
+You can also flash from a browser with no local toolchain: the deployed
+provisioner page (`web/provisioner-static/`) includes a USB flasher built on
+`esptool-js` + Web Serial — see "Web flasher" below.
 
 ## Phases
 
@@ -142,16 +146,22 @@ Files added/changed:
 
 ---
 
-### Phase F3 — Load the show from storage  (GLM mount + Haiku-style patch glue)
+### Phase F3 — Load the show from storage  (GLM read + Haiku-style patch glue)
 
-Mount LittleFS. At boot, read `/littlefs/show.shw1` and call the host-tested
-`loadShow`. Then iterate the `LoadedShow` and configure the running `Show` via
-the host-tested `applyLoadedShow` — `patch`/`patchHead` each fixture, register
-matrices (as Raw universes), and map each universe's `transport` to the right
-sink (Dmx -> DmxSink, ArtNet -> ArtNetSink). Now the show is data-driven, not
+At boot, read the raw `show` data partition (see `partitions.csv`) with
+`esp_partition_read` and call the host-tested `loadShow`. Then iterate the
+`LoadedShow` and configure the running `Show` via the host-tested
+`applyLoadedShow` — `patch`/`patchHead` each fixture, register matrices (as
+Raw universes), and map each universe's `transport` to the right sink
+(Dmx -> DmxSink, ArtNet -> ArtNetSink). Now the show is data-driven, not
 hardcoded.
 
-**Split (per the plan):** filesystem mount + bundle read = GLM (init is
+The `show` partition is raw, not a filesystem: the SHW1 bundle is a single
+opaque blob, so a filesystem buys nothing — and it lets the browser-based web
+flasher write a freshly-compiled bundle directly at the partition's flash
+offset with no filesystem-image step on either side.
+
+**Split (per the plan):** partition read + bundle parse = GLM (init is
 finicky). The "iterate LoadedShow -> Show::patch + sink routing" is a
 mechanical transcription against `loadShow`'s already-tested output ->
 Haiku-style, with F0-F2 as the working example. It is extracted into
@@ -169,7 +179,7 @@ MockSinkFactory (a `std::vector` reallocation) — exactly why we test.
 Files added/changed:
 - `apply_loaded_show.h` / `apply_loaded_show.cpp` — host-tested patch routing.
 - `test_apply_loaded_show.cpp` — 6 tests, wired into `make test`.
-- `firmware/main/storage_manager.{h,cpp}` — LittleFS mount + SHW1 read +
+- `firmware/main/storage_manager.{h,cpp}` — raw `show` partition read +
   `loadShow` call.
 - `firmware/main/main.cpp` — F3: `setup_show_from_bundle()` reads the bundle,
   calls `applyLoadedShow` with a `DeviceSinkFactory`, builds `PixelMatrix`
@@ -179,16 +189,48 @@ Files added/changed:
 - `samples/{demo.show,dimmer.fdef,head.fdef}` — source for the demo bundle.
 - `scripts/build_sample_bundle.sh` — rebuilds the bundle with the provision
   compiler.
-- `firmware/main/CMakeLists.txt` — `littlefs_create_partition_image()` packs
-  `data/` (bundle + console) into the LittleFS partition at flash time.
+- `firmware/main/CMakeLists.txt` — `esptool_py_flash_to_partition()` writes
+  `data/show.shw1` straight into the `show` partition at build time; the
+  console placeholder is embedded into the app binary via `EMBED_FILES`.
 
 **You observe:**
-- Serial: `LittleFS mounted ...`, `read /littlefs/show.shw1 (295 bytes)`,
-  `show loaded: 4 universes, 4 fixtures, 1 matrices`, then
-  `applied: 4 universes configured, 4 fixtures (1 heads), 1 matrix universes`.
-- Swapping the bundle file on LittleFS and rebooting changes the patch with no
-  code change / no reflash of the firmware.
+- Serial: `show loaded from partition 'show': 4 universes, 4 fixtures, 1
+  matrices`, then `applied: 4 universes configured, 4 fixtures (1 heads), 1
+  matrix universes`.
+- Reflashing the `show` partition (idf.py, or the browser web flasher — see
+  below) and rebooting changes the patch with no firmware code change.
 - DMX fixtures respond per the bundle; the matrix lights per its MatrixMap.
 - Status LED: double-pulse (WiFi) + fast blink (render).
+
+---
+
+## Web flasher (USB, no local toolchain)
+
+`web/provisioner-static/flash.js` flashes a blank ESP32-S3 straight from the
+browser, using [`esptool-js`](https://github.com/espressif/esptool-js) over
+the Web Serial API — not ESP Web Tools, because ESP Web Tools needs one
+merged binary, and a merged image is static: it can't carry a bundle the user
+just compiled in the same page. `esptool-js` flashes an arbitrary list of
+`{data, address}` parts instead, so the page can append the freshly-compiled
+`SHW1` bytes at the `show` partition's offset alongside the CI-built
+bootloader/partition-table/otadata/app parts.
+
+Requirements, surfaced in the UI:
+- **Chromium only** (Chrome/Edge 89+ desktop, or Chrome on Android). Web
+  Serial doesn't exist in Safari or on iOS.
+- **Secure context** (HTTPS or localhost) — GitHub Pages satisfies this.
+- A USB **data** cable and a USB-UART bridge (CP210x/CH340) or native USB.
+
+Offsets are never hardcoded in JS: `firmware/flasher_args.json`, emitted by
+the ESP-IDF build, is the source of truth for every part's flash address,
+including the show partition. `.github/workflows/firmware.yml` uploads it
+(plus the bootloader, partition table, otadata, app binary, and the demo
+`.shw1`) as the `firmware-esp32s3` artifact; `.github/workflows/provisioner.yml`
+downloads the latest one and publishes it to `web/provisioner-static/firmware/`
+on the same GitHub Pages deploy as the provisioner, so the page can `fetch()`
+it same-origin.
+
+The existing "Download compiled .shw1" button still works — command-line
+flashing, and Safari/Firefox users, aren't going away.
 
 ---

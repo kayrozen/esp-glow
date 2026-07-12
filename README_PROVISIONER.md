@@ -103,13 +103,20 @@ CLI uses; the editor is just a browser UI over it. If the C++ changes,
 rebuild the WASM and redeploy — the editor picks up the new behavior
 automatically.
 
-## Phase 5b (not yet built)
+## Phase 5b — Web flasher (built)
 
-WebSerial flash to the device. The editor will gain a "Flash to device"
-button that:
-1. Requests a WebSerial port.
-2. Talks the device's serial bootloader protocol (TBD).
-3. Writes the `.shw1` bundle to LittleFS.
+The editor has a "Flash device" button (`web/provisioner-static/flash.js`)
+built on [`esptool-js`](https://github.com/espressif/esptool-js) over Web
+Serial:
+1. Requests a Web Serial port and detects the chip (refuses anything that
+   isn't an ESP32-S3).
+2. Fetches the CI-built bootloader/partition-table/otadata/app parts from
+   `firmware/flasher_args.json` (offsets are read from that file, never
+   hardcoded).
+3. Writes the freshly-compiled `.shw1` bundle straight at the raw `show`
+   partition's flash offset (see `firmware/partitions.csv`) — no filesystem
+   image packing needed, because the show partition isn't a filesystem.
 
-This is a separate scope — device-side serial protocol, LittleFS image
-packing in the browser. Same static-site deployment model.
+Same static-site deployment model: `.github/workflows/provisioner.yml`
+downloads the latest `firmware-esp32s3` artifact and publishes it alongside
+the editor at `web/provisioner-static/firmware/`.
