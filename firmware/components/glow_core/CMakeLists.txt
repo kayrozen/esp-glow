@@ -18,16 +18,15 @@
 #   F3: apply_loaded_show.cpp
 #   F4: web_protocol.cpp, osc_parser.cpp (host-tested parsers/protocol) +
 #       web_input.cpp, midi_input.cpp, osc_input.cpp (the device transports
-#       that call them -- WS httpd, MIDI UART, OSC UDP; see each file's own
-#       header for what's real vs still-TODO)
+#       that call them -- real esp_http_server WS endpoint, MIDI UART,
+#       OSC UDP; untestable without hardware, same status as every other
+#       device-only file here, but no longer TODO stubs)
 #   F6: the Lua/Fennel live-coding layer (see README_LUA_FENNEL.md), plus
 #       live_control.cpp/control_queue*.cpp pulled forward from F4: cues
 #       need a real ShowController, and ShowController needs a real
 #       LiveControl + control-event queue feeding it for Lua, the web
 #       console, and MIDI/OSC to converge on the same controller (see
-#       main.cpp). Only the actual transports (web httpd, MIDI UART, OSC
-#       UDP) remain TODO stubs — the queue, the pump, and the wiring
-#       contract are real and reachable from main.cpp now.
+#       main.cpp).
 
 set(GLOW_ROOT ${CMAKE_CURRENT_LIST_DIR}/../../..)
 
@@ -63,13 +62,11 @@ idf_component_register(
         ${GLOW_ROOT}/lua_effect.cpp
         ${GLOW_ROOT}/glow_fennel.cpp
         ${GLOW_ROOT}/eval_queue.cpp
-        # device-only eval-queue backend (#ifdef ESP_PLATFORM guarded; TODO
-        # stub, same status as control_queue_freertos.cpp — see its header)
+        # device-only eval-queue backend (#ifdef ESP_PLATFORM guarded),
+        # same status as control_queue_freertos.cpp — see its header)
         ${GLOW_ROOT}/eval_queue_freertos.cpp
         # scripts partition (LittleFS): host-tested scriptNameIsValid +
-        # device-only mount/read/save (#ifdef ESP_PLATFORM guarded; TODO
-        # stub -- same status as storage_manager.cpp's raw-partition read
-        # was before F3 hardware validation)
+        # device-only mount/read/save (#ifdef ESP_PLATFORM guarded)
         ${GLOW_ROOT}/scripts_storage.cpp
         # pulled forward from F4: LiveControl + the control-event queue,
         # so glow.cue.*/the web console/MIDI/OSC all drive one
@@ -77,15 +74,15 @@ idf_component_register(
         ${GLOW_ROOT}/live_control.cpp
         ${GLOW_ROOT}/control_queue.cpp
         # device-only FreeRTOS queue backend (#ifdef ESP_PLATFORM guarded;
-        # TODO stub -- see control_queue_freertos.cpp's header)
+        # see control_queue_freertos.cpp's header)
         ${GLOW_ROOT}/control_queue_freertos.cpp
         # F4: the testable protocol/parser cores (no ESP-IDF dependency —
         # these already build and run under `make test`)
         ${GLOW_ROOT}/web_protocol.cpp
         ${GLOW_ROOT}/osc_parser.cpp
         # F4: the device-only transports that call the above (#ifdef
-        # ESP_PLATFORM guarded; see each file's own header for what's real
-        # vs still-TODO hardware wiring)
+        # ESP_PLATFORM guarded; see each file's own header for the real
+        # esp_http_server/UART/UDP wiring)
         ${GLOW_ROOT}/web_input.cpp
         ${GLOW_ROOT}/midi_input.cpp
         ${GLOW_ROOT}/osc_input.cpp

@@ -8,11 +8,12 @@
 // a boot.fnl evaluated at startup so a live-coded show survives reboot.
 //
 // Mounting a filesystem, reading directory entries, and writing files are
-// all real hardware/flash-driver behavior this environment cannot
-// exercise (same reasoning as web_input.cpp / midi_input.cpp /
-// osc_input.cpp's still-TODO transports) — the bodies here are stubs
-// documenting the intended shape. The contract each stub must satisfy
-// when implemented is written out below precisely so filling them in is
+// all real hardware/flash-driver behavior this environment cannot exercise
+// (same reasoning as web_input.cpp / midi_input.cpp / osc_input.cpp's
+// device transports) — scripts_storage.cpp implements the real esp_littlefs
+// calls, but none of it can be verified without real hardware. The
+// contract each function must satisfy is written out below precisely so
+// verifying the implementation against it (once hardware is available) is
 // mechanical.
 #pragma once
 

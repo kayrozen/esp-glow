@@ -56,6 +56,10 @@
 #include "lua_vm.h"  // complete LuaVM type -- glow_fennel.h only forward-declares it (glowLuaVM().gcStepSlack(...) needs the full definition)
 #include "scripts_storage.h"
 #include "web_input.h"
+#include "web_protocol.h"  // buildEvalResultJson (send_eval_result_to_ws)
+#include "midi_input.h"
+#include "osc_input.h"
+#include "freertos/task.h"  // xTaskCreatePinnedToCore (midi_uart_task/osc_server_task)
 
 // The vendored Fennel compiler, embedded via EMBED_FILES (see
 // firmware/main/CMakeLists.txt). ESP-IDF's convention: a file's basename
@@ -124,14 +128,40 @@ static ShowController g_controller;
 // never directly from a transport task (see control_queue.h's rationale).
 static LiveControl g_liveControl(g_controller);
 
-// F4 (pulled forward): the control-event queue itself. The actual
-// transports (web httpd, MIDI UART, OSC UDP) that would push into this are
-// still TODO stubs (web_input.cpp, midi_input.cpp, osc_input.cpp), and so
-// is the FreeRTOS queue this factory returns (control_queue_freertos.cpp)
-// -- pop() always reports empty until that's filled in. But the consumer
-// side (this pointer + the pumpControlEvents call in on_pre_render) is
-// real now, so wiring up a transport later is purely additive.
+// F4 (pulled forward): the control-event queue itself. Real transports
+// (web httpd, MIDI UART, OSC UDP -- web_input.cpp, midi_input.cpp,
+// osc_input.cpp) push into this via the FreeRTOS-backed queue this
+// factory returns (control_queue_freertos.cpp); the render task drains it
+// via pumpControlEvents in on_pre_render.
 static IControlEventQueue* g_controlQueue = nullptr;
+
+// F4: the eval submission queue, mirroring g_controlQueue exactly --
+// web_input.cpp's WS handler pushes eval requests here; the render task
+// drains it (glow::pumpEvalSubmissions in on_pre_render) and broadcasts
+// each result (send_eval_result_to_ws).
+static IEvalSubmissionQueue* g_evalQueue = nullptr;
+
+// F4: demo cue metadata for the web console + the MIDI/OSC binding table
+// -- intentionally minimal (one togglable cue, one master fader), matching
+// README_WEB_CONSOLE.md's documented setup pattern. Only populated when
+// setup_hardcoded_fallback() runs (no "show" bundle): a bundle-loaded show
+// has no cue metadata to expose yet -- applyLoadedShow patches fixtures
+// directly, it doesn't wrap them in cues -- so richer per-bundle cue/scene
+// metadata for the console is a natural follow-up, not solved here.
+static WebCueInfo g_wsCues[1];
+static size_t     g_nWsCues = 0;
+static uint16_t   g_demoShowCueId = 0;  // ShowController cue id (isActive() takes this)
+static bool       g_hasDemoCue = false;
+
+// Same controlId (0) is bound across web/MIDI/OSC -- one LiveControl
+// binding serves all three transports, since parseWebCommand/parseMidi/
+// parseOsc all just produce a ControlEvent{type, id, ...} fed through the
+// same LiveControl::handle regardless of which transport produced it.
+static const OscBinding g_oscBindings[] = {
+  {"/cue/0",   ControlType::Button, 0},
+  {"/fader/0", ControlType::Fader,  0},
+};
+static const OscAddressMap g_oscMap{g_oscBindings, 2};
 
 // Matrix driver: owns the PixelMatrix + pattern objects built from the bundle
 // (or the hardcoded fallback). The pre_render hook iterates this list.
@@ -158,6 +188,10 @@ public:
   }
 };
 
+// Forward declaration: defined below (near send_fx_error_to_ws), used here
+// as pumpEvalSubmissions's per-result callback.
+static void send_eval_result_to_ws(void* ctx, uint32_t requestId, bool ok, const char* err);
+
 static void on_pre_render(void* /*ctx*/, float t, Show* show) {
   if (!show) return;
 
@@ -168,6 +202,14 @@ static void on_pre_render(void* /*ctx*/, float t, Show* show) {
   // input a frame late every frame, not just occasionally.
   if (g_controlQueue) {
     pumpControlEvents(*g_controlQueue, g_liveControl, t);
+  }
+
+  // F4: same discipline for the eval channel -- bounded work per frame,
+  // each result broadcast to every connected console (see
+  // send_eval_result_to_ws; no submission carries a client fd to reply to
+  // directly, so broadcast + client-side seq matching is the only option).
+  if (g_evalQueue) {
+    glow::pumpEvalSubmissions(*g_evalQueue, /*maxPerFrame=*/4, send_eval_result_to_ws, nullptr);
   }
 
   for (PixelMatrix* m : g_md.matrices) {
@@ -198,16 +240,45 @@ static MainMatrixRegistry g_matrixRegistry;
 // correct behavior, not an oversight: there is nothing to collect.
 static bool g_luaReady = false;
 
-// Fx-error broadcast: the real WS httpd (web_server_task, still `// TODO`
-// in web_input.cpp) doesn't exist yet, so there is no client list to push
-// to. Log it instead so a Lua effect throwing mid-show is at least visible
-// on the serial console rather than silently disabled -- swap this for a
-// real broadcast once web_server_task tracks connected clients.
+// Fx-error broadcast: every connected client sees it (any of them may be
+// running the live REPL waiting to know an effect just died).
 static void send_fx_error_to_ws(void* /*ctx*/, const char* json, size_t len) {
-  ESP_LOGW(TAG, "fx_error: %.*s", (int)len, json);
+  web_ws_broadcast(json, len);
+}
+
+// Eval-result broadcast: EvalSubmission carries no client fd (see
+// eval_queue.h), so every connected client gets the result and matches it
+// against its own pending request by `seq` -- the same broadcast-then-
+// client-side-match pattern as fx_error.
+static void send_eval_result_to_ws(void* /*ctx*/, uint32_t requestId, bool ok, const char* err) {
+  static char buf[512];
+  size_t n = buildEvalResultJson(requestId, ok, err, buf, sizeof(buf));
+  web_ws_broadcast(buf, n);
+}
+
+// Periodic `state` broadcast (Phase-4 feedback, web_protocol.h): lets every
+// connected console reflect the demo cue's actual on/off state even when
+// it was toggled from a different client, MIDI, or OSC. This is a UI
+// indicator, not a control path, so a once-a-second cadence (see the frame
+// counter in on_post_render) is plenty.
+static void send_state_to_ws() {
+  if (!g_hasDemoCue) return;
+  uint16_t activeId = g_wsCues[0].id;
+  bool active = g_controller.isActive(g_demoShowCueId);
+  static char buf[128];
+  size_t n = web_input_build_state(active ? &activeId : nullptr, active ? 1 : 0, buf, sizeof(buf));
+  web_ws_broadcast(buf, n);
 }
 
 static void on_post_render(void* /*ctx*/, uint32_t slack_us) {
+  // State doesn't touch the Lua VM, so this runs regardless of g_luaReady
+  // -- a broken boot.fnl shouldn't also take down cue-state feedback.
+  static uint32_t frameCounter = 0;
+  if (++frameCounter >= 44) {  // ~once/sec at the render task's 44 Hz
+    frameCounter = 0;
+    send_state_to_ws();
+  }
+
   if (!g_luaReady) return;
 
   // Poll every frame, independent of slack: an effect that just threw
@@ -220,9 +291,9 @@ static void on_post_render(void* /*ctx*/, uint32_t slack_us) {
 
 // F6: initialize the single process-wide Lua VM, install glow.*, load the
 // vendored Fennel compiler, and evaluate boot.fnl if the "scripts"
-// partition has one. A missing/corrupt boot.fnl (or no "scripts"
-// partition mounted yet -- scripts_storage_mount is still a TODO stub;
-// see its header) is not fatal: boot.fnl only ever ADDS Lua-defined cues
+// partition has one. A missing/corrupt boot.fnl (or a "scripts" partition
+// that fails to mount -- see scripts_storage_mount) is not fatal: boot.fnl
+// only ever ADDS Lua-defined cues
 // on top of whatever setup_show_from_bundle/setup_hardcoded_fallback
 // already patched, so skipping it just means no Lua-driven cue goes
 // active -- the base show still renders. This is this phase's version of
@@ -290,6 +361,22 @@ static void setup_hardcoded_fallback() {
   static DimmerEffect fx(std::vector<uint16_t>{ids[0]}, 0.5f);
   uint16_t cueId = g_controller.addCue({&fx}, /*fadeInSec=*/0.0f, /*fadeOutSec=*/0.0f, /*priority=*/0);
   g_controller.go(cueId, 0.0f);
+
+  // F4: expose this cue to the web console/MIDI/OSC as controlId 0 (see
+  // the g_wsCues/g_oscBindings comment above). It stays on by default
+  // (go() above); the binding just makes it possible to turn it back off
+  // from a client instead of being permanently stuck on. bindFader(Master)
+  // is wired for protocol completeness (hasMaster=true in web_input_init
+  // below) -- LiveControl::masterLevel() isn't consumed by the render
+  // pipeline yet (a pre-existing gap, not F4's to close), so moving that
+  // fader has no visible brightness effect until that's wired up
+  // separately.
+  g_liveControl.bindButton(0, ActionKind::CueToggle, cueId);
+  g_liveControl.bindFader(0, ActionKind::Master);
+  g_wsCues[0] = { /*id=*/0, "Dimmer", "#ffaa00", ActionKind::CueToggle };
+  g_nWsCues = 1;
+  g_demoShowCueId = cueId;
+  g_hasDemoCue = true;
 
   MatrixMap mm = {};
   mm.width = 16; mm.height = 8; mm.serpentine = true; mm.vertical = false;
@@ -406,6 +493,9 @@ extern "C" void app_main(void) {
   // control_queue.h's own guidance. ---
   g_controlQueue = createDeviceControlEventQueue(64);
 
+  // --- F4: eval submission queue, same sizing rationale as g_controlQueue ---
+  g_evalQueue = createDeviceEvalSubmissionQueue(64);
+
   // --- F6: Lua/Fennel VM + boot.fnl (see setup_lua's comment) ---
   setup_lua();
 
@@ -427,6 +517,25 @@ extern "C" void app_main(void) {
     return;
   }
   led_status_set(LED_BLINK_FAST);
+
+  // --- F4: web console (WS httpd + console static files) + MIDI + OSC ---
+  // Bindings (g_liveControl.bindButton/bindFader above, in
+  // setup_hardcoded_fallback) are already in place before any of these
+  // start -- "configured once, before tasks start, and never mutated" is
+  // what makes transport-side binding reads race-free.
+  web_input_init(*g_controlQueue, *g_evalQueue,
+                 g_nWsCues ? g_wsCues : nullptr, g_nWsCues,
+                 /*scenes=*/nullptr, /*nScenes=*/0,
+                 /*hasMaster=*/true);
+  web_server_task(nullptr);  // starts httpd; not a FreeRTOS task itself (see web_input.h)
+
+  midi_input_init(*g_controlQueue, CONFIG_GLOW_MIDI_UART_NUM, CONFIG_GLOW_MIDI_RX_GPIO);
+  xTaskCreatePinnedToCore(midi_uart_task, "midi", 4096 / sizeof(StackType_t),
+                          nullptr, 5, nullptr, 0);
+
+  osc_input_init(*g_controlQueue, g_oscMap, static_cast<uint16_t>(CONFIG_GLOW_OSC_UDP_PORT));
+  xTaskCreatePinnedToCore(osc_server_task, "osc", 4096 / sizeof(StackType_t),
+                          nullptr, 5, nullptr, 0);
 
   ESP_LOGI(TAG, "F3 complete: show is %s.",
            from_bundle ? "loaded from the 'show' partition" : "hardcoded fallback");

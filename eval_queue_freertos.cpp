@@ -2,12 +2,11 @@
 
 //
 // FreeRTOS-backed eval submission queue (device only). Mirrors
-// control_queue_freertos.cpp exactly, including its TODO status: the real
-// httpd WS server this would sit behind (web_input.cpp) is itself still a
-// stub, so this is wired the same way and for the same reason — it cannot
-// be verified without hardware. See control_queue_freertos.cpp for the
-// full rationale (FreeRTOS, not hand-rolled atomics, handles cross-core
-// memory ordering correctly).
+// control_queue_freertos.cpp exactly -- same FreeRTOS-queue backing, same
+// reasoning (not hand-rolled atomics; FreeRTOS handles cross-core memory
+// ordering correctly). See control_queue_freertos.cpp for the full
+// rationale. Untestable without real hardware, same status as every other
+// device-only file in this component.
 //
 // Excluded from the host build — never in the Makefile's SOURCE lists.
 // The host uses RingEvalSubmissionQueue (eval_queue.cpp).
