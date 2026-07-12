@@ -73,6 +73,15 @@ private:
   size_t dropped_ = 0;
 };
 
+#ifdef ESP_PLATFORM
+// Device-only factory: returns a FreeRTOS-queue-backed IControlEventQueue
+// (FreeRtosControlEventQueue, defined in control_queue_freertos.cpp).
+// Owned by the caller (delete when done). The class itself stays private
+// to that .cpp; this is the only way to construct one, matching
+// RingControlEventQueue's public constructor on the host side.
+IControlEventQueue* createDeviceControlEventQueue(size_t capacity);
+#endif
+
 //
 // Drain pending events and dispatch each via live.handle(ev, t).
 // Bounds work per frame so a flood cannot stall the 44 Hz render loop;

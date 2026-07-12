@@ -4,7 +4,16 @@
 //   1. read esp_timer_get_time() (monotonic us)
 //   2. glow::paceNextFrame() -> (nowSec, sleepUs, nextDeadline)  [host-tested]
 //   3. show->renderFrame(nowSec)
-//   4. vTaskDelay(sleepUs) — 0 if behind, so we immediately re-loop
+//   4. post_render(remaining slack) — F6: the Lua VM's only chance to run
+//      bounded GC steps (see render_task.h). The clock is re-read after
+//      this call, specifically because step 4 can take a variable, non-
+//      negligible slice of the slack: computing the sleep from the STALE
+//      pre-hook `sleepUs` would double-count that time on top of the
+//      hook's own work and slow the render rate whenever the GC actually
+//      has work to do. Re-measuring keeps the frame's deadline authoritative
+//      regardless of how much of step 4 actually ran.
+//   5. vTaskDelay(remaining) — 0 if behind (or no slack left), so we
+//      immediately re-loop
 //
 // Pinned to core 1; WiFi/lwIP live on core 0 (sdkconfig) so DMX timing on
 // core 1 is never preempted by network work.
@@ -22,11 +31,14 @@ static uint32_t     s_periodUs = 0;
 static volatile bool s_behind = false;
 static render_pre_render_fn s_pre_render = nullptr;
 static void*               s_pre_render_ctx = nullptr;
+static render_post_render_fn s_post_render = nullptr;
+static void*                 s_post_render_ctx = nullptr;
 
 static void render_loop(void*) {
-  ESP_LOGI(TAG, "render loop started on core %d (period=%lu us%s)",
+  ESP_LOGI(TAG, "render loop started on core %d (period=%lu us%s%s)",
            xPortGetCoreID(), (unsigned long)s_periodUs,
-           s_pre_render ? ", pre_render=on" : "");
+           s_pre_render ? ", pre_render=on" : "",
+           s_post_render ? ", post_render=on" : "");
 
   uint64_t prevDeadline = 0;  // 0 => paceNextFrame seeds from nowUs
   uint32_t frames = 0;
@@ -45,14 +57,25 @@ static void render_loop(void*) {
       s_show->renderFrame(r.nowSec);
     }
 
-    if (r.behind) {
-      behindCount++;
+    // F6: spend whatever slack is actually left (not the pre-render
+    // estimate) on bounded GC work, then re-measure before deciding how
+    // long to sleep -- see the file header comment for why.
+    uint64_t afterRender = esp_timer_get_time();
+    int64_t slackUs = r.behind ? 0 : (int64_t)r.nextDeadlineUs - (int64_t)afterRender;
+    if (slackUs < 0) slackUs = 0;
+    if (s_post_render) s_post_render(s_post_render_ctx, (uint32_t)slackUs);
+
+    uint64_t afterPostRender = esp_timer_get_time();
+    int64_t sleepUs = (int64_t)r.nextDeadlineUs - (int64_t)afterPostRender;
+
+    if (r.behind || sleepUs <= 0) {
+      if (r.behind) behindCount++;
       // No sleep: go again immediately. paceNextFrame already rebased the
       // deadline so we won't cascade.
       taskYIELD();
-    } else if (r.sleepUs > 0) {
+    } else {
       // vTaskDelay expects ticks; use pdMS_TO_TICKS but round up to >=1 tick.
-      uint32_t ms = (r.sleepUs + 999) / 1000;
+      uint32_t ms = (uint32_t)((sleepUs + 999) / 1000);
       if (ms == 0) ms = 1;
       vTaskDelay(pdMS_TO_TICKS(ms));
     }
@@ -75,6 +98,8 @@ bool render_task_start(const RenderTaskConfig* cfg) {
   s_show = cfg->show;
   s_pre_render = cfg->pre_render;
   s_pre_render_ctx = cfg->pre_render_ctx;
+  s_post_render = cfg->post_render;
+  s_post_render_ctx = cfg->post_render_ctx;
   uint32_t hz = cfg->targetHz ? cfg->targetHz : glow::DEFAULT_RENDER_HZ;
   s_periodUs = (hz == 0) ? glow::DEFAULT_RENDER_PERIOD_US : (1'000'000u / hz);
 

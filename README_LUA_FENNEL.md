@@ -240,9 +240,54 @@ Run everything:
 make test
 ```
 
+## `main.cpp` wiring
+
+Unlike a hardware transport, none of this needed real hardware to reason
+about correctly, so it's wired all the way through rather than left as a
+dangling capability:
+
+- **`g_controller` is `g_show`'s one and only effect**
+  (`g_show.addEffect(&g_controller)`). `ShowController` is itself an
+  `IEffect` — it does not sit beside `Show`, it plugs into it exactly like
+  any other effect, and it is what emits the resolved (fades, HTP/LTP)
+  intents `Show::renderFrame` consumes. `glow.cue.*`/`glow.scene.*`, the
+  web console, and MIDI/OSC all converge on this **one** instance via
+  `LiveControl` — there is no separate path that bypasses it. The old
+  hardcoded-fallback `DimmerEffect` (added straight to `g_show`, pre-F6)
+  has been rewired as a cue on `g_controller` for the same reason: an
+  effect added directly to `Show` runs permanently, outside every cue,
+  invisible and unstoppable from Lua or any console.
+- **`pumpControlEvents` runs every frame**, at the top of the existing
+  `pre_render` hook, before `renderFrame` — not after, and not
+  conditionally. `LiveControl`/the control-event queue were pulled
+  forward from F4 into `glow_core`'s `SRCS` for exactly this: a
+  `ShowController` with nothing feeding it isn't wired to anything.
+- **`gcStepSlack` runs every frame**, via a new `post_render` hook
+  (`render_task.h`) invoked after `renderFrame` with however much slack
+  is actually left before the next deadline. The render loop re-reads the
+  clock after this call before computing how long to sleep — computing
+  the sleep from the pre-hook estimate would double-count whatever time
+  GC just spent and slow the render rate the moment there's real garbage
+  to collect.
+
+What's still a stub, and correctly so — these need real hardware, not
+more C++:
+
+- The FreeRTOS backends themselves (`control_queue_freertos.cpp`,
+  `eval_queue_freertos.cpp`) — the queue *handles* aren't created yet
+  (`xQueueCreate` etc. are commented-out TODOs), so on device `pop()`
+  always reports empty today. The consumer side (this section) is real;
+  only the innermost `xQueueSend`/`xQueueReceive` calls remain.
+- The actual transports that would push into those queues: the web httpd
+  endpoint, MIDI UART, OSC UDP (`web_input.cpp`, `midi_input.cpp`,
+  `osc_input.cpp`).
+- LittleFS mount/read/write (`scripts_storage.cpp`'s device half), for
+  the same reason `storage_manager.cpp` was before F3's hardware
+  validation.
+
 ## What is HIL-only (cannot be verified in this environment)
 
-Everything above is exercised on the host with the real vendored Lua +
+Everything else is exercised on the host with the real vendored Lua +
 Fennel. What's left needs an actual ESP32-S3:
 
 - GC pacing under real frame-timing load; frame timing with scripts
@@ -252,14 +297,7 @@ Fennel. What's left needs an actual ESP32-S3:
 - Boot-from-`boot.fnl`, and the blackout fallback on a broken one.
 - `lua_mem` high-water-mark trend during a soak (the design's
   `GLOW-TEST: lua_mem=<bytes>` telemetry line).
-- The actual WS httpd endpoint carrying `eval` messages in
-  (`eval_queue_freertos.cpp` is a TODO stub, same status as
-  `control_queue_freertos.cpp` and `web_input.cpp`'s own httpd wiring —
-  none of F4's transports are wired into `main.cpp` yet either, so this
-  isn't a regression, just the same phase boundary).
-- LittleFS mount/read/write (`scripts_storage.cpp`'s device half is a
-  TODO stub for the same reason `storage_manager.cpp` was before F3's
-  hardware validation).
+- Everything in the "still a stub" list above, once hardware is involved.
 
 ## Out of scope (see the design doc)
 

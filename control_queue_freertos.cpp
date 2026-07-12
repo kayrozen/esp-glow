@@ -66,4 +66,12 @@ private:
   // QueueHandle_t handle_ = nullptr;
 };
 
+// See control_queue.h: the only way to construct one of these from outside
+// this file. Kept as a factory (rather than exposing the class itself in
+// the header) so main.cpp doesn't need to pull in FreeRTOS queue headers
+// just to hold a pointer.
+IControlEventQueue* createDeviceControlEventQueue(size_t capacity) {
+  return new FreeRtosControlEventQueue(capacity);
+}
+
 #endif  // ESP_PLATFORM
