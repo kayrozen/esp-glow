@@ -1,0 +1,10 @@
+# Component dependencies for glow_core.
+# Resolved by `idf.py` via the ESP Component Manager at build time.
+#
+# esp_dmx  — DMX driver for dmx_sink.cpp (F1+).
+# esp_wifi / lwip — implicit for artnet_sink.cpp UDP networking (F2+).
+dependencies:
+  idf: ">=5.1"
+  esp_dmx:
+    git: https://github.com/someweisguy/esp_dmx.git
+    version: "v3.1.0"
