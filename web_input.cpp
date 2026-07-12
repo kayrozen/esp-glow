@@ -200,21 +200,31 @@ WebInputAction web_input_handle_text_frame(const char* json, size_t len,
 
 // Called once per frame (render task frame slack, alongside
 // pumpControlEvents/pumpEvalSubmissions/gcStepSlack) to check for effects
-// that just broke. Returns true and fills buf/outLen with an `fx_error`
-// message if one is pending; the caller's contract is to broadcast it to
-// every connected client (not just one), since any of them may be running
-// the live REPL that needs to see it. Returns false (buf untouched) when
-// there is nothing new to report this frame.
-bool web_input_poll_fx_error(GlowLuaApi& api, char* buf, size_t bufLen, size_t* outLen) {
+// that just broke. GlowLuaApi::pollNewlyDisabledEffects marks EVERY
+// currently-disabled-and-unreported effect as reported in one call (see
+// its own header comment) -- so onFxError is invoked once per newly-
+// disabled effect found this poll, not just the first; a version of this
+// function that returned only one message per call and dropped the rest
+// would silently lose any effect that broke in the same frame as another
+// one (see test_fx_error_pipeline.cpp's two-effects-in-one-frame test,
+// which exists specifically to catch that regression). Same bounded-work-
+// via-callback idiom as glow::pumpEvalSubmissions/pumpControlEvents.
+//
+// `json`/`len` passed to onFxError is already a complete `fx_error`
+// message (web_protocol.h's buildFxErrorJson); the caller's contract is to
+// broadcast it to every connected client (not just one), since any of
+// them may be running the live REPL that needs to see it. Returns the
+// number of notifications delivered this call.
+using FxErrorReplyFn = void (*)(void* ctx, const char* json, size_t len);
+int web_input_poll_fx_error(GlowLuaApi& api, FxErrorReplyFn onFxError, void* ctx) {
   std::vector<std::pair<std::string, std::string>> notifications;
   api.pollNewlyDisabledEffects(notifications);
-  if (notifications.empty()) return false;
-  // Only the first is reported this frame; the rest wait for the next
-  // frame's poll rather than growing this function's stack usage or the
-  // message size unboundedly on a show that broke badly all at once.
-  *outLen = buildFxErrorJson(notifications[0].first.c_str(), notifications[0].second.c_str(),
-                             buf, bufLen);
-  return true;
+  for (const auto& n : notifications) {
+    char buf[512];
+    size_t len = buildFxErrorJson(n.first.c_str(), n.second.c_str(), buf, sizeof(buf));
+    onFxError(ctx, buf, len);
+  }
+  return (int)notifications.size();
 }
 
 // --- WebSocket server task (hardware-specific, scaffold only) -------------
@@ -246,8 +256,17 @@ void web_server_task() {
   // active-cue set changes; the controller already knows this set.
   //
   // The render task's frame-slack hook should also call
-  // web_input_poll_fx_error(glow::glowLuaApi(), ...) once per frame and,
-  // if it returns true, broadcast the result to every connected client.
+  // web_input_poll_fx_error(glow::glowLuaApi(), onFxError, ctx) once per
+  // frame, where onFxError broadcasts each (json, len) it's given to every
+  // connected client -- e.g.:
+  //
+  //   web_input_poll_fx_error(glow::glowLuaApi(),
+  //     [](void*, const char* json, size_t len) {
+  //       for (auto& client : g_wsClients) httpd_ws_send_frame_async(g_server, client, json, len, TEXT);
+  //     }, nullptr);
+  //
+  // It may call onFxError more than once per poll (one broken effect per
+  // call) -- see its own header comment for why.
   //
   // The static files for the console bundle (index.html, app.js,
   // styles.css, vendor/) are embedded into the app binary via EMBED_FILES
