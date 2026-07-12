@@ -91,6 +91,29 @@ idf_component_register(
         ${GLOW_ROOT}/third_party/lua
     REQUIRES esp_dmx esp_wifi lwip lua
     PRIV_REQUIRES littlefs esp_http_server driver
+    EMBED_FILES
+        # The console bundle web_input.cpp's static_file_handler serves
+        # (see its kStaticFiles table) -- EMBED_FILES has to live in
+        # *this* component because the _binary_..._start/_end symbols it
+        # generates are extern "C" globals in whichever object file
+        # embeds them; web_input.cpp is the one declaring/using them, and
+        # putting the EMBED_FILES that produce them in a different
+        # component (main) than the one consuming them isn't reliable --
+        # main REQUIRES glow_core, not the other way around, so nothing
+        # guarantees main's archive gets pulled into the link before
+        # glow_core's object file's reference is resolved. Symbol naming:
+        # EMBED_FILES foo/ws-client.js -> _binary_ws_client_js_start/_end
+        # (path dropped, non-alnum chars in the basename -> '_').
+        ${GLOW_ROOT}/firmware/main/data/console/index.html
+        ${GLOW_ROOT}/firmware/main/data/console/app.js
+        ${GLOW_ROOT}/firmware/main/data/console/styles.css
+        ${GLOW_ROOT}/firmware/main/data/console/ws-client.js
+        ${GLOW_ROOT}/firmware/main/data/console/script-panel.js
+        ${GLOW_ROOT}/firmware/main/data/console/shared/fennel-editor.js
+        ${GLOW_ROOT}/firmware/main/data/console/vendor/preact.mjs
+        ${GLOW_ROOT}/firmware/main/data/console/vendor/preact-hooks.mjs
+        ${GLOW_ROOT}/firmware/main/data/console/vendor/htm.mjs
+        ${GLOW_ROOT}/firmware/main/data/console/vendor/editor-bundle.mjs
 )
 
 # Match the host build flags: no exceptions, no RTTI, full warnings.
