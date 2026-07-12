@@ -1,8 +1,12 @@
 # Managed-component dependencies for firmware/main.
 # Resolved by `idf.py` via the ESP Component Manager at build time.
 #
-# espressif/esp_dmx  — DMX driver used by dmx_sink.cpp (F1+).
+# esp_dmx  — DMX driver from someweisguy/esp_dmx, fetched via git (not in registry).
+#            Pinned to v3.1.0 (API matches dmx_sink.cpp; v4+ changed signatures).
 # joltwallet/littlefs — LittleFS port for loading the SHW1 bundle (F3+).
 dependencies:
-  espressif/esp_dmx: "^3.1.0"
+  idf: ">=5.1"
+  esp_dmx:
+    git: https://github.com/someweisguy/esp_dmx.git
+    version: "v3.1.0"
   joltwallet/littlefs: "^1.14.0"
