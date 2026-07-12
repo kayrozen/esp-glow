@@ -59,5 +59,5 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wall
     -Wextra
     -Werror
-    -std=c++17
+    -std=gnu++17
 )
