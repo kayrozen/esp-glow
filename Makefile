@@ -29,7 +29,7 @@ LUA_C_OBJECTS = $(LUA_C_SOURCES:.c=.o)
 GLOW_LUA_SOURCES = lua_vm.cpp glow_lua_api.cpp lua_effect.cpp glow_fennel.cpp eval_queue.cpp \
                    vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp show.cpp \
                    oscillator.cpp color.cpp effects.cpp show_control.cpp pixel_matrix.cpp \
-                   pixel_patterns.cpp
+                   pixel_patterns.cpp beat_clock.cpp
 
 # --- test_aim: aim/vec_math geometry tests ---
 AIM_SOURCES = vec_math.cpp aim.cpp test_aim.cpp
@@ -232,6 +232,51 @@ APPLY_TARGET  = test_apply_loaded_show
 $(APPLY_TARGET): $(APPLY_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(APPLY_OBJECTS) -o $(APPLY_TARGET) -lm
 
+# --- test_beat_clock: musical-time PLL beat clock (host-tested; see
+# beat_clock.h's header for why this is the load-bearing test in the
+# musical-time feature -- jitter rejection and monotonicity in particular).
+BEAT_CLOCK_SOURCES = beat_clock.cpp test_beat_clock.cpp
+BEAT_CLOCK_OBJECTS = $(BEAT_CLOCK_SOURCES:.cpp=.o)
+BEAT_CLOCK_TARGET  = test_beat_clock
+$(BEAT_CLOCK_TARGET): $(BEAT_CLOCK_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(BEAT_CLOCK_OBJECTS) -o $(BEAT_CLOCK_TARGET) -lm
+
+# --- test_djlink_parser: passive Pro DJ Link packet parsing (Beat packets
+# + the CDJ status packet's tempo-master flag). Byte offsets verified
+# against Deep Symmetry's dysentery protocol analysis -- see
+# djlink_parser.h's header.
+DJLINK_PARSER_SOURCES = djlink_parser.cpp test_djlink_parser.cpp
+DJLINK_PARSER_OBJECTS = $(DJLINK_PARSER_SOURCES:.cpp=.o)
+DJLINK_PARSER_TARGET  = test_djlink_parser
+$(DJLINK_PARSER_TARGET): $(DJLINK_PARSER_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(DJLINK_PARSER_OBJECTS) -o $(DJLINK_PARSER_TARGET) -lm
+
+# --- test_djlink_master_tracker: the small bounded "who is tempo master"
+# table the DJ-Link transport gates beat packets through.
+DJLINK_MASTER_SOURCES = djlink_master_tracker.cpp test_djlink_master_tracker.cpp
+DJLINK_MASTER_OBJECTS = $(DJLINK_MASTER_SOURCES:.cpp=.o)
+DJLINK_MASTER_TARGET  = test_djlink_master_tracker
+$(DJLINK_MASTER_TARGET): $(DJLINK_MASTER_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(DJLINK_MASTER_OBJECTS) -o $(DJLINK_MASTER_TARGET) -lm
+
+# --- test_midi_realtime: the MIDI realtime-byte-interleaving fix (host-
+# tested pure state machine; see midi_realtime.h's header for why this is
+# split out of the device-only midi_input.cpp).
+MIDI_REALTIME_SOURCES = midi_realtime.cpp test_midi_realtime.cpp
+MIDI_REALTIME_OBJECTS = $(MIDI_REALTIME_SOURCES:.cpp=.o)
+MIDI_REALTIME_TARGET  = test_midi_realtime
+$(MIDI_REALTIME_TARGET): $(MIDI_REALTIME_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(MIDI_REALTIME_OBJECTS) -o $(MIDI_REALTIME_TARGET) -lm
+
+# --- test_beat_queue: BeatEvent queue (TSan build), mirrors
+# test_control_queue exactly -- see its own comment for why TSan gets its
+# own compile line instead of reusing CXXFLAGS's ASan+UBSan.
+BEAT_QUEUE_CXXFLAGS = -std=c++17 -Wall -Wextra -Werror -fsanitize=thread -g
+BEAT_QUEUE_SOURCES = beat_clock.cpp beat_queue.cpp test_beat_queue.cpp
+BEAT_QUEUE_TARGET  = test_beat_queue
+$(BEAT_QUEUE_TARGET): $(BEAT_QUEUE_SOURCES)
+	$(CXX) $(BEAT_QUEUE_CXXFLAGS) $(BEAT_QUEUE_SOURCES) -o $(BEAT_QUEUE_TARGET) -lm -pthread
+
 # --- test_safe_blackout: F5 safe-blackout core (host-tested) ---
 SAFE_BLACKOUT_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp show.cpp \
                         show_control.cpp safe_blackout.cpp test_safe_blackout.cpp
@@ -240,7 +285,7 @@ SAFE_BLACKOUT_TARGET  = test_safe_blackout
 $(SAFE_BLACKOUT_TARGET): $(SAFE_BLACKOUT_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(SAFE_BLACKOUT_OBJECTS) -o $(SAFE_BLACKOUT_TARGET) -lm
 
-test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET) $(LIVE_CONTROL_TARGET) $(WEB_PROTOCOL_TARGET) $(CONTROL_QUEUE_TARGET) $(PACING_TARGET) $(APPLY_TARGET) $(LUA_VM_TARGET) $(LUA_EFFECT_TARGET) $(GLOW_LUA_API_TARGET) $(GLOW_FENNEL_TARGET) $(SCRIPTS_STORAGE_TARGET) $(FX_ERROR_PIPELINE_TARGET) $(OSC_PARSER_TARGET) $(LITTLEFS_IMAGE_TARGET) $(SAFE_BLACKOUT_TARGET)
+test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET) $(LIVE_CONTROL_TARGET) $(WEB_PROTOCOL_TARGET) $(CONTROL_QUEUE_TARGET) $(PACING_TARGET) $(APPLY_TARGET) $(LUA_VM_TARGET) $(LUA_EFFECT_TARGET) $(GLOW_LUA_API_TARGET) $(GLOW_FENNEL_TARGET) $(SCRIPTS_STORAGE_TARGET) $(FX_ERROR_PIPELINE_TARGET) $(OSC_PARSER_TARGET) $(LITTLEFS_IMAGE_TARGET) $(BEAT_CLOCK_TARGET) $(BEAT_QUEUE_TARGET) $(MIDI_REALTIME_TARGET) $(DJLINK_PARSER_TARGET) $(DJLINK_MASTER_TARGET) $(SAFE_BLACKOUT_TARGET)
 	./$(AIM_TARGET)
 	./$(FP_TARGET)
 	./$(SHOW_TARGET)
@@ -261,6 +306,11 @@ test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL
 	./$(FX_ERROR_PIPELINE_TARGET)
 	./$(OSC_PARSER_TARGET)
 	./$(LITTLEFS_IMAGE_TARGET)
+	./$(BEAT_CLOCK_TARGET)
+	./$(BEAT_QUEUE_TARGET)
+	./$(MIDI_REALTIME_TARGET)
+	./$(DJLINK_PARSER_TARGET)
+	./$(DJLINK_MASTER_TARGET)
 	./$(SAFE_BLACKOUT_TARGET)
 
 # Clean build artifacts
@@ -279,6 +329,11 @@ clean:
 	      $(FX_ERROR_PIPELINE_OBJECTS) $(FX_ERROR_PIPELINE_TARGET) \
 	      $(OSC_PARSER_OBJECTS) $(OSC_PARSER_TARGET) \
 	      $(LITTLEFS_IMAGE_TARGET) \
+	      $(BEAT_CLOCK_OBJECTS) $(BEAT_CLOCK_TARGET) \
+	      $(BEAT_QUEUE_TARGET) \
+	      $(MIDI_REALTIME_OBJECTS) $(MIDI_REALTIME_TARGET) \
+	      $(DJLINK_PARSER_OBJECTS) $(DJLINK_PARSER_TARGET) \
+	      $(DJLINK_MASTER_OBJECTS) $(DJLINK_MASTER_TARGET) \
 	      $(SAFE_BLACKOUT_OBJECTS) $(SAFE_BLACKOUT_TARGET) \
 	      $(LUA_C_OBJECTS)
 

@@ -42,9 +42,10 @@ std::string readFennelSource() {
 struct Harness {
   ShowController show;
   glow::LuaVM vm;
+  glow::BeatClock beatClock;
   GlowLuaApi api;
 
-  explicit Harness(const std::string& fennelSrc) : vm(), api(vm, show, nullptr) {
+  explicit Harness(const std::string& fennelSrc) : vm(), api(vm, show, nullptr, beatClock) {
     api.install();
     char err[256];
     bool ok = vm.loadFennelCompiler(fennelSrc.data(), fennelSrc.size(), err, sizeof(err));

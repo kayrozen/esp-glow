@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "beat_clock.h"  // glow::BeatClock
 #include "lua_glow_include.h"
 #include "show.h"  // IEffect, CapIntent, AimIntent
 
@@ -40,13 +41,20 @@ public:
 //                                    returns opaque handles usable in
 //                                    cue.define's :effects list
 //   glow.matrix.pattern/brightness — wraps PixelMatrix via IMatrixRegistry
+//   glow.beat/bar/beat-number/bpm/locked?/tap — musical time, reads/drives
+//                                    the render task's one BeatClock
 //
 // One instance per LuaVM (see lua_vm.h — there is exactly one VM, owned by
 // the render task; see control_queue.h's rationale, which this reuses).
 class GlowLuaApi {
 public:
-  // matrices may be nullptr if this device has no pixel matrices.
-  GlowLuaApi(glow::LuaVM& vm, ShowController& show, IMatrixRegistry* matrices);
+  // matrices may be nullptr if this device has no pixel matrices. beatClock
+  // is never optional -- unlike pixel matrices, every device has SOME
+  // musical clock (a default-constructed glow::BeatClock free-runs at a
+  // sane BPM with zero external input; see beat_clock.h), so there is no
+  // "no musical time on this device" case to model with a null pointer.
+  GlowLuaApi(glow::LuaVM& vm, ShowController& show, IMatrixRegistry* matrices,
+            glow::BeatClock& beatClock);
   ~GlowLuaApi();
 
   GlowLuaApi(const GlowLuaApi&) = delete;
@@ -103,6 +111,12 @@ private:
   static int l_fx_sweep(lua_State* L);
   static int l_matrix_pattern(lua_State* L);
   static int l_matrix_brightness(lua_State* L);
+  static int l_beat_phase(lua_State* L);
+  static int l_bar_phase(lua_State* L);
+  static int l_beat_number(lua_State* L);
+  static int l_bpm(lua_State* L);
+  static int l_locked(lua_State* L);
+  static int l_tap(lua_State* L);
 
   static GlowLuaApi& self(lua_State* L);
 
@@ -126,6 +140,7 @@ private:
   glow::LuaVM& vm_;
   ShowController& show_;
   IMatrixRegistry* matrices_;
+  glow::BeatClock& beatClock_;
 
   float currentT_ = 0.0f;
   std::vector<CapIntent>* frameCaps_ = nullptr;

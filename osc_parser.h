@@ -50,3 +50,36 @@ struct OscAddressMap {
 // binding yields {value = arg} (int32 args are normalized to 0..1 by
 // dividing by 127, matching parseMidi's controller-value convention).
 bool parseOsc(const uint8_t* pkt, size_t len, const OscAddressMap& map, ControlEvent& out);
+
+//
+// OSC bundles — minimal support (low priority; see design doc's T6).
+// Bundles give atomic multi-message delivery; timetags give scheduled
+// execution. Neither is load-bearing for lighting control (most OSC
+// senders just send plain messages), so this deliberately does NOT build
+// a scheduler: every contained message is dispatched immediately,
+// regardless of its bundle's timetag, as if it said "now" -- exactly the
+// scope the design doc calls for.
+//
+// Wire layout (OSC 1.0): the 8-byte ASCII marker "#bundle\0", an 8-byte
+// NTP timetag (ignored), then zero or more elements, each a 4-byte
+// big-endian size prefix followed by that many bytes -- either a plain
+// OSC message or a nested bundle (bundles can contain bundles).
+//
+
+// True if `pkt` starts with the OSC bundle marker "#bundle\0".
+bool isOscBundle(const uint8_t* pkt, size_t len);
+
+// Called once per successfully-parsed, address-matched message found
+// while walking a packet (see parseOscPacket).
+using OscEventFn = void (*)(void* ctx, const ControlEvent& ev);
+
+// Parses one OSC packet that may be either a single message OR a bundle
+// (arbitrarily nested) containing multiple messages, calling onEvent for
+// each match it finds, in wire order. A plain (non-bundle) packet is
+// handled the same as calling parseOsc once. Malformed bundle framing
+// (a size prefix that would run past the buffer, or excessive nesting)
+// stops walking the rest of that bundle rather than reading out of
+// bounds; whatever was already dispatched is not undone. Returns the
+// number of events dispatched.
+size_t parseOscPacket(const uint8_t* pkt, size_t len, const OscAddressMap& map,
+                      OscEventFn onEvent, void* ctx);

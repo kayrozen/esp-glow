@@ -21,7 +21,7 @@ void copyErr(const char* msg, char* errOut, size_t errCap) {
 
 }  // namespace
 
-bool glowLuaInit(ShowController& show, IMatrixRegistry* matrices,
+bool glowLuaInit(ShowController& show, IMatrixRegistry* matrices, BeatClock& beatClock,
                  const char* fennelSrc, size_t fennelSrcLen,
                  char* errOut, size_t errCap,
                  size_t capBytes, int frameInstrBudget, int evalInstrBudget) {
@@ -38,7 +38,7 @@ bool glowLuaInit(ShowController& show, IMatrixRegistry* matrices,
     return false;
   }
 
-  g_api = std::make_unique<GlowLuaApi>(*g_vm, show, matrices);
+  g_api = std::make_unique<GlowLuaApi>(*g_vm, show, matrices, beatClock);
   g_api->install();
 
   char loadErr[256];

@@ -24,8 +24,20 @@ float phaseFromTime(float t, float periodSec, float phaseOffset01) {
   return raw - floorf(raw);
 }
 
+float phaseFromBeat(double beatNumber, float periodBeats, float phaseOffset01) {
+  if (periodBeats <= 0.0f) return 0.0f;
+  double raw = beatNumber / static_cast<double>(periodBeats) + static_cast<double>(phaseOffset01);
+  double wrapped = raw - std::floor(raw);
+  return static_cast<float>(wrapped);
+}
+
 float OscillatedParam::value(float t) const {
   float phase = phaseFromTime(t, periodSec, phaseOffset01);
+  return min + (max - min) * oscillator(w, phase);
+}
+
+float OscillatedParam::valueAtBeat(double beatNumber) const {
+  float phase = phaseFromBeat(beatNumber, periodBeats, phaseOffset01);
   return min + (max - min) * oscillator(w, phase);
 }
 
