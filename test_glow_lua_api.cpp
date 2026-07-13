@@ -11,10 +11,13 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 
+#include "fixture_profile.h"
 #include "lua_effect.h"
 #include "lua_vm.h"
 #include "pixel_matrix.h"
+#include "profile_encoder.h"
 #include "show_control.h"
 
 static int g_failCount = 0;
@@ -50,6 +53,20 @@ private:
   std::vector<PixelMatrix*> mats_;
 };
 
+// glow.ranges (v2 introspection) resolves fixture ids through this instead
+// of ShowController/Show -- see glow_lua_api.h's IFixtureRegistry.
+class FakeFixtureRegistry : public IFixtureRegistry {
+public:
+  void put(uint16_t fixtureId, const FixtureProfile& p) { profiles_[fixtureId] = p; }
+  const FixtureProfile* profile(uint16_t fixtureId) override {
+    auto it = profiles_.find(fixtureId);
+    return it == profiles_.end() ? nullptr : &it->second;
+  }
+
+private:
+  std::unordered_map<uint16_t, FixtureProfile> profiles_;
+};
+
 struct Harness {
   ShowController show;
   glow::LuaVM vm;
@@ -57,8 +74,9 @@ struct Harness {
   glow::BeatClock beatClock;
   GlowLuaApi api;
 
-  Harness(const std::string& fennelSrc, IMatrixRegistry* mats = nullptr)
-      : vm(), matrices(mats), api(vm, show, mats, beatClock) {
+  Harness(const std::string& fennelSrc, IMatrixRegistry* mats = nullptr,
+         IFixtureRegistry* fixtures = nullptr)
+      : vm(), matrices(mats), api(vm, show, mats, beatClock, fixtures) {
     api.install();
     char err[256];
     if (!vm.loadFennelCompiler(fennelSrc.data(), fennelSrc.size(), err, sizeof(err))) {
@@ -242,6 +260,72 @@ void test_cue_redefine_by_name_orphans_old_active_cue() {
   h.show.evaluate(0.0f, caps, aims);
   CHECK(!h.show.isActive(oldId));
   CHECK(!h.show.isActive(newId));  // new cue was defined, not go()'d
+}
+
+void test_cue_glow_slot_range_selection_survives_priority_resolution() {
+  TEST("A glow.slot range selection survives ShowController's HTP/LTP resolution");
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc);
+
+  h.evalOrDie(
+      "(fn fx [t] (glow.slot 1 :gobo \"dots\") (glow.slot 1 :color-wheel 2))\n"
+      "(glow.cue.define :look {:effects [fx] :priority 0})\n"
+      "(glow.cue.go :look)\n");
+
+  std::vector<CapIntent> caps;
+  std::vector<AimIntent> aims;
+  h.show.evaluate(0.0f, caps, aims);
+
+  CHECK(caps.size() == 2);
+  bool sawGoboByName = false, sawColorWheelByIndex = false;
+  for (auto& c : caps) {
+    if (c.fixtureId == 1 && c.cap == Capability::Gobo) {
+      CHECK(c.rangeName != nullptr);
+      CHECK(std::strcmp(c.rangeName, "dots") == 0);
+      CHECK(c.rangeIndex == -1);
+      sawGoboByName = true;
+    }
+    if (c.fixtureId == 1 && c.cap == Capability::ColorWheel) {
+      CHECK(c.rangeName == nullptr);
+      CHECK(c.rangeIndex == 2);
+      sawColorWheelByIndex = true;
+    }
+  }
+  CHECK(sawGoboByName);
+  CHECK(sawColorWheelByIndex);
+}
+
+void test_cue_glow_slot_on_intensity_class_resolves_by_priority_not_htp() {
+  TEST("A glow.slot on an HTP-class capability (ShutterStrobe) resolves by priority, not max()");
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc);
+
+  h.evalOrDie(
+      "(fn low-fx [t] (glow.set 9 :shutter-strobe 1.0))\n"           // plain HTP write, high value
+      "(fn high-fx [t] (glow.slot 9 :shutter-strobe \"strobe\" 0.2))\n"  // range-select, lower value
+      "(glow.cue.define :low {:effects [low-fx] :priority 0})\n"
+      "(glow.cue.define :high {:effects [high-fx] :priority 1})\n"
+      "(glow.cue.go :low)\n"
+      "(glow.cue.go :high)\n");
+
+  std::vector<CapIntent> caps;
+  std::vector<AimIntent> aims;
+  h.show.evaluate(0.0f, caps, aims);
+
+  bool found = false;
+  for (auto& c : caps) {
+    if (c.fixtureId == 9 && c.cap == Capability::ShutterStrobe) {
+      found = true;
+      // The higher-priority cue's range selection wins outright, even
+      // though its norm01 (0.2) is lower than the low-priority plain
+      // write's (1.0) -- a range selection is a discrete choice, not a
+      // blendable intensity.
+      CHECK(c.rangeName != nullptr);
+      CHECK(std::strcmp(c.rangeName, "strobe") == 0);
+      CHECK(std::fabs(c.norm01 - 0.2f) < 1e-4f);
+    }
+  }
+  CHECK(found);
 }
 
 // ---------------------------------------------------------------------------
@@ -511,11 +595,59 @@ void test_glow_beat_pulses_with_tapped_tempo_no_snap() {
   CHECK(wraps >= 4);  // ~5 beats sampled -> should see several wraps
 }
 
+// ---------------------------------------------------------------------------
+// glow.ranges (v2 introspection)
+// ---------------------------------------------------------------------------
+
+void test_glow_ranges_lists_named_and_continuous() {
+  TEST("glow.ranges lists a capability's ranges: name/index/continuous?");
+  ProfileBuilder builder;
+  builder.setFootprint(2).add(Capability::ColorWheel, 0).add(Capability::ShutterStrobe, 1);
+  builder.addRange(0, 0, 9, false, "open");
+  builder.addRange(0, 10, 19, false, "red");
+  builder.addRange(1, 32, 63, true, "strobe");
+  auto blob = builder.encode();
+  FixtureProfile profile;
+  CHECK(parseProfile(blob.data(), blob.size(), profile));
+
+  FakeFixtureRegistry reg;
+  reg.put(1, profile);
+
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc, nullptr, &reg);
+
+  CHECK(h.evalNumber("(length (glow.ranges 1 :color-wheel))") == 2.0);
+  CHECK(h.evalBool("(= (. (glow.ranges 1 :color-wheel) 1 \"name\") \"open\")"));
+  CHECK(h.evalBool("(= (. (glow.ranges 1 :color-wheel) 1 \"index\") 0)"));
+  CHECK(h.evalBool("(= (. (glow.ranges 1 :color-wheel) 1 \"continuous?\") false)"));
+  CHECK(h.evalBool("(= (. (glow.ranges 1 :color-wheel) 2 \"name\") \"red\")"));
+
+  CHECK(h.evalNumber("(length (glow.ranges 1 :shutter-strobe))") == 1.0);
+  CHECK(h.evalBool("(= (. (glow.ranges 1 :shutter-strobe) 1 \"continuous?\") true)"));
+
+  // Unknown fixture / capability the fixture lacks -> empty table, not an error.
+  CHECK(h.evalNumber("(length (glow.ranges 99 :color-wheel))") == 0.0);
+  CHECK(h.evalNumber("(length (glow.ranges 1 :gobo))") == 0.0);
+}
+
+void test_glow_ranges_without_registry_errors_cleanly() {
+  TEST("glow.ranges with no IFixtureRegistry errors with a clear message");
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc);  // no fixture registry
+
+  std::string err;
+  CHECK(!h.eval("(glow.ranges 1 :color-wheel)", &err));
+  CHECK(err.find("fixture registry") != std::string::npos);
+}
+
 int main() {
   test_cue_define_and_go_activates_showcontroller_cue();
   test_cue_release_deactivates();
   test_cue_go_unknown_name_errors();
   test_cue_redefine_by_name_orphans_old_active_cue();
+
+  test_cue_glow_slot_range_selection_survives_priority_resolution();
+  test_cue_glow_slot_on_intensity_class_resolves_by_priority_not_htp();
 
   test_scene_go_activates_all_member_cues();
   test_scene_define_unknown_cue_errors();
@@ -534,6 +666,9 @@ int main() {
   test_glow_bpm_locked_default_free_running();
   test_glow_tap_drives_the_underlying_beat_clock();
   test_glow_beat_pulses_with_tapped_tempo_no_snap();
+
+  test_glow_ranges_lists_named_and_continuous();
+  test_glow_ranges_without_registry_errors_cleanly();
 
   if (g_failCount == 0) {
     printf("\nAll tests passed.\n");

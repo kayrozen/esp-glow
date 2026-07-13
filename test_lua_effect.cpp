@@ -279,6 +279,106 @@ void test_cue_keeps_running_other_effects_after_one_disables() {
 // Zero allocation on the per-frame path
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// glow.slot (v2: function ranges)
+// ---------------------------------------------------------------------------
+
+void test_glow_slot_emits_range_selecting_capintent() {
+  TEST("glow.slot emits a CapIntent carrying rangeName/rangeIndex, not a linear write");
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc);
+  int ref = h.compileToRef("(fn f [t] (glow.slot 1 :gobo \"dots\") (glow.slot 1 :gobo 3))");
+  LuaEffect fx(h.api, ref, "f");
+
+  std::vector<CapIntent> caps;
+  std::vector<AimIntent> aims;
+  fx.evaluate(0.0f, caps, aims);
+
+  CHECK(!fx.disabled());
+  CHECK(caps.size() == 2);
+
+  CHECK(caps[0].fixtureId == 1);
+  CHECK(caps[0].cap == Capability::Gobo);
+  CHECK(caps[0].rangeName != nullptr);
+  CHECK(std::strcmp(caps[0].rangeName, "dots") == 0);
+  CHECK(caps[0].rangeIndex == -1);
+
+  CHECK(caps[1].cap == Capability::Gobo);
+  CHECK(caps[1].rangeName == nullptr);
+  CHECK(caps[1].rangeIndex == 3);
+}
+
+void test_glow_slot_continuous_value_passthrough() {
+  TEST("glow.slot passes its 4th arg through as norm01 for continuous ranges");
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc);
+  int ref = h.compileToRef("(fn f [t] (glow.slot 1 :shutter-strobe \"strobe\" 0.7))");
+  LuaEffect fx(h.api, ref, "f");
+
+  std::vector<CapIntent> caps;
+  std::vector<AimIntent> aims;
+  fx.evaluate(0.0f, caps, aims);
+
+  CHECK(!fx.disabled());
+  CHECK(caps.size() == 1);
+  CHECK(caps[0].cap == Capability::ShutterStrobe);
+  CHECK(caps[0].rangeName != nullptr);
+  CHECK(std::strcmp(caps[0].rangeName, "strobe") == 0);
+  CHECK(std::fabs(caps[0].norm01 - 0.7f) < 1e-4f);
+}
+
+void test_glow_slot_unknown_capability_is_noop() {
+  TEST("glow.slot with an unresolvable capability name is a no-op, not an error");
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc);
+  int ref = h.compileToRef("(fn f [t] (glow.slot 1 :not-a-real-cap \"x\") (glow.slot 1 :red 3))");
+  LuaEffect fx(h.api, ref, "f");
+
+  std::vector<CapIntent> caps;
+  std::vector<AimIntent> aims;
+  fx.evaluate(0.0f, caps, aims);
+
+  CHECK(!fx.disabled());
+  CHECK(caps.size() == 1);  // only the valid :red made it through
+  CHECK(caps[0].cap == Capability::Red);
+}
+
+void test_glow_slot_outside_frame_context_errors() {
+  TEST("glow.slot outside an effect callback (no frame context) errors");
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc);
+
+  std::string err;
+  CHECK(!h.evalDirect("(glow.slot 1 :gobo \"dots\")", err));
+  CHECK(err.find("effect callback") != std::string::npos);
+}
+
+void test_glow_slot_zero_allocation() {
+  TEST("zero-allocation: glow.slot with literal range names allocates nothing after warm-up");
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc);
+  int ref = h.compileToRef(
+      "(fn f [t] (glow.slot 1 :gobo \"dots\") (glow.slot 1 :color-wheel \"red\" 0.5))");
+  LuaEffect fx(h.api, ref, "f");
+
+  std::vector<CapIntent> caps;
+  std::vector<AimIntent> aims;
+  caps.reserve(128);
+  aims.reserve(64);
+
+  // Warm-up: first call may allocate (stack growth, etc).
+  fx.evaluate(0.0f, caps, aims);
+  CHECK(!fx.disabled());
+
+  h.vm.resetAllocCallCount();
+  for (int i = 1; i <= 10; ++i) {
+    caps.clear();
+    aims.clear();
+    fx.evaluate(static_cast<float>(i), caps, aims);
+  }
+  CHECK(h.vm.allocCallCount() == 0);
+}
+
 void test_zero_allocation_wellwritten_effect() {
   TEST("zero-allocation: literal-capability effect allocates nothing after warm-up");
   std::string fsrc = readFennelSource();
@@ -344,6 +444,13 @@ int main() {
   test_glow_set_outside_frame_context_errors();
   test_erroring_effect_disables_permanently_not_retried();
   test_cue_keeps_running_other_effects_after_one_disables();
+
+  test_glow_slot_emits_range_selecting_capintent();
+  test_glow_slot_continuous_value_passthrough();
+  test_glow_slot_unknown_capability_is_noop();
+  test_glow_slot_outside_frame_context_errors();
+  test_glow_slot_zero_allocation();
+
   test_zero_allocation_wellwritten_effect();
   test_nonzero_allocation_constructed_string_effect();
 

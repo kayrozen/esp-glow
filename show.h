@@ -40,7 +40,20 @@ public:
   uint8_t lastIndex = 0xFF;
 };
 
-struct CapIntent { uint16_t fixtureId; Capability cap; float norm01; };
+// rangeName/rangeIndex select a v2 function range instead of applying norm01
+// linearly (see fixture_profile.h's applyRangeByName/applyRangeByIndex).
+// rangeName == nullptr && rangeIndex < 0 (the default) means "linear",
+// i.e. exactly the pre-v2 behavior via applyCapability. rangeName must
+// outlive the frame it's gathered in -- glow.slot only ever stores an
+// interned Lua string literal here, never a constructed one (same
+// zero-allocation rule as glow.set's capability name).
+struct CapIntent {
+  uint16_t fixtureId;
+  Capability cap;
+  float norm01;
+  const char* rangeName = nullptr;
+  int16_t rangeIndex = -1;
+};
 struct AimIntent { uint16_t fixtureId; Vec3 target; bool isPoint; };  // isPoint=false => target is a direction
 
 class IEffect {

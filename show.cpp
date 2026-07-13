@@ -139,7 +139,14 @@ void Show::renderFrame(float t) {
     if (!f) continue;
     if (f->universe >= universeCount_) continue;
     if (universes_[f->universe].mode != UniverseMode::Fixture) continue;
-    applyCapability(f->profile, ci.cap, ci.norm01, universes_[f->universe].data, f->base);
+    uint8_t* buf = universes_[f->universe].data;
+    if (ci.rangeName != nullptr) {
+      applyRangeByName(f->profile, ci.cap, ci.rangeName, ci.norm01, buf, f->base);
+    } else if (ci.rangeIndex >= 0) {
+      applyRangeByIndex(f->profile, ci.cap, static_cast<uint8_t>(ci.rangeIndex), ci.norm01, buf, f->base);
+    } else {
+      applyCapability(f->profile, ci.cap, ci.norm01, buf, f->base);
+    }
   }
 
   // 5. Flush.

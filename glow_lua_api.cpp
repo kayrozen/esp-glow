@@ -37,11 +37,28 @@ constexpr CapName kCapNames[] = {
     {"pan", Capability::Pan},
     {"tilt", Capability::Tilt},
     {"shutterstrobe", Capability::ShutterStrobe},
+    {"shutter-strobe", Capability::ShutterStrobe},
     {"gobo", Capability::Gobo},
     {"focus", Capability::Focus},
     {"zoom", Capability::Zoom},
     {"fog", Capability::Fog},
     {"fan", Capability::Fan},
+    // v2 additions -- moving-head function-range capabilities. Multi-word
+    // names get both a plain and a kebab-case spelling (matching
+    // shutter-strobe above and README.md's documented convention).
+    {"colorwheel", Capability::ColorWheel},
+    {"color-wheel", Capability::ColorWheel},
+    {"gobo-rotation", Capability::GoboRotation},
+    {"goborotation", Capability::GoboRotation},
+    {"prism", Capability::Prism},
+    {"prism-rotation", Capability::PrismRotation},
+    {"prismrotation", Capability::PrismRotation},
+    {"frost", Capability::Frost},
+    {"iris", Capability::Iris},
+    {"cto", Capability::CTO},
+    {"animation-wheel", Capability::AnimationWheel},
+    {"animationwheel", Capability::AnimationWheel},
+    {"macro", Capability::Macro},
     {"generic", Capability::Generic},
 };
 
@@ -125,8 +142,8 @@ std::vector<uint16_t> checkFixtureIdList(lua_State* L, int idx) {
 }  // namespace
 
 GlowLuaApi::GlowLuaApi(glow::LuaVM& vm, ShowController& show, IMatrixRegistry* matrices,
-                       glow::BeatClock& beatClock)
-    : vm_(vm), show_(show), matrices_(matrices), beatClock_(beatClock) {}
+                       glow::BeatClock& beatClock, IFixtureRegistry* fixtures)
+    : vm_(vm), show_(show), matrices_(matrices), beatClock_(beatClock), fixtures_(fixtures) {}
 
 GlowLuaApi::~GlowLuaApi() = default;
 
@@ -248,6 +265,114 @@ int GlowLuaApi::l_aim(lua_State* L) {
   Vec3 point = checkVec3(L, 2);
   api.frameAims_->push_back({fid, point, true});
   return 0;
+}
+
+// --- glow.slot / glow.ranges (v2: function ranges) --------------------------
+
+int GlowLuaApi::l_slot(lua_State* L) {
+  GlowLuaApi& api = self(L);
+  if (api.frameCaps_ == nullptr) {
+    return luaL_error(L, "glow.slot is only valid inside an effect callback");
+  }
+
+  uint16_t fid = checkFixtureId(L, 1);
+
+  Capability cap = Capability::Generic;
+  bool known = false;
+  int capType = lua_type(L, 2);
+  if (capType == LUA_TSTRING) {
+    size_t clen = 0;
+    const char* cname = lua_tolstring(L, 2, &clen);
+    known = capabilityFromName(cname, clen, cap);
+    // Unresolvable name: no-op, same policy as glow.set (see l_set above).
+  } else if (capType == LUA_TNUMBER) {
+    lua_Integer raw = luaL_checkinteger(L, 2);
+    if (raw < 0 || raw > 255) return luaL_error(L, "glow.slot: capability constant out of range");
+    cap = static_cast<Capability>(raw);
+    known = true;
+  } else {
+    return luaL_error(L, "glow.slot: capability must be a string or a glow.CAP.* constant");
+  }
+
+  const char* rangeNameArg = nullptr;
+  int16_t rangeIndexArg = -1;
+  int selType = lua_type(L, 3);
+  if (selType == LUA_TSTRING) {
+    // Zero-allocation contract: the pointer is stored in the CapIntent for
+    // the rest of this frame (see show.h), so it must be an interned Lua
+    // string literal -- exactly the same hazard/rule as glow.set's
+    // capability name (README_LUA_FENNEL.md, test_lua_effect.cpp).
+    rangeNameArg = lua_tostring(L, 3);
+  } else if (selType == LUA_TNUMBER) {
+    lua_Integer idx = luaL_checkinteger(L, 3);
+    if (idx < 0 || idx > 255) return luaL_error(L, "glow.slot: range index out of range");
+    rangeIndexArg = static_cast<int16_t>(idx);
+  } else {
+    return luaL_error(L, "glow.slot: range selector must be a string name or an index");
+  }
+
+  double v = 0.0;
+  if (lua_gettop(L) >= 4 && !lua_isnil(L, 4)) {
+    v = luaL_checknumber(L, 4);
+  }
+
+  if (known) {
+    api.frameCaps_->push_back(CapIntent{fid, cap, static_cast<float>(v), rangeNameArg, rangeIndexArg});
+  }
+  return 0;
+}
+
+int GlowLuaApi::l_ranges(lua_State* L) {
+  GlowLuaApi& api = self(L);
+  if (api.fixtures_ == nullptr) {
+    return luaL_error(L, "glow.ranges: no fixture registry on this device");
+  }
+
+  uint16_t fid = checkFixtureId(L, 1);
+
+  Capability cap = Capability::Generic;
+  bool known = false;
+  int capType = lua_type(L, 2);
+  if (capType == LUA_TSTRING) {
+    size_t clen = 0;
+    const char* cname = lua_tolstring(L, 2, &clen);
+    known = capabilityFromName(cname, clen, cap);
+  } else if (capType == LUA_TNUMBER) {
+    lua_Integer raw = luaL_checkinteger(L, 2);
+    if (raw < 0 || raw > 255) return luaL_error(L, "glow.ranges: capability constant out of range");
+    cap = static_cast<Capability>(raw);
+    known = true;
+  } else {
+    return luaL_error(L, "glow.ranges: capability must be a string or a glow.CAP.* constant");
+  }
+
+  lua_newtable(L);  // result array; stays empty if the capability/fixture is unknown
+  if (!known) return 1;
+
+  const FixtureProfile* profile = api.fixtures_->profile(fid);
+  if (profile == nullptr) return 1;
+
+  size_t n = rangeCount(*profile, cap);
+  for (size_t i = 0; i < n; ++i) {
+    lua_newtable(L);
+
+    const char* rname = rangeName(*profile, cap, static_cast<uint8_t>(i));
+    if (rname != nullptr) {
+      lua_pushstring(L, rname);
+    } else {
+      lua_pushnil(L);
+    }
+    lua_setfield(L, -2, "name");
+
+    lua_pushinteger(L, static_cast<lua_Integer>(i));
+    lua_setfield(L, -2, "index");
+
+    lua_pushboolean(L, rangeIsContinuous(*profile, cap, static_cast<uint8_t>(i)) ? 1 : 0);
+    lua_setfield(L, -2, "continuous?");
+
+    lua_seti(L, -2, static_cast<lua_Integer>(i + 1));
+  }
+  return 1;
 }
 
 // --- glow.cue.* / glow.scene.* ----------------------------------------------
@@ -510,6 +635,8 @@ void GlowLuaApi::install() {
 
   registerFn(L, glowIdx, "set", &GlowLuaApi::l_set, this);
   registerFn(L, glowIdx, "aim", &GlowLuaApi::l_aim, this);
+  registerFn(L, glowIdx, "slot", &GlowLuaApi::l_slot, this);
+  registerFn(L, glowIdx, "ranges", &GlowLuaApi::l_ranges, this);
 
   lua_newtable(L);  // glow.CAP
   for (const auto& e : kCapNames) {

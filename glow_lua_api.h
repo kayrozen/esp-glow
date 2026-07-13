@@ -32,6 +32,17 @@ public:
   virtual PixelMatrix* matrix(int index) = 0;  // nullptr if index is out of range
 };
 
+// Injected lookup for glow.ranges (introspection only -- never on the frame
+// path, unlike glow.set/glow.slot which resolve fixtures lazily at render
+// time via Show itself). nullptr disables it (glow.ranges then lua_errors
+// with a clear message). Device wiring supplies a registry backed by
+// main.cpp's Show; host tests supply a small fake.
+class IFixtureRegistry {
+public:
+  virtual ~IFixtureRegistry() = default;
+  virtual const FixtureProfile* profile(uint16_t fixtureId) = 0;  // nullptr if unknown
+};
+
 // Installs and implements the `glow` global table:
 //   glow.set / glow.aim        — frame-context-gated, zero allocation
 //   glow.CAP.*                 — integer capability constants
@@ -54,7 +65,7 @@ public:
   // sane BPM with zero external input; see beat_clock.h), so there is no
   // "no musical time on this device" case to model with a null pointer.
   GlowLuaApi(glow::LuaVM& vm, ShowController& show, IMatrixRegistry* matrices,
-            glow::BeatClock& beatClock);
+            glow::BeatClock& beatClock, IFixtureRegistry* fixtures = nullptr);
   ~GlowLuaApi();
 
   GlowLuaApi(const GlowLuaApi&) = delete;
@@ -100,6 +111,8 @@ public:
 private:
   static int l_set(lua_State* L);
   static int l_aim(lua_State* L);
+  static int l_slot(lua_State* L);
+  static int l_ranges(lua_State* L);
   static int l_cue_define(lua_State* L);
   static int l_cue_go(lua_State* L);
   static int l_cue_release(lua_State* L);
@@ -141,6 +154,7 @@ private:
   ShowController& show_;
   IMatrixRegistry* matrices_;
   glow::BeatClock& beatClock_;
+  IFixtureRegistry* fixtures_;
 
   float currentT_ = 0.0f;
   std::vector<CapIntent>* frameCaps_ = nullptr;

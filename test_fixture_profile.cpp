@@ -81,14 +81,15 @@ void test_bad_magic() {
 }
 
 void test_bad_version() {
-  TEST("Reject version != 1");
+  TEST("Reject unsupported version (not 1 or 2)");
 
   ProfileBuilder builder;
   builder.setFootprint(1).add(Capability::Dimmer, 0);
   std::vector<uint8_t> blob = builder.encode();
 
-  // Change version to 2
-  blob[4] = 2;
+  // Version 2 is now a supported version (see test_v2_roundtrip) -- use 3,
+  // which is not.
+  blob[4] = 3;
 
   FixtureProfile p;
   CHECK(!parseProfile(blob.data(), blob.size(), p));
@@ -358,6 +359,271 @@ void test_apply_with_base_offset() {
   }
 }
 
+// ============================================================================
+// v2: function ranges
+// ============================================================================
+
+void test_v1_still_parses_no_ranges() {
+  TEST("v1 blob still parses; rangeCount == 0, capabilities behave linearly");
+
+  ProfileBuilder builder;  // no addRange calls -> encoder still emits v1 bytes
+  builder.setFootprint(4).add(Capability::Dimmer, 0).add(Capability::Red, 1);
+  std::vector<uint8_t> blob = builder.encode();
+  CHECK(blob[4] == 1);
+
+  FixtureProfile p;
+  CHECK(parseProfile(blob.data(), blob.size(), p));
+  CHECK(p.rangeCount == 0);
+  CHECK(rangeCount(p, Capability::Dimmer) == 0);
+
+  uint8_t buf[4] = {0};
+  applyCapability(p, Capability::Dimmer, 1.0f, buf, 0);
+  CHECK(buf[0] == 255);
+}
+
+void test_v1_legacy_hardcoded_blob_still_parses() {
+  TEST("A hand-built (pre-v2) v1 byte sequence still parses identically");
+
+  // FORMAT.md's worked "Torrent" example, verbatim -- a genuine legacy
+  // blob, not something the current encoder produced.
+  std::vector<uint8_t> blob = {
+    'P', 'F', 'X', '1', 1, 0, 16, 7, 7,
+    'T', 'o', 'r', 'r', 'e', 'n', 't',
+    0x00, 0x00, 0xff, 0x00, 0x00,
+    0x01, 0x01, 0xff, 0x00, 0x00,
+    0x02, 0x02, 0xff, 0x00, 0x00,
+    0x03, 0x03, 0xff, 0x00, 0x00,
+    0x0a, 0x05, 0x06, 0x00, 0x00,
+    0x0b, 0x07, 0x08, 0x00, 0x00,
+    0x0c, 0x0a, 0xff, 0x08, 0x00,
+  };
+  CHECK(blob.size() == 51);
+
+  FixtureProfile p;
+  CHECK(parseProfile(blob.data(), blob.size(), p));
+  CHECK(p.footprint == 16);
+  CHECK(p.channelCount == 7);
+  CHECK(p.rangeCount == 0);
+  const ChannelMap* shutter = findCapability(p, Capability::ShutterStrobe);
+  CHECK(shutter != nullptr && shutter->defaultValue == 8);
+}
+
+void test_v2_roundtrip() {
+  TEST("v2 round-trip: encode with ranges, parse, verify every field");
+
+  ProfileBuilder builder;
+  builder.setFootprint(2).add(Capability::ColorWheel, 0).add(Capability::ShutterStrobe, 1);
+  builder.addRange(0, 0, 9, false, "open");
+  builder.addRange(0, 10, 19, false, "red");
+  builder.addRange(0, 20, 29, false, "blue");
+  builder.addRange(1, 0, 31, false, "closed");
+  builder.addRange(1, 32, 63, true, "strobe");
+
+  std::vector<uint8_t> blob = builder.encode();
+  CHECK(blob[4] == 2);  // version bumped once ranges are present
+
+  FixtureProfile p;
+  CHECK(parseProfile(blob.data(), blob.size(), p));
+  CHECK(p.footprint == 2);
+  CHECK(p.channelCount == 2);
+  CHECK(p.rangeCount == 5);
+
+  CHECK(rangeCount(p, Capability::ColorWheel) == 3);
+  CHECK(rangeCount(p, Capability::ShutterStrobe) == 2);
+  CHECK(rangeCount(p, Capability::Gobo) == 0);  // absent capability
+
+  CHECK(std::strcmp(rangeName(p, Capability::ColorWheel, 0), "open") == 0);
+  CHECK(std::strcmp(rangeName(p, Capability::ColorWheel, 1), "red") == 0);
+  CHECK(std::strcmp(rangeName(p, Capability::ColorWheel, 2), "blue") == 0);
+  CHECK(!rangeIsContinuous(p, Capability::ColorWheel, 1));
+  CHECK(rangeName(p, Capability::ColorWheel, 3) == nullptr);  // only 3 ranges
+
+  CHECK(std::strcmp(rangeName(p, Capability::ShutterStrobe, 0), "closed") == 0);
+  CHECK(!rangeIsContinuous(p, Capability::ShutterStrobe, 0));
+  CHECK(std::strcmp(rangeName(p, Capability::ShutterStrobe, 1), "strobe") == 0);
+  CHECK(rangeIsContinuous(p, Capability::ShutterStrobe, 1));
+}
+
+void test_range_discrete_centre() {
+  TEST("applyRangeByName: discrete slot writes the centre, floor((from+to)/2)");
+
+  ProfileBuilder builder;
+  builder.setFootprint(1).add(Capability::ShutterStrobe, 0);
+  builder.addRange(0, 32, 63, false, "open");
+  std::vector<uint8_t> blob = builder.encode();
+  FixtureProfile p;
+  CHECK(parseProfile(blob.data(), blob.size(), p));
+
+  uint8_t buf[1] = {0};
+  CHECK(applyRangeByName(p, Capability::ShutterStrobe, "open", 0.0f, buf, 0));
+  CHECK(buf[0] == 47);  // (32+63)/2 = 47 via integer division, not 48
+
+  buf[0] = 0;
+  CHECK(applyRangeByIndex(p, Capability::ShutterStrobe, 0, 0.0f, buf, 0));
+  CHECK(buf[0] == 47);
+}
+
+void test_range_continuous() {
+  TEST("applyRangeByName: continuous sub-range maps [0,1] across [dmxFrom,dmxTo]");
+
+  ProfileBuilder builder;
+  builder.setFootprint(1).add(Capability::ShutterStrobe, 0);
+  builder.addRange(0, 64, 95, true, "strobe");
+  std::vector<uint8_t> blob = builder.encode();
+  FixtureProfile p;
+  CHECK(parseProfile(blob.data(), blob.size(), p));
+
+  uint8_t buf[1] = {0};
+  CHECK(applyRangeByName(p, Capability::ShutterStrobe, "strobe", 0.0f, buf, 0));
+  CHECK(buf[0] == 64);
+  CHECK(applyRangeByName(p, Capability::ShutterStrobe, "strobe", 1.0f, buf, 0));
+  CHECK(buf[0] == 95);
+  CHECK(applyRangeByName(p, Capability::ShutterStrobe, "strobe", 0.5f, buf, 0));
+  CHECK(buf[0] == 80);  // 64 + round(0.5*31) = 64 + 16
+}
+
+void test_range_unknown_noop() {
+  TEST("applyRangeByName/Index: unknown name/index/capability -> false, buffer untouched");
+
+  ProfileBuilder builder;
+  builder.setFootprint(1).add(Capability::ShutterStrobe, 0);
+  builder.addRange(0, 0, 31, false, "closed");
+  std::vector<uint8_t> blob = builder.encode();
+  FixtureProfile p;
+  CHECK(parseProfile(blob.data(), blob.size(), p));
+
+  uint8_t buf[1] = {77};
+  CHECK(!applyRangeByName(p, Capability::ShutterStrobe, "nope", 0.0f, buf, 0));
+  CHECK(buf[0] == 77);
+  CHECK(!applyRangeByIndex(p, Capability::ShutterStrobe, 5, 0.0f, buf, 0));
+  CHECK(buf[0] == 77);
+
+  // Capability entirely absent from the fixture.
+  CHECK(!applyRangeByName(p, Capability::Gobo, "closed", 0.0f, buf, 0));
+  CHECK(!applyRangeByIndex(p, Capability::Gobo, 0, 0.0f, buf, 0));
+  CHECK(buf[0] == 77);
+}
+
+void test_capability_without_ranges() {
+  TEST("Capability with no ranges: applyCapability linear as always, applyRangeBy* false");
+
+  ProfileBuilder builder;
+  builder.setFootprint(1).add(Capability::Dimmer, 0);
+  std::vector<uint8_t> blob = builder.encode();
+  CHECK(blob[4] == 1);  // no ranges anywhere in this profile -> still v1 wire format
+
+  FixtureProfile p;
+  CHECK(parseProfile(blob.data(), blob.size(), p));
+
+  uint8_t buf[1] = {0};
+  applyCapability(p, Capability::Dimmer, 1.0f, buf, 0);
+  CHECK(buf[0] == 255);
+
+  CHECK(!applyRangeByName(p, Capability::Dimmer, "anything", 0.5f, buf, 0));
+  CHECK(!applyRangeByIndex(p, Capability::Dimmer, 0, 0.5f, buf, 0));
+}
+
+void test_range_16bit_coarse_only() {
+  TEST("Ranges on a 16-bit capability touch only the coarse channel");
+
+  ProfileBuilder builder;
+  builder.setFootprint(10).add(Capability::Pan, 5, 6);
+  builder.addRange(0, 32, 63, false, "centre-ish");
+  std::vector<uint8_t> blob = builder.encode();
+  FixtureProfile p;
+  CHECK(parseProfile(blob.data(), blob.size(), p));
+
+  uint8_t buf[10];
+  std::memset(buf, 0xAB, sizeof(buf));
+  CHECK(applyRangeByName(p, Capability::Pan, "centre-ish", 0.0f, buf, 0));
+  CHECK(buf[5] == 47);    // coarse written (centre of [32,63])
+  CHECK(buf[6] == 0xAB);  // fine untouched
+}
+
+void test_v2_rangecount_overflow() {
+  TEST("Reject rangeCount > MAX_RANGES");
+
+  std::vector<uint8_t> blob = {'P', 'F', 'X', '1', 2, 0, 1, 0, 0,
+                                static_cast<uint8_t>((MAX_RANGES + 1) & 0xFF),
+                                static_cast<uint8_t>(((MAX_RANGES + 1) >> 8) & 0xFF)};
+  FixtureProfile p;
+  CHECK(!parseProfile(blob.data(), blob.size(), p));
+}
+
+void test_v2_dmxfrom_after_dmxto() {
+  TEST("Reject range record with dmxFrom > dmxTo");
+
+  ProfileBuilder builder;
+  builder.setFootprint(1).add(Capability::Dimmer, 0);
+  builder.addRange(0, 50, 10, false, "bad");  // from > to
+  std::vector<uint8_t> blob = builder.encode();
+  FixtureProfile p;
+  CHECK(!parseProfile(blob.data(), blob.size(), p));
+}
+
+void test_v2_capindex_out_of_range() {
+  TEST("Reject range record whose capIndex >= capCount");
+
+  ProfileBuilder builder;
+  builder.setFootprint(1).add(Capability::Dimmer, 0);
+  builder.addRange(5, 0, 9, false, "bad");  // only 1 capability exists (index 0)
+  std::vector<uint8_t> blob = builder.encode();
+  FixtureProfile p;
+  CHECK(!parseProfile(blob.data(), blob.size(), p));
+}
+
+void test_v2_nameoff_past_blob() {
+  TEST("Reject range record whose nameOff points past the name blob");
+
+  ProfileBuilder builder;
+  builder.setFootprint(1).add(Capability::Dimmer, 0);
+  builder.addRange(0, 0, 9, false, "ok");  // name blob is "ok\0" = 3 bytes
+  std::vector<uint8_t> blob = builder.encode();
+
+  size_t rangeRecOffset = blob.size() - 7 - 3;
+  blob[rangeRecOffset + 4] = 0xFE;  // nameOff low byte
+  blob[rangeRecOffset + 5] = 0x00;  // nameOff = 254, past the 3-byte blob
+
+  FixtureProfile p;
+  CHECK(!parseProfile(blob.data(), blob.size(), p));
+}
+
+void test_v2_truncated_header() {
+  TEST("Reject v2 buffer shorter than the 11-byte v2 header");
+
+  uint8_t buf[10] = {'P', 'F', 'X', '1', 2, 0, 1, 0, 0, 0};
+  FixtureProfile p;
+  CHECK(!parseProfile(buf, sizeof(buf), p));
+}
+
+void test_v2_truncated_range_table() {
+  TEST("Reject v2 buffer truncated inside the range table / name blob");
+
+  ProfileBuilder builder;
+  builder.setFootprint(1).add(Capability::Dimmer, 0);
+  builder.addRange(0, 0, 9, false, "ok");
+  std::vector<uint8_t> blob = builder.encode();
+  blob.resize(blob.size() - 5);
+
+  FixtureProfile p;
+  CHECK(!parseProfile(blob.data(), blob.size(), p));
+}
+
+void test_v2_name_blob_too_large() {
+  TEST("Reject v2 name blob larger than MAX_RANGE_NAME_BLOB");
+
+  ProfileBuilder builder;
+  builder.setFootprint(1).add(Capability::Dimmer, 0);
+  builder.addRange(0, 0, 9, false, "x");
+  std::vector<uint8_t> blob = builder.encode();
+  // Padding bytes appended here become part of the trailing name blob
+  // (defined as "everything remaining to the end of the buffer").
+  blob.resize(blob.size() + MAX_RANGE_NAME_BLOB + 1, 0);
+
+  FixtureProfile p;
+  CHECK(!parseProfile(blob.data(), blob.size(), p));
+}
+
 int main() {
   test_roundtrip();
   test_bad_magic();
@@ -374,6 +640,22 @@ int main() {
   test_clamp();
   test_header_too_short();
   test_apply_with_base_offset();
+
+  test_v1_still_parses_no_ranges();
+  test_v1_legacy_hardcoded_blob_still_parses();
+  test_v2_roundtrip();
+  test_range_discrete_centre();
+  test_range_continuous();
+  test_range_unknown_noop();
+  test_capability_without_ranges();
+  test_range_16bit_coarse_only();
+  test_v2_rangecount_overflow();
+  test_v2_dmxfrom_after_dmxto();
+  test_v2_capindex_out_of_range();
+  test_v2_nameoff_past_blob();
+  test_v2_truncated_header();
+  test_v2_truncated_range_table();
+  test_v2_name_blob_too_large();
 
   if (g_failCount == 0) {
     printf("\nAll tests passed!\n");

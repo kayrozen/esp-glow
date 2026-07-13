@@ -30,6 +30,15 @@ bool capFromName(const std::string& name, Capability& out) {
     {"Zoom", Capability::Zoom},
     {"Fog", Capability::Fog},
     {"Fan", Capability::Fan},
+    {"ColorWheel", Capability::ColorWheel},
+    {"GoboRotation", Capability::GoboRotation},
+    {"Prism", Capability::Prism},
+    {"PrismRotation", Capability::PrismRotation},
+    {"Frost", Capability::Frost},
+    {"Iris", Capability::Iris},
+    {"CTO", Capability::CTO},
+    {"AnimationWheel", Capability::AnimationWheel},
+    {"Macro", Capability::Macro},
     {"Generic", Capability::Generic},
   };
 
@@ -65,6 +74,7 @@ bool parseFixtureDef(const std::string& text, FixtureDef& out, std::string& err)
 
   std::istringstream iss(text);
   std::string line;
+  int lastCapIndex = -1;  // out.caps index the next SLOT/RANGE line attaches to
 
   while (std::getline(iss, line)) {
     stripComments(line);
@@ -186,6 +196,56 @@ bool parseFixtureDef(const std::string& text, FixtureDef& out, std::string& err)
       cm.flags = inverted ? 1 : 0;
 
       out.caps.push_back(cm);
+      lastCapIndex = static_cast<int>(out.caps.size()) - 1;
+    } else if (cmd == "SLOT" || cmd == "RANGE") {
+      if (lastCapIndex < 0) {
+        err = cmd + ": no preceding CAP";
+        return false;
+      }
+      if (tokens.size() < 3) {
+        err = cmd + ": missing from or to";
+        return false;
+      }
+
+      int from, to;
+      try {
+        from = std::stoi(tokens[1]);
+        to = std::stoi(tokens[2]);
+      } catch (...) {
+        err = cmd + ": invalid from/to";
+        return false;
+      }
+      if (from < 0 || from > 255 || to < 0 || to > 255) {
+        err = cmd + ": from/to out of range (0..255)";
+        return false;
+      }
+      if (from > to) {
+        err = cmd + ": from must be <= to";
+        return false;
+      }
+
+      // Name is the rest of the line (spaces allowed), i.e. everything
+      // after the <to> token -- re-scan `line` (not `tokens`, which
+      // collapses whitespace) to preserve it verbatim.
+      std::istringstream lineIss(line);
+      std::string skip1, skip2, skip3;
+      lineIss >> skip1 >> skip2 >> skip3;
+      std::string rest;
+      std::getline(lineIss, rest);
+      size_t nameStart = rest.find_first_not_of(" \t");
+      std::string rangeName = (nameStart == std::string::npos) ? "" : rest.substr(nameStart);
+      while (!rangeName.empty() &&
+             (rangeName.back() == ' ' || rangeName.back() == '\t' || rangeName.back() == '\r')) {
+        rangeName.pop_back();
+      }
+
+      FdefRange fr;
+      fr.capIndex = static_cast<uint8_t>(lastCapIndex);
+      fr.dmxFrom = static_cast<uint8_t>(from);
+      fr.dmxTo = static_cast<uint8_t>(to);
+      fr.continuous = (cmd == "RANGE");
+      fr.name = rangeName;
+      out.ranges.push_back(fr);
     } else if (!cmd.empty()) {
       err = "Unknown command: " + cmd;
       return false;
@@ -207,6 +267,9 @@ std::vector<uint8_t> encodeProfile(const FixtureDef& def) {
   for (const auto& cm : def.caps) {
     bool inv = (cm.flags & 1) != 0;
     builder.add(cm.cap, cm.coarse, cm.fine, cm.defaultValue, inv);
+  }
+  for (const auto& r : def.ranges) {
+    builder.addRange(r.capIndex, r.dmxFrom, r.dmxTo, r.continuous, r.name);
   }
   return builder.encode();
 }
