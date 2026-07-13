@@ -441,7 +441,12 @@ static void setup_lua() {
     // configure/quiet it, that pattern would otherwise keep painting the
     // venue with unrequested content. Safe blackout, loudly reported,
     // beats a surprise demo animation.
-    char reason[160];
+    // Sized to always fit the longest prefix + all of `err` (never actually
+    // truncates) -- a merely-large-enough guess would still make GCC's
+    // -Wformat-truncation (an error under this project's -Werror) flag the
+    // theoretical worst case as unfittable, since `err`'s declared size
+    // (not its runtime content) is what the compiler reasons about.
+    char reason[sizeof(err) + 40];
     std::snprintf(reason, sizeof(reason), "Lua/Fennel VM init failed: %s", err);
     glow_safe_blackout(reason);
     return;
@@ -467,7 +472,9 @@ static void setup_lua() {
 
   if (!glow_lua_eval_fennel(bootBuf, bootLen, err, sizeof(err))) {
     ESP_LOGE(TAG, "boot.fnl failed, base show still renders: %s", err);
-    char reason[220];
+    // See the sizing comment on the Lua/Fennel init failure branch above --
+    // same reasoning, different (shorter) prefix.
+    char reason[sizeof(err) + 40];
     std::snprintf(reason, sizeof(reason), "boot.fnl failed: %s", err);
     glow_safe_blackout(reason);
     return;
