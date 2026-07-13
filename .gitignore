@@ -77,6 +77,11 @@ test_*
 !test_*.c
 !test_*.py
 
+# fdef_check: host CLI built from fdef_check.cpp, used by
+# web/shared/importers/test-importers.mjs as its round-trip oracle.
+fdef_check
+!fdef_check.cpp
+
 # WASM build artifacts (rebuilt in CI, not committed)
 web/provision-wasm/build/
 web/provision-wasm/provision-wasm.js

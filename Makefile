@@ -1,4 +1,4 @@
-.PHONY: test clean
+.PHONY: test clean test-importers
 
 # Compiler flags: C++17, warnings, sanitizer
 # -Ithird_party/lua: the vendored Lua 5.4.6 headers (lua_glow_include.h),
@@ -71,6 +71,17 @@ PROVISION_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp
                     color.cpp pixel_matrix.cpp provision.cpp show_bundle.cpp test_provision.cpp
 PROVISION_OBJECTS = $(PROVISION_SOURCES:.cpp=.o)
 PROVISION_TARGET  = test_provision
+
+# --- fdef_check: host CLI round-trip oracle for the browser importers
+# (web/shared/importers/) -- not a test binary itself; not part of `test`.
+# See web/shared/importers/test-importers.mjs, which spawns this on
+# imported .fdef text and asserts on the JSON it prints. Same C++ sources
+# as PROVISION_TARGET (parseFixtureDef/encodeProfile/parseProfile), minus
+# the test file, plus fdef_check.cpp.
+FDEF_CHECK_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp \
+                     color.cpp pixel_matrix.cpp provision.cpp show_bundle.cpp fdef_check.cpp
+FDEF_CHECK_OBJECTS = $(FDEF_CHECK_SOURCES:.cpp=.o)
+FDEF_CHECK_TARGET  = fdef_check
 
 # --- test_live_control: live control layer (MIDI/OSC/web → cues) tests ---
 LIVE_CONTROL_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp show.cpp \
@@ -173,6 +184,9 @@ $(PIXEL_MATRIX_TARGET): $(PIXEL_MATRIX_OBJECTS)
 
 $(PROVISION_TARGET): $(PROVISION_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(PROVISION_OBJECTS) -o $(PROVISION_TARGET) -lm
+
+$(FDEF_CHECK_TARGET): $(FDEF_CHECK_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(FDEF_CHECK_OBJECTS) -o $(FDEF_CHECK_TARGET) -lm
 
 $(LIVE_CONTROL_TARGET): $(LIVE_CONTROL_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(LIVE_CONTROL_OBJECTS) -o $(LIVE_CONTROL_TARGET) -lm
@@ -313,6 +327,14 @@ test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL
 	./$(DJLINK_MASTER_TARGET)
 	./$(SAFE_BLACKOUT_TARGET)
 
+# Browser fixture importers (web/shared/importers/): pure-JS parsing/mapping
+# tests, plus a round-trip through fdef_check (this is a separate target
+# from `test` -- it needs `node` on PATH, which the C++ host-tests CI job
+# doesn't guarantee; see .github/workflows/provisioner.yml instead, which
+# already runs Node for the WASM smoke tests).
+test-importers: $(FDEF_CHECK_TARGET)
+	node web/shared/importers/test-importers.mjs
+
 # Clean build artifacts
 clean:
 	rm -f $(AIM_OBJECTS) $(AIM_TARGET) $(FP_OBJECTS) $(FP_TARGET) $(SHOW_OBJECTS) $(SHOW_TARGET) \
@@ -335,6 +357,7 @@ clean:
 	      $(DJLINK_PARSER_OBJECTS) $(DJLINK_PARSER_TARGET) \
 	      $(DJLINK_MASTER_OBJECTS) $(DJLINK_MASTER_TARGET) \
 	      $(SAFE_BLACKOUT_OBJECTS) $(SAFE_BLACKOUT_TARGET) \
+	      $(FDEF_CHECK_OBJECTS) $(FDEF_CHECK_TARGET) \
 	      $(LUA_C_OBJECTS)
 
 # Rebuild
