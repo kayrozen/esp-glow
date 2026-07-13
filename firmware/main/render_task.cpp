@@ -35,6 +35,14 @@ static void*               s_pre_render_ctx = nullptr;
 static render_post_render_fn s_post_render = nullptr;
 static void*                 s_post_render_ctx = nullptr;
 
+// Cumulative counters for render_task_get_and_reset_stats(). Written only
+// from render_loop (this task); read/reset only from a post_render hook,
+// which also runs on this task (see main.cpp's render_tick_hooks) -- so
+// this is same-task, not cross-task, and needs no synchronization.
+static uint32_t s_statFrames = 0;
+static uint32_t s_statBehind = 0;
+static uint32_t s_statDropped = 0;
+
 static void render_loop(void*) {
   ESP_LOGI(TAG, "render loop started on core %d (period=%lu us%s%s)",
            xPortGetCoreID(), (unsigned long)s_periodUs,
@@ -105,6 +113,10 @@ static void render_loop(void*) {
     }
 
     frames++;
+    s_statFrames++;
+    if (r.behind) s_statBehind++;
+    s_statDropped += r.droppedFrames;
+
     if (now - lastReport >= 5'000'000u) {
       ESP_LOGI(TAG, "stats: %u frames, %u behind in last 5s",
                (unsigned)frames, (unsigned)behindCount);
@@ -151,3 +163,12 @@ void render_task_stop(void) {
 bool render_task_running(void) { return s_task != nullptr; }
 
 bool render_task_last_frame_behind(void) { return s_behind; }
+
+void render_task_get_and_reset_stats(uint32_t* frames, uint32_t* behind, uint32_t* dropped) {
+  if (frames) *frames = s_statFrames;
+  if (behind) *behind = s_statBehind;
+  if (dropped) *dropped = s_statDropped;
+  s_statFrames = 0;
+  s_statBehind = 0;
+  s_statDropped = 0;
+}

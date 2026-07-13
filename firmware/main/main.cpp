@@ -29,6 +29,7 @@
 //   - Status LED: double-pulse (WiFi up) + fast blink (render).
 
 #include <cstdio>
+#include <cstring>
 #include <vector>
 #include "esp_log.h"
 #include "esp_chip_info.h"
@@ -49,6 +50,7 @@
 #include "show_control.h"
 #include "live_control.h"
 #include "control_queue.h"
+#include "effects.h"  // DimmerEffect -- used by setup_selftest_fixture() (CONFIG_GLOW_SELFTEST)
 #include "dmx_sink.h"
 #include "artnet_sink.h"
 #include "pixel_matrix.h"
@@ -221,9 +223,132 @@ static bool g_luaReady = false;
 static bool g_blackout = false;
 static char g_blackoutReason[160] = {0};
 
+// --- Phase 0: HIL selftest observability (tests/hil/) -------------------
+//
+// Everything in this section is compiled in only under CONFIG_GLOW_SELFTEST
+// (Kconfig.projbuild) and MUST NEVER be on in a release build: it's a
+// chatty serial protocol plus a UART command-reader task that a real show
+// has no use for. It gives the tests/hil/ pytest suite two things a real
+// show has no need to expose:
+//   - structured `GLOW-TEST: <event> key=value...` telemetry lines, parsed
+//     by tests/hil/conftest.py's TelemetryLine
+//   - serial query commands (?dmx0 / ?state / ?lua), answered synchronously
+//     from a dedicated low-priority task, so hardware state is assertable
+//     without a WS client or a physical DMX loopback
+//
+// See the design doc / task description's "Phase 0 — Firmware
+// observability" section for the exact wire format each line/command must
+// produce; the HIL suite's tests are written against that format verbatim.
+#ifdef CONFIG_GLOW_SELFTEST
+
+// The selftest fixture's exact target byte: round(200.0f/255.0f * 255.0f)
+// == 200 with no rounding slop (see fixture_profile.cpp's applyCapability
+// and test_show.cpp's regression check for this same constant).
+static constexpr float kSelftestDimmerLevel = 200.0f / 255.0f;
+
+static void selftest_print_stats(uint32_t frames, uint32_t behind, uint32_t dropped) {
+  size_t heap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  size_t luaMem = g_luaReady ? glow::glowLuaVM().memUsed() : 0;
+  printf("GLOW-TEST: stats frames=%u behind=%u dropped=%u heap=%u lua_mem=%u\n",
+         (unsigned)frames, (unsigned)behind, (unsigned)dropped,
+         (unsigned)heap, (unsigned)luaMem);
+}
+
+// Answers one query line (already trimmed of its trailing newline). Runs on
+// the selftest query task, never the render task -- see
+// selftest_query_task's header comment for why that's safe despite reading
+// g_show/g_controller/the Lua VM, all of which the render task also touches.
+static void selftest_handle_query(const char* cmd) {
+  if (std::strcmp(cmd, "?dmx0") == 0) {
+    const uint8_t* data = g_show.universeData(0);
+    if (!data) {
+      printf("GLOW-TEST: dmx0 bytes=none\n");
+      return;
+    }
+    printf("GLOW-TEST: dmx0 bytes=%u,%u,%u,%u,%u,%u,%u,%u\n",
+           (unsigned)data[0], (unsigned)data[1], (unsigned)data[2], (unsigned)data[3],
+           (unsigned)data[4], (unsigned)data[5], (unsigned)data[6], (unsigned)data[7]);
+    return;
+  }
+
+  if (std::strcmp(cmd, "?state") == 0) {
+    uint16_t ids[32];
+    size_t n = g_controller.activeCueIds(ids, 32);
+    if (n == 0) {
+      printf("GLOW-TEST: state cues=none\n");
+      return;
+    }
+    char buf[256];
+    size_t off = 0;
+    for (size_t i = 0; i < n && off < sizeof(buf); ++i) {
+      off += static_cast<size_t>(snprintf(buf + off, sizeof(buf) - off, i ? ",%u" : "%u", (unsigned)ids[i]));
+    }
+    printf("GLOW-TEST: state cues=%s\n", buf);
+    return;
+  }
+
+  if (std::strcmp(cmd, "?lua") == 0) {
+    if (!g_luaReady) {
+      printf("GLOW-TEST: lua mem=0 highwater=0\n");
+      return;
+    }
+    printf("GLOW-TEST: lua mem=%u highwater=%u\n",
+           (unsigned)glow::glowLuaVM().memUsed(), (unsigned)glow::glowLuaVM().memHighWater());
+    return;
+  }
+
+  // Unrecognized query: silently ignored (not every line typed at the
+  // console is meant for us -- e.g. IDF's own monitor keystrokes).
+}
+
+// Blocks reading stdin (the same UART0 the ESP-IDF console/log already
+// uses) one byte at a time, accumulating a line, and dispatches it to
+// selftest_handle_query on '\n'. This is its own low-priority FreeRTOS
+// task specifically so it can block on fgetc(stdin) -- render_tick_hooks'
+// own comment is explicit that it is "the ONE place" for per-frame,
+// non-blocking work, and a blocking stdin read has no place there. Reading
+// g_show/g_controller/the Lua VM from a different task than the render
+// task IS a cross-core data race in general (see control_queue.h's
+// rationale) -- acceptable here only because this is test-only
+// instrumentation behind a flag that must never ship, answering a human
+// (or a test harness acting like one) one query at a time, not a
+// real-time control path.
+static void selftest_query_task(void*) {
+  char line[32];
+  size_t len = 0;
+  while (true) {
+    int c = fgetc(stdin);
+    if (c == EOF) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
+    if (c == '\r') continue;
+    if (c == '\n') {
+      line[len] = '\0';
+      if (len > 0) selftest_handle_query(line);
+      len = 0;
+      continue;
+    }
+    if (len + 1 < sizeof(line)) {
+      line[len++] = static_cast<char>(c);
+    } else {
+      len = 0;  // overlong line: drop it rather than mis-parse a truncation
+    }
+  }
+}
+
+#endif  // CONFIG_GLOW_SELFTEST
+
 // Fx-error broadcast: every connected client sees it (any of them may be
 // running the live REPL waiting to know an effect just died).
-static void send_fx_error_to_ws(void* /*ctx*/, const char* json, size_t len) {
+static void send_fx_error_to_ws(void* /*ctx*/, const char* effectName, const char* err,
+                                const char* json, size_t len) {
+#ifdef CONFIG_GLOW_SELFTEST
+  printf("GLOW-TEST: fx_disabled name=%s err=%s\n", effectName, err);
+#else
+  (void)effectName;
+  (void)err;
+#endif
   web_ws_broadcast(json, len);
 }
 
@@ -367,6 +492,11 @@ static void render_tick_hooks(RenderTickPhase phase, float t, uint32_t slack_us)
         frameCounter = 0;
         send_state_to_ws();
         send_blackout_status_to_ws();
+#ifdef CONFIG_GLOW_SELFTEST
+        uint32_t frames = 0, behind = 0, dropped = 0;
+        render_task_get_and_reset_stats(&frames, &behind, &dropped);
+        selftest_print_stats(frames, behind, dropped);
+#endif
       }
 
       if (!g_luaReady) break;
@@ -459,6 +589,9 @@ static void setup_lua() {
     glow_safe_blackout("scripts partition failed to mount; no boot.fnl this boot");
     return;
   }
+#ifdef CONFIG_GLOW_SELFTEST
+  printf("GLOW-TEST: scripts mount=ok\n");
+#endif
 
   static char bootBuf[16 * 1024];  // generous for a hand-written boot script
   size_t bootLen = 0;
@@ -482,6 +615,47 @@ static void setup_lua() {
   ESP_LOGI(TAG, "boot.fnl evaluated successfully.");
 }
 
+static FixtureProfile makeDimmerProfile() {
+  FixtureProfile p{};
+  p.footprint = 1;
+  p.channelCount = 1;
+  p.channels[0] = { Capability::Dimmer, 0, 0xFF, 0, 0 };
+  return p;
+}
+
+#ifdef CONFIG_GLOW_SELFTEST
+// Phase 0 selftest fixture: used in place of the normal no-bundle response
+// when CONFIG_GLOW_SELFTEST is on (see app_main). A real show (bundle-
+// loaded, or F5's safe blackout otherwise) isn't deterministic enough to
+// assert exact byte values against -- this patches exactly one fixture
+// (universe 0, channel 0) to a known Dimmer effect at kSelftestDimmerLevel
+// (200/255) and goes it immediately, so `?dmx0` always reads back 200 in
+// the first byte on a selftest build with no bundle flashed (see L0/L1 in
+// tests/hil/). Deliberately minimal -- no matrix, no Art-Net universes --
+// there is nothing here for a test to assert on except the one known
+// channel. This is the ONLY caller of makeDimmerProfile() left: the old
+// F1/F2 hardcoded fallback it used to share this with was removed by F5
+// (missing/corrupt bundle is a safe blackout now, not a demo patch -- see
+// glow_safe_blackout and this file's header comment).
+static void setup_selftest_fixture() {
+  ESP_LOGW(TAG, "CONFIG_GLOW_SELFTEST: using the deterministic selftest fixture (no bundle found).");
+  g_show.setUniverseCount(1);
+  g_show.configureUniverse(0, UniverseMode::Fixture, g_dmx);
+
+  FixtureProfile dimmer = makeDimmerProfile();
+  uint16_t fixtureId = g_show.patch(dimmer, 0, 0);
+  static DimmerEffect fx(std::vector<uint16_t>{fixtureId}, kSelftestDimmerLevel);
+  uint16_t cueId = g_controller.addCue({&fx}, /*fadeInSec=*/0.0f, /*fadeOutSec=*/0.0f, /*priority=*/0);
+  g_controller.go(cueId, 0.0f);
+
+  g_liveControl.bindButton(0, ActionKind::CueToggle, cueId);
+  g_wsCues[0] = { /*id=*/0, "Selftest", "#ff0000", ActionKind::CueToggle };
+  g_nWsCues = 1;
+  g_demoShowCueId = cueId;
+  g_hasDemoCue = true;
+}
+#endif  // CONFIG_GLOW_SELFTEST
+
 // F3: build the show from a loaded bundle via the host-tested applyLoadedShow.
 static bool setup_show_from_bundle() {
   uint8_t* buf = (uint8_t*)heap_caps_malloc(BUNDLE_BUF_CAP, MALLOC_CAP_SPIRAM);
@@ -496,6 +670,10 @@ static bool setup_show_from_bundle() {
     return false;
   }
   free(buf);  // loadShow copied what it needed
+#ifdef CONFIG_GLOW_SELFTEST
+  printf("GLOW-TEST: bundle fixtures=%u matrices=%u\n",
+         (unsigned)ls.fixtures.size(), (unsigned)ls.matrices.size());
+#endif
 
   DeviceSinkFactory factory;
   ApplyResult r = applyLoadedShow(ls, g_show, factory);
@@ -565,6 +743,9 @@ extern "C" void app_main(void) {
     return;
   }
   ota_manager_note_dmx_ready();  // F5: one of the three self-validation criteria
+#ifdef CONFIG_GLOW_SELFTEST
+  printf("GLOW-TEST: dmx begin=ok\n");
+#endif
 
   // --- F2/F5: WiFi (STA), with a SoftAP fallback after repeated failed
   // reconnects so the console stays reachable even when the venue's WiFi
@@ -581,6 +762,10 @@ extern "C" void app_main(void) {
   g_artnet = new ArtNetSink(bridge, 6454);
   if (!g_artnet->begin()) {
     ESP_LOGE(TAG, "Art-Net socket failed; matrix output disabled.");
+  } else {
+#ifdef CONFIG_GLOW_SELFTEST
+    printf("GLOW-TEST: artnet tx=ok\n");
+#endif
   }
 
   // --- F5: always keep at least one DMX universe configured and
@@ -597,7 +782,15 @@ extern "C" void app_main(void) {
   // see glow_safe_blackout and this file's header comment. ---
   bool from_bundle = setup_show_from_bundle();
   if (!from_bundle) {
+#ifdef CONFIG_GLOW_SELFTEST
+    // HIL builds get a deterministic fixture instead of blackout so the
+    // pytest suite has known bytes to assert on (see setup_selftest_fixture's
+    // header comment) -- CONFIG_GLOW_SELFTEST must never be on in a release
+    // build, so this never trades away F5's real-world guarantee below.
+    setup_selftest_fixture();
+#else
     glow_safe_blackout("show partition: missing or corrupt SHW1 bundle (no valid show)");
+#endif
   }
 
   // --- F6: g_controller is g_show's ONE effect (see its declaration's
@@ -636,6 +829,15 @@ extern "C" void app_main(void) {
     return;
   }
   led_status_set(LED_BLINK_FAST);
+#ifdef CONFIG_GLOW_SELFTEST
+  printf("GLOW-TEST: boot core=%u hz=%u\n", (unsigned)rcfg.core, (unsigned)rcfg.targetHz);
+  // Low priority (5, same tier as the MIDI/OSC transport tasks): answering
+  // a serial query is never more urgent than real-time rendering or
+  // network input, and this task spends nearly all its time blocked on
+  // fgetc(stdin) waiting for a byte.
+  xTaskCreatePinnedToCore(selftest_query_task, "selftest_query", 4096 / sizeof(StackType_t),
+                          nullptr, 5, nullptr, 0);
+#endif
 
   // --- F4/F5: web console (WS httpd + console static files + /ota) + MIDI
   // + OSC --- any g_liveControl bindings would need to already be in place
@@ -656,8 +858,18 @@ extern "C" void app_main(void) {
   xTaskCreatePinnedToCore(osc_server_task, "osc", 4096 / sizeof(StackType_t),
                           nullptr, 5, nullptr, 0);
 
-  ESP_LOGI(TAG, "F5 complete: show is %s.",
-           from_bundle ? "loaded from the 'show' partition" : "in safe blackout (no valid bundle)");
+  const char* showStatus;
+  if (from_bundle) {
+    showStatus = "loaded from the 'show' partition";
+#ifdef CONFIG_GLOW_SELFTEST
+  } else {
+    showStatus = "the CONFIG_GLOW_SELFTEST deterministic fixture (no valid bundle)";
+#else
+  } else {
+    showStatus = "in safe blackout (no valid bundle)";
+#endif
+  }
+  ESP_LOGI(TAG, "F5 complete: show is %s.", showStatus);
   ESP_LOGI(TAG, "Reflash the 'show' partition and reboot to change the patch.");
 
   while (true) {

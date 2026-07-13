@@ -67,6 +67,29 @@ static void test_behind_frame_does_not_catch_up() {
   CHECK(r.sleepUs == 0);
   // Next deadline is one period ahead of NOW, not of the old deadline.
   CHECK(r.nextDeadlineUs == now + period);
+  // 2.5 periods elapsed: one of those is ordinary lateness (behind=true
+  // already captures it); the other whole period rendered nothing at all.
+  CHECK(r.droppedFrames == 1);
+}
+
+static void test_slightly_behind_frame_drops_nothing() {
+  printf("Test: barely-behind frame (< 2 periods late) drops nothing\n");
+  uint32_t period = glow::DEFAULT_RENDER_PERIOD_US;
+  uint64_t prevDeadline = 1'000'000u;
+  uint64_t now = prevDeadline + period + 1;  // just over one period late
+  auto r = glow::paceNextFrame(period, now, prevDeadline);
+  CHECK(r.behind);
+  CHECK(r.droppedFrames == 0);
+}
+
+static void test_gc_pause_sized_gap_drops_many_frames() {
+  printf("Test: a GC-pause-sized gap (many periods) reports them as dropped\n");
+  uint32_t period = glow::DEFAULT_RENDER_PERIOD_US;
+  uint64_t prevDeadline = 1'000'000u;
+  uint64_t now = prevDeadline + (period * 20u);  // ~20 periods of silence
+  auto r = glow::paceNextFrame(period, now, prevDeadline);
+  CHECK(r.behind);
+  CHECK(r.droppedFrames == 19);
 }
 
 static void test_slight_overrun_recover() {
@@ -80,6 +103,7 @@ static void test_slight_overrun_recover() {
   auto r = glow::paceNextFrame(period, now, prevDeadline);
   uint64_t next = prevDeadline + period;  // 5,022,727
   CHECK(!r.behind);
+  CHECK(r.droppedFrames == 0);
   CHECK(r.sleepUs == static_cast<int32_t>(next - now));
   CHECK(r.nextDeadlineUs == next);
 }
@@ -134,6 +158,8 @@ int main() {
   test_first_frame_seeds_from_now();
   test_steady_state_pacing();
   test_behind_frame_does_not_catch_up();
+  test_slightly_behind_frame_drops_nothing();
+  test_gc_pause_sized_gap_drops_many_frames();
   test_slight_overrun_recover();
   test_cross_deadline_becomes_behind();
   test_zero_period_safe();

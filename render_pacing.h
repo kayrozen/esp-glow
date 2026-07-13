@@ -39,6 +39,14 @@ struct PaceResult {
                          // <= 0 means we are behind budget (do not sleep).
   uint64_t nextDeadlineUs;  // the target absolute tick for the next frame
   bool     behind;      // true if this frame overran its budget
+  uint32_t droppedFrames;  // whole frame periods that elapsed with no render
+                           // call between them (0 unless `behind` and the
+                           // overrun spans more than one period -- e.g. a GC
+                           // pause). This is the HIL suite's GC-risk signal
+                           // (GLOW-TEST: stats dropped=<n>): a single slow
+                           // frame sets `behind` but not `droppedFrames`; a
+                           // pause long enough to skip whole periods sets
+                           // both.
 };
 
 // Compute pacing for the next frame.

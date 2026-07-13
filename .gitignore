@@ -75,6 +75,7 @@ Testing/
 test_*
 !test_*.cpp
 !test_*.c
+!test_*.py
 
 # WASM build artifacts (rebuilt in CI, not committed)
 web/provision-wasm/build/

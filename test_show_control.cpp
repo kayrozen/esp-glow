@@ -571,6 +571,36 @@ void test_end_to_end() {
   delete effects[0];
 }
 
+void test_active_cue_ids() {
+  TEST("activeCueIds() lists only cues with active==true, matching isActive()");
+
+  ShowController ctrl;
+  std::vector<IEffect*> effects;
+  effects.push_back(new ConstCapEffect{0, Capability::Dimmer, 1.0f});
+
+  uint16_t cue0 = ctrl.addCue(effects, 0.0f, 0.0f, 0, 0.0f);  // no fade -- go()/release() are immediate
+  uint16_t cue1 = ctrl.addCue(effects, 0.0f, 0.0f, 0, 0.0f);
+  uint16_t cue2 = ctrl.addCue(effects, 0.0f, 0.0f, 0, 0.0f);
+
+  uint16_t ids[8];
+  CHECK(ctrl.activeCueIds(ids, 8) == 0);  // nothing active yet
+
+  ctrl.go(cue0, 0.0f);
+  ctrl.go(cue2, 0.0f);
+  size_t n = ctrl.activeCueIds(ids, 8);
+  CHECK(n == 2);
+  CHECK(ids[0] == cue0);
+  CHECK(ids[1] == cue2);
+  CHECK(ctrl.isActive(cue0));
+  CHECK(!ctrl.isActive(cue1));
+  CHECK(ctrl.isActive(cue2));
+
+  // Cap truncates rather than overflowing the caller's buffer.
+  CHECK(ctrl.activeCueIds(ids, 1) == 1);
+
+  delete effects[0];
+}
+
 int main() {
   printf("=== ShowController Tests ===\n\n");
 
@@ -596,6 +626,10 @@ int main() {
 
   // End-to-end
   test_end_to_end();
+
+  printf("\n");
+
+  test_active_cue_ids();
 
   printf("\n=== Results ===\n");
   if (g_failCount == 0) {
