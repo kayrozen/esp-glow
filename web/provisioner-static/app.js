@@ -11,7 +11,7 @@
 
 import createModule from "./wasm/provision-wasm.js";
 import { serialSupported, secureContextOk, flash as flashDevice } from "./flash.js";
-import { createFennelEditor, getEditorDoc, lintFootguns } from "../shared/fennel-editor.js";
+import { createFennelEditor, getEditorDoc, lintFootguns } from "./shared/fennel-editor.js";
 import { checkFennelSyntax } from "./fennel-check.js";
 import { buildScriptsImage } from "./boot-image.js";
 

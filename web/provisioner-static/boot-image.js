@@ -14,7 +14,7 @@ let modulePromise = null;
 async function getModule() {
   if (modulePromise) return modulePromise;
   modulePromise = (async () => {
-    const resp = await fetch(new URL("../vendor/littlefs-image.wasm", import.meta.url));
+    const resp = await fetch(new URL("./vendor/littlefs-image.wasm", import.meta.url));
     const bytes = await resp.arrayBuffer();
     const { instance } = await WebAssembly.instantiate(bytes, {});
     return instance.exports;
