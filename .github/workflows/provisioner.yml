@@ -156,6 +156,28 @@ jobs:
             echo "::warning::no firmware artifacts found; the web flasher's Flash step will be unavailable on this deploy."
           fi
 
+      - name: Verify no parent-relative imports at the site root
+        run: |
+          # web/provisioner-static/ becomes the *root* of the deployed site
+          # (kayrozen.github.io/esp-glow/), with shared/ and vendor/ copied
+          # in above as its direct children. A "../shared/..." or
+          # "../vendor/..." import/fetch from a file at this top level
+          # resolves ABOVE the site (to the domain root) and 404s on Pages —
+          # even though `test -f` on the copied files passes, and even
+          # though it happens to work in local dev (static-server.js serves
+          # from the domain root, so "../" there also lands on "/shared").
+          # Files inside shared/ or vendor/ themselves may legitimately use
+          # "../" to reach a sibling within that same tree, so only the
+          # top-level files are checked.
+          bad=0
+          for f in web/provisioner-static/*.js; do
+            if grep -nE "\.\./(shared|vendor)/" "$f"; then
+              echo "::error file=$f::parent-relative import escapes the GitHub Pages subpath; use ./shared/... or ./vendor/... instead"
+              bad=1
+            fi
+          done
+          exit $bad
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:

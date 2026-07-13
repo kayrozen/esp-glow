@@ -15,7 +15,7 @@
 // button copy).
 //
 
-import { LuaFactory } from "../vendor/wasmoon-bundle.mjs";
+import { LuaFactory } from "./vendor/wasmoon-bundle.mjs";
 
 let enginePromise = null;
 
@@ -41,11 +41,11 @@ glow.matrix = stubtable({"pattern", "brightness"})
 async function getEngine() {
   if (enginePromise) return enginePromise;
   enginePromise = (async () => {
-    const glueUrl = new URL("../vendor/glue.wasm", import.meta.url).href;
+    const glueUrl = new URL("./vendor/glue.wasm", import.meta.url).href;
     const factory = new LuaFactory(glueUrl);
     const lua = await factory.createEngine();
 
-    const fennelSrc = await (await fetch(new URL("../vendor/fennel.lua", import.meta.url))).text();
+    const fennelSrc = await (await fetch(new URL("./vendor/fennel.lua", import.meta.url))).text();
     await lua.doString(GLOW_STUB_SRC);
     await lua.doString(`
       local fennel = (function() ${fennelSrc} end)()
