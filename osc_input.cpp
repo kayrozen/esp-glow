@@ -3,16 +3,19 @@
 //
 // OSC input — device transport.
 //
-// Listens on a UDP socket and parses each datagram into ControlEvents via
-// parseOsc (osc_parser.h, host-tested), pushing them to the control-event
-// queue. The render task drains the queue via pumpControlEvents() and
-// dispatches to LiveControl — the transport never touches
-// LiveControl/ShowController directly, eliminating the cross-core data
-// race. See control_queue.h for the rationale.
+// Listens on a UDP socket and parses each datagram via parseOscPacket
+// (osc_parser.h, host-tested), pushing each resulting ControlEvent to the
+// control-event queue. parseOscPacket transparently handles both a plain
+// message (the common case) and a bundle of messages (dispatched
+// immediately, timetags ignored -- see osc_parser.h's header for why).
+// The render task drains the queue via pumpControlEvents() and dispatches
+// to LiveControl — the transport never touches LiveControl/ShowController
+// directly, eliminating the cross-core data race. See control_queue.h for
+// the rationale.
 //
-// Bundles, full type-tag support, and matching multiple bound addresses
-// per packet are out of scope (see osc_parser.h) — one address, one
-// float/int arg, same as a MIDI CC.
+// Full type-tag support and matching multiple bound addresses per message
+// are out of scope (see osc_parser.h) — one address, one float/int arg,
+// same as a MIDI CC.
 //
 
 #include "osc_input.h"
@@ -40,13 +43,15 @@ void osc_input_init(IControlEventQueue& queue, const OscAddressMap& map, uint16_
   g_port = udpPort;
 }
 
+namespace {
+void pushEvent(void* ctx, const ControlEvent& ev) {
+  static_cast<IControlEventQueue*>(ctx)->push(ev);
+}
+}  // namespace
+
 void osc_input_handle_packet(const uint8_t* packet, size_t len) {
   if (g_queue == nullptr) return;
-
-  ControlEvent ev;
-  if (parseOsc(packet, len, g_map, ev)) {
-    g_queue->push(ev);
-  }
+  parseOscPacket(packet, len, g_map, &pushEvent, g_queue);
 }
 
 void osc_server_task(void* /*ctx*/) {

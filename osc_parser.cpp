@@ -85,3 +85,55 @@ bool parseOsc(const uint8_t* pkt, size_t len, const OscAddressMap& map, ControlE
   }
   return false;  // address not in the map
 }
+
+namespace {
+
+constexpr uint8_t kBundleMarker[8] = {'#', 'b', 'u', 'n', 'd', 'l', 'e', 0};
+
+// Bundles can nest ("a bundle may contain other bundles"); cap depth so a
+// malformed/adversarial packet can't recurse arbitrarily deep. Ordinary
+// use never nests more than one or two levels.
+constexpr int kMaxBundleDepth = 8;
+
+size_t parseOscPacketRec(const uint8_t* pkt, size_t len, const OscAddressMap& map,
+                         OscEventFn onEvent, void* ctx, int depth) {
+  if (pkt == nullptr || len == 0) return 0;
+
+  if (!isOscBundle(pkt, len)) {
+    ControlEvent ev;
+    if (!parseOsc(pkt, len, map, ev)) return 0;
+    if (onEvent) onEvent(ctx, ev);
+    return 1;
+  }
+
+  if (depth >= kMaxBundleDepth) return 0;
+
+  // Header (8 bytes marker) + 8-byte timetag (ignored -- see osc_parser.h).
+  if (len < 16) return 0;
+
+  size_t dispatched = 0;
+  size_t pos = 16;
+  while (pos + 4 <= len) {
+    uint32_t elemSize = (static_cast<uint32_t>(pkt[pos]) << 24) |
+                        (static_cast<uint32_t>(pkt[pos + 1]) << 16) |
+                        (static_cast<uint32_t>(pkt[pos + 2]) << 8) |
+                        static_cast<uint32_t>(pkt[pos + 3]);
+    pos += 4;
+    if (elemSize == 0 || pos + elemSize > len) break;  // malformed -- stop, never overread
+    dispatched += parseOscPacketRec(pkt + pos, elemSize, map, onEvent, ctx, depth + 1);
+    pos += elemSize;
+  }
+  return dispatched;
+}
+
+}  // namespace
+
+bool isOscBundle(const uint8_t* pkt, size_t len) {
+  if (pkt == nullptr || len < sizeof(kBundleMarker)) return false;
+  return std::memcmp(pkt, kBundleMarker, sizeof(kBundleMarker)) == 0;
+}
+
+size_t parseOscPacket(const uint8_t* pkt, size_t len, const OscAddressMap& map,
+                      OscEventFn onEvent, void* ctx) {
+  return parseOscPacketRec(pkt, len, map, onEvent, ctx, 0);
+}

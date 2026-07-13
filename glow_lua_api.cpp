@@ -55,6 +55,16 @@ bool capabilityFromName(const char* s, size_t len, Capability& out) {
   return false;
 }
 
+// GlowLuaApi::currentT_ is wall-clock seconds (float); BeatClock's API is
+// in monotonic microseconds (uint64_t) -- see beat_clock.h's header for
+// why (the PLL's correction math wants microsecond precision on the
+// EVENT side; querying with frame-granularity precision, derived from
+// the same `t` that already flows through renderFrame, is plenty for a
+// phase that only changes meaningfully over tens/hundreds of ms).
+uint64_t tUsFromSeconds(float t) {
+  return static_cast<uint64_t>(static_cast<double>(t) * 1.0e6);
+}
+
 void registerFn(lua_State* L, int tblIdx, const char* name, lua_CFunction fn, void* ud) {
   tblIdx = lua_absindex(L, tblIdx);
   lua_pushlightuserdata(L, ud);
@@ -114,8 +124,9 @@ std::vector<uint16_t> checkFixtureIdList(lua_State* L, int idx) {
 
 }  // namespace
 
-GlowLuaApi::GlowLuaApi(glow::LuaVM& vm, ShowController& show, IMatrixRegistry* matrices)
-    : vm_(vm), show_(show), matrices_(matrices) {}
+GlowLuaApi::GlowLuaApi(glow::LuaVM& vm, ShowController& show, IMatrixRegistry* matrices,
+                       glow::BeatClock& beatClock)
+    : vm_(vm), show_(show), matrices_(matrices), beatClock_(beatClock) {}
 
 GlowLuaApi::~GlowLuaApi() = default;
 
@@ -440,6 +451,52 @@ int GlowLuaApi::l_matrix_brightness(lua_State* L) {
   return 0;
 }
 
+// --- glow.beat / glow.bar / glow.beat-number / glow.bpm / glow.locked? / glow.tap ---
+//
+// Read-only queries (and one write, glow.tap) against the render task's
+// one BeatClock. Not frame-gated like glow.set/glow.aim -- they only need
+// api.currentT_ (set by beginFrame OR noteEvalTime, see glow_lua_api.h),
+// same as glow.cue.go/release. Degrade gracefully by construction: a
+// glow::BeatClock always has a valid phase/bpm/locked answer, even
+// freshly constructed with zero external input (see beat_clock.h) -- so
+// there is no "not ready yet" error path to write here.
+
+int GlowLuaApi::l_beat_phase(lua_State* L) {
+  GlowLuaApi& api = self(L);
+  lua_pushnumber(L, api.beatClock_.beatPhase(tUsFromSeconds(api.currentT_)));
+  return 1;
+}
+
+int GlowLuaApi::l_bar_phase(lua_State* L) {
+  GlowLuaApi& api = self(L);
+  lua_pushnumber(L, api.beatClock_.barPhase(tUsFromSeconds(api.currentT_)));
+  return 1;
+}
+
+int GlowLuaApi::l_beat_number(lua_State* L) {
+  GlowLuaApi& api = self(L);
+  lua_pushnumber(L, api.beatClock_.beatNumber(tUsFromSeconds(api.currentT_)));
+  return 1;
+}
+
+int GlowLuaApi::l_bpm(lua_State* L) {
+  GlowLuaApi& api = self(L);
+  lua_pushnumber(L, api.beatClock_.bpm());
+  return 1;
+}
+
+int GlowLuaApi::l_locked(lua_State* L) {
+  GlowLuaApi& api = self(L);
+  lua_pushboolean(L, api.beatClock_.locked() ? 1 : 0);
+  return 1;
+}
+
+int GlowLuaApi::l_tap(lua_State* L) {
+  GlowLuaApi& api = self(L);
+  api.beatClock_.tap(tUsFromSeconds(api.currentT_));
+  return 0;
+}
+
 // --- install -----------------------------------------------------------------
 
 void GlowLuaApi::install() {
@@ -483,6 +540,18 @@ void GlowLuaApi::install() {
   registerFn(L, -1, "pattern", &GlowLuaApi::l_matrix_pattern, this);
   registerFn(L, -1, "brightness", &GlowLuaApi::l_matrix_brightness, this);
   lua_setfield(L, glowIdx, "matrix");
+
+  // Musical time -- top-level, not a sub-table (matches the Fennel call
+  // shape (glow.beat), (glow.bar), ... ). "beat-number" and "locked?"
+  // aren't valid Lua identifiers, but Fennel compiles dotted access on a
+  // symbol containing '-'/'?' to bracket/string indexing (glow["beat-number"]),
+  // so the literal string keys below are exactly what Fennel looks up.
+  registerFn(L, glowIdx, "beat", &GlowLuaApi::l_beat_phase, this);
+  registerFn(L, glowIdx, "bar", &GlowLuaApi::l_bar_phase, this);
+  registerFn(L, glowIdx, "beat-number", &GlowLuaApi::l_beat_number, this);
+  registerFn(L, glowIdx, "bpm", &GlowLuaApi::l_bpm, this);
+  registerFn(L, glowIdx, "locked?", &GlowLuaApi::l_locked, this);
+  registerFn(L, glowIdx, "tap", &GlowLuaApi::l_tap, this);
 
   lua_setglobal(L, "glow");
 }

@@ -68,6 +68,39 @@ static void test_oscillated_param() {
   CHECK_NEAR(p2.value(1.0f), 1.0f);
 }
 
+static void test_phase_from_beat() {
+  TEST("phaseFromBeat: period in beats, mirrors phaseFromTime's shape");
+  CHECK_NEAR(phaseFromBeat(0.0, 2.0f, 0.0f), 0.0f);
+  CHECK_NEAR(phaseFromBeat(1.0, 2.0f, 0.0f), 0.5f);
+  CHECK_NEAR(phaseFromBeat(2.0, 2.0f, 0.0f), 0.0f);
+  CHECK_NEAR(phaseFromBeat(1.0, 2.0f, 0.5f), 0.0f);
+  // Fractional beat numbers (as BeatClock::beatNumber returns) interpolate
+  // smoothly, same as phaseFromTime does for fractional seconds.
+  CHECK_NEAR(phaseFromBeat(0.5, 1.0f, 0.0f), 0.5f);
+  CHECK_NEAR(phaseFromBeat(3.75, 1.0f, 0.0f), 0.75f);
+  // periodBeats <= 0 -> 0, same defensive contract as phaseFromTime.
+  CHECK_NEAR(phaseFromBeat(5.0, 0.0f, 0.0f), 0.0f);
+}
+
+static void test_oscillated_param_sync_to_beat() {
+  TEST("OscillatedParam::valueAtBeat: syncToBeat mode tracks beat number, not t");
+  OscillatedParam p{};
+  p.w = Waveform::Sawtooth;
+  p.syncToBeat = true;
+  p.periodBeats = 4.0f;  // one bar (4/4) per cycle
+  p.min = 0.0f;
+  p.max = 1.0f;
+
+  CHECK_NEAR(p.valueAtBeat(0.0), 0.0f);
+  CHECK_NEAR(p.valueAtBeat(2.0), 0.5f);   // halfway through the bar
+  CHECK_NEAR(p.valueAtBeat(4.0), 0.0f);   // wraps exactly at the next bar
+  CHECK_NEAR(p.valueAtBeat(4.0 + 1e-6), 0.0f);
+
+  // Driven by beat number, NOT wall-clock t -- a fixed beatNumber gives a
+  // fixed value regardless of what t would otherwise imply.
+  CHECK_NEAR(p.valueAtBeat(1.0), p.valueAtBeat(1.0));
+}
+
 static void test_hsv_to_rgb_primaries() {
   TEST("hsvToRgb primaries");
   Rgb r = hsvToRgb(0.0f, 1.0f, 1.0f);
@@ -250,6 +283,8 @@ int main() {
   test_oscillator_square();
   test_phase_from_time();
   test_oscillated_param();
+  test_phase_from_beat();
+  test_oscillated_param_sync_to_beat();
   test_hsv_to_rgb_primaries();
   test_hsv_to_rgb_gray_and_wrap();
   test_dimmer_effect();

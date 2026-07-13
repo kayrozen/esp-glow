@@ -51,6 +51,8 @@
 #include "show_bundle.h"
 #include "apply_loaded_show.h"
 
+#include "beat_clock.h"
+#include "beat_queue.h"
 #include "glow_fennel.h"
 #include "glow_lua_api.h"
 #include "lua_vm.h"  // complete LuaVM type -- glow_fennel.h only forward-declares it (glowLuaVM().gcStepSlack(...) needs the full definition)
@@ -59,7 +61,8 @@
 #include "web_protocol.h"  // buildEvalResultJson (send_eval_result_to_ws)
 #include "midi_input.h"
 #include "osc_input.h"
-#include "freertos/task.h"  // xTaskCreatePinnedToCore (midi_uart_task/osc_server_task)
+#include "djlink_input.h"
+#include "freertos/task.h"  // xTaskCreatePinnedToCore (midi_uart_task/osc_server_task/djlink_*_task)
 
 // The vendored Fennel compiler, embedded via EMBED_FILES (see
 // firmware/main/CMakeLists.txt). ESP-IDF's convention: a file's basename
@@ -140,6 +143,15 @@ static IControlEventQueue* g_controlQueue = nullptr;
 // drains it (glow::pumpEvalSubmissions in on_pre_render) and broadcasts
 // each result (send_eval_result_to_ws).
 static IEvalSubmissionQueue* g_evalQueue = nullptr;
+
+// Musical time: MIDI clock/DJ-Link/tap all push glow::BeatEvents onto this
+// queue (same transport-pushes/render-task-drains discipline as
+// g_controlQueue -- see beat_queue.h). g_beatClock is owned by, and only
+// ever touched from, the render task (drained in on_pre_render, alongside
+// pumpControlEvents), and is what glow.beat/bar/bpm/locked? (glow_lua_api)
+// read from every frame.
+static glow::BeatClock g_beatClock;
+static glow::IBeatEventQueue* g_beatQueue = nullptr;
 
 // F4: demo cue metadata for the web console + the MIDI/OSC binding table
 // -- intentionally minimal (one togglable cue, one master fader), matching
@@ -263,6 +275,13 @@ static void render_tick_hooks(RenderTickPhase phase, float t, uint32_t slack_us)
       if (g_evalQueue) {
         glow::pumpEvalSubmissions(*g_evalQueue, /*maxPerFrame=*/4, send_eval_result_to_ws, nullptr);
       }
+      // Musical time: drain MIDI-clock/DJ-Link/tap BeatEvents into
+      // g_beatClock -- same contract as g_controlQueue above, and must
+      // also run before renderFrame so this frame's beat-synced effects
+      // see this frame's phase, not last frame's.
+      if (g_beatQueue) {
+        glow::pumpBeatEvents(*g_beatQueue, g_beatClock);
+      }
       break;
 
     case RenderTickPhase::Post: {
@@ -331,7 +350,7 @@ static void setup_lua() {
   size_t fennelLen = static_cast<size_t>(fennel_lua_end - fennel_lua_start);
 
   char err[256];
-  g_luaReady = glow::glowLuaInit(g_controller, &g_matrixRegistry, fennelSrc, fennelLen, err, sizeof(err));
+  g_luaReady = glow::glowLuaInit(g_controller, &g_matrixRegistry, g_beatClock, fennelSrc, fennelLen, err, sizeof(err));
   if (!g_luaReady) {
     ESP_LOGE(TAG, "Lua/Fennel init failed (scripts disabled this boot): %s", err);
     return;
@@ -522,6 +541,12 @@ extern "C" void app_main(void) {
   // --- F4: eval submission queue, same sizing rationale as g_controlQueue ---
   g_evalQueue = createDeviceEvalSubmissionQueue(64);
 
+  // --- Musical time: the beat-event queue MIDI clock/DJ-Link/tap push
+  // into, drained into g_beatClock every frame (see on_pre_render). Beats
+  // arrive far less often than control events (at most a few Hz even at
+  // fast tempos), so a smaller capacity than g_controlQueue is plenty. ---
+  g_beatQueue = createDeviceBeatEventQueue(16);
+
   // --- F6: Lua/Fennel VM + boot.fnl (see setup_lua's comment) ---
   setup_lua();
 
@@ -555,12 +580,22 @@ extern "C" void app_main(void) {
                  /*hasMaster=*/true);
   web_server_task(nullptr);  // starts httpd; not a FreeRTOS task itself (see web_input.h)
 
-  midi_input_init(*g_controlQueue, CONFIG_GLOW_MIDI_UART_NUM, CONFIG_GLOW_MIDI_RX_GPIO);
+  midi_input_init(*g_controlQueue, g_beatQueue, CONFIG_GLOW_MIDI_UART_NUM, CONFIG_GLOW_MIDI_RX_GPIO);
   xTaskCreatePinnedToCore(midi_uart_task, "midi", 4096 / sizeof(StackType_t),
                           nullptr, 5, nullptr, 0);
 
   osc_input_init(*g_controlQueue, g_oscMap, static_cast<uint16_t>(CONFIG_GLOW_OSC_UDP_PORT));
   xTaskCreatePinnedToCore(osc_server_task, "osc", 4096 / sizeof(StackType_t),
+                          nullptr, 5, nullptr, 0);
+
+  // Musical time: passive Pro DJ Link listener (Afterglow's signature
+  // feature -- see djlink_parser.h's header). Two tasks, one per UDP
+  // port: beat packets (50001, the actual sync source) and CDJ status's
+  // tempo-master flag (50002, gates which player's beats get accepted).
+  djlink_input_init(*g_beatQueue);
+  xTaskCreatePinnedToCore(djlink_beat_task, "djlink_beat", 4096 / sizeof(StackType_t),
+                          nullptr, 5, nullptr, 0);
+  xTaskCreatePinnedToCore(djlink_status_task, "djlink_status", 4096 / sizeof(StackType_t),
                           nullptr, 5, nullptr, 0);
 
   ESP_LOGI(TAG, "F3 complete: show is %s.",

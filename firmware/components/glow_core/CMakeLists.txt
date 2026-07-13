@@ -50,6 +50,12 @@ idf_component_register(
         ${GLOW_ROOT}/show_bundle.cpp
         # F1: host-tested render-pacing math
         ${GLOW_ROOT}/render_pacing.cpp
+        # Musical time: PLL-smoothed beat clock (host-tested; the transports
+        # that feed it -- MIDI clock, DJ-Link -- are the #ifdef ESP_PLATFORM
+        # device files further down) + the BeatEvent queue they push through.
+        ${GLOW_ROOT}/beat_clock.cpp
+        ${GLOW_ROOT}/beat_queue.cpp
+        ${GLOW_ROOT}/beat_queue_freertos.cpp
         # F3: host-tested patch routing from a LoadedShow
         ${GLOW_ROOT}/apply_loaded_show.cpp
         # device-only DMX sink (#ifdef ESP_PLATFORM guarded; filled in F1)
@@ -80,12 +86,20 @@ idf_component_register(
         # these already build and run under `make test`)
         ${GLOW_ROOT}/web_protocol.cpp
         ${GLOW_ROOT}/osc_parser.cpp
+        # Musical time: MIDI realtime-byte framing (host-tested) + passive
+        # Pro DJ Link packet parsing/master-tracking (host-tested; byte
+        # offsets verified against Deep Symmetry's dysentery protocol
+        # analysis -- see djlink_parser.h's header).
+        ${GLOW_ROOT}/midi_realtime.cpp
+        ${GLOW_ROOT}/djlink_parser.cpp
+        ${GLOW_ROOT}/djlink_master_tracker.cpp
         # F4: the device-only transports that call the above (#ifdef
         # ESP_PLATFORM guarded; see each file's own header for the real
         # esp_http_server/UART/UDP wiring)
         ${GLOW_ROOT}/web_input.cpp
         ${GLOW_ROOT}/midi_input.cpp
         ${GLOW_ROOT}/osc_input.cpp
+        ${GLOW_ROOT}/djlink_input.cpp
     INCLUDE_DIRS
         ${GLOW_ROOT}
         ${GLOW_ROOT}/third_party/lua

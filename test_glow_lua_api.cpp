@@ -5,12 +5,14 @@
 
 #include "glow_lua_api.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <sstream>
 #include <string>
 
+#include "lua_effect.h"
 #include "lua_vm.h"
 #include "pixel_matrix.h"
 #include "show_control.h"
@@ -52,10 +54,11 @@ struct Harness {
   ShowController show;
   glow::LuaVM vm;
   IMatrixRegistry* matrices;
+  glow::BeatClock beatClock;
   GlowLuaApi api;
 
   Harness(const std::string& fennelSrc, IMatrixRegistry* mats = nullptr)
-      : vm(), matrices(mats), api(vm, show, mats) {
+      : vm(), matrices(mats), api(vm, show, mats, beatClock) {
     api.install();
     char err[256];
     if (!vm.loadFennelCompiler(fennelSrc.data(), fennelSrc.size(), err, sizeof(err))) {
@@ -92,6 +95,71 @@ struct Harness {
       printf("FATAL: eval failed: %s\n", err.c_str());
       std::abort();
     }
+  }
+
+  // Evaluates `src` and returns its value directly (Fennel's eval, like a
+  // REPL, returns the last expression's value) -- unlike eval()/global,
+  // this doesn't depend on the sandboxed env's globals ever being visible
+  // to the real _G (they aren't: `(global x v)` inside a sandboxed eval
+  // sets x in the sandbox table, not real Lua globals).
+  double evalNumber(const char* src) {
+    lua_State* L = vm.state();
+    vm.pushFennelModule();
+    lua_getfield(L, -1, "eval");
+    lua_remove(L, -2);
+    lua_pushlstring(L, src, std::strlen(src));
+    lua_newtable(L);
+    vm.pushSandboxEnv();
+    lua_setfield(L, -2, "env");
+    api.noteEvalTime(evalTime);
+    vm.armEvalBudget();
+    if (lua_pcall(L, 2, 1, 0) != LUA_OK) {
+      printf("FATAL: evalNumber failed: %s\n", lua_tostring(L, -1));
+      std::abort();
+    }
+    double v = lua_tonumber(L, -1);
+    lua_pop(L, 1);
+    return v;
+  }
+
+  bool evalBool(const char* src) {
+    lua_State* L = vm.state();
+    vm.pushFennelModule();
+    lua_getfield(L, -1, "eval");
+    lua_remove(L, -2);
+    lua_pushlstring(L, src, std::strlen(src));
+    lua_newtable(L);
+    vm.pushSandboxEnv();
+    lua_setfield(L, -2, "env");
+    api.noteEvalTime(evalTime);
+    vm.armEvalBudget();
+    if (lua_pcall(L, 2, 1, 0) != LUA_OK) {
+      printf("FATAL: evalBool failed: %s\n", lua_tostring(L, -1));
+      std::abort();
+    }
+    bool v = lua_toboolean(L, -1) != 0;
+    lua_pop(L, 1);
+    return v;
+  }
+
+  // Compiles `src` to a bare function value (no top-level call) and takes
+  // a registry ref to it, for constructing a LuaEffect directly -- mirrors
+  // test_lua_effect.cpp's Harness::compileToRef.
+  int compileToRef(const char* src) {
+    lua_State* L = vm.state();
+    vm.pushFennelModule();
+    lua_getfield(L, -1, "eval");
+    lua_remove(L, -2);
+    lua_pushlstring(L, src, std::strlen(src));
+    lua_newtable(L);
+    vm.pushSandboxEnv();
+    lua_setfield(L, -2, "env");
+    vm.armEvalBudget();
+    if (lua_pcall(L, 2, 1, 0) != LUA_OK) {
+      printf("FATAL: compileToRef failed: %s\n", lua_tostring(L, -1));
+      std::abort();
+    }
+    return luaL_ref(L, LUA_REGISTRYINDEX);
   }
 
   float evalTime = 0.0f;
@@ -366,6 +434,83 @@ void test_matrix_unknown_pattern_name_errors() {
   CHECK(err.find("unknown pattern") != std::string::npos);
 }
 
+// ---------------------------------------------------------------------------
+// glow.beat / glow.bar / glow.beat-number / glow.bpm / glow.locked? / glow.tap
+// ---------------------------------------------------------------------------
+
+void test_glow_bpm_locked_default_free_running() {
+  TEST("glow.bpm/glow.locked?: a fresh clock is unlocked, glow.beat still returns a sensible phase");
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc);
+  CHECK(h.evalBool("(glow.locked?)") == false);
+  CHECK(h.evalNumber("(glow.bpm)") == 0.0);  // no tempo established yet -- "unknown", not garbage
+  double beat = h.evalNumber("(glow.beat)");
+  CHECK(beat >= 0.0 && beat < 1.0);  // still a real, in-range number, never nil/NaN
+}
+
+void test_glow_tap_drives_the_underlying_beat_clock() {
+  TEST("glow.tap: four taps from Fennel converge the underlying BeatClock to ~120 BPM");
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc);
+
+  double tSec = 0.0;
+  for (int i = 0; i < 4; ++i) {
+    h.evalTime = static_cast<float>(tSec);
+    h.evalOrDie("(glow.tap)");
+    tSec += 0.5;  // 500ms between taps -> 120 BPM
+  }
+
+  CHECK(std::fabs(h.beatClock.bpm() - 120.0f) < 1.0f);
+
+  // The Lua-side glow.bpm() reads the SAME clock (not a copy).
+  CHECK(std::fabs(h.evalNumber("(glow.bpm)") - 120.0) < 1.0);
+}
+
+void test_glow_beat_pulses_with_tapped_tempo_no_snap() {
+  TEST("a Fennel effect using (glow.beat) pulses in time with a tapped tempo, no visible snapping");
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc);
+
+  // Establish a steady 120 BPM via glow.tap, exactly like a console user
+  // tapping along (T4's whole point: develop/test beat-synced effects with
+  // no external gear).
+  double tSec = 0.0;
+  for (int i = 0; i < 4; ++i) {
+    h.evalTime = static_cast<float>(tSec);
+    h.evalOrDie("(glow.tap)");
+    tSec += 0.5;
+  }
+
+  // "pulse decaying every beat" -- exactly the DoD's example effect.
+  const char* src = "(fn pulse [t] (glow.set 1 :dimmer (- 1 (glow.beat))))";
+  int ref = h.compileToRef(src);
+  LuaEffect fx(h.api, ref, "pulse");
+
+  // Sample densely across a couple of beats; the dimmer value must ramp
+  // down smoothly (1 -> 0) within each beat and never jump back up except
+  // exactly at a beat boundary (where it wraps 0 -> ~1), and even that
+  // wrap must not overshoot past 1.0.
+  double prevDimmer = -1.0;
+  int wraps = 0;
+  for (int i = 0; i < 400; ++i) {
+    float t = static_cast<float>(tSec + i * (0.5 / 40.0));  // 40 samples/beat
+    std::vector<CapIntent> caps;
+    std::vector<AimIntent> aims;
+    fx.evaluate(t, caps, aims);
+    CHECK(!fx.disabled());
+    CHECK(caps.size() == 1);
+    double dimmer = caps[0].norm01;
+    CHECK(dimmer >= -1e-4 && dimmer <= 1.0 + 1e-4);  // never overshoots
+    if (prevDimmer >= 0.0 && dimmer > prevDimmer + 0.05) {
+      ++wraps;  // a legitimate beat-boundary wrap (0 -> ~1)
+    } else if (prevDimmer >= 0.0) {
+      CHECK(dimmer <= prevDimmer + 0.03);  // otherwise: smooth decay, no snap
+    }
+    prevDimmer = dimmer;
+  }
+  CHECK(wraps >= 4);  // ~5 beats sampled -> should see several wraps
+}
+
 int main() {
   test_cue_define_and_go_activates_showcontroller_cue();
   test_cue_release_deactivates();
@@ -385,6 +530,10 @@ int main() {
   test_matrix_pattern_unknown_index_errors();
   test_matrix_without_registry_errors_cleanly();
   test_matrix_unknown_pattern_name_errors();
+
+  test_glow_bpm_locked_default_free_running();
+  test_glow_tap_drives_the_underlying_beat_clock();
+  test_glow_beat_pulses_with_tapped_tempo_no_snap();
 
   if (g_failCount == 0) {
     printf("\nAll tests passed.\n");

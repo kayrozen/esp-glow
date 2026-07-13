@@ -3,29 +3,36 @@
 //
 // MIDI input — device transport.
 //
-// Parses MIDI bytes into ControlEvents and pushes them to the
-// control-event queue. The render task drains the queue via
-// pumpControlEvents() and dispatches to LiveControl — the transports
-// no longer touch LiveControl/ShowController directly, eliminating the
-// cross-core data race. See control_queue.h for the rationale.
+// Bytes go through MidiByteReader (midi_realtime.h, host-tested): it
+// frames 3-byte channel messages AND recognizes MIDI Realtime bytes
+// (Clock 0xF8 et al.) interleaved mid-message without disturbing that
+// framing. Channel messages are parsed with parseMidi (live_control.h)
+// into ControlEvents pushed onto the control queue; every 24th Clock
+// pulse becomes a BeatEvent pushed onto the beat queue (no tempo
+// estimation here -- that's BeatClock's PLL, fed via pumpBeatEvents on
+// the render task). The render task drains both queues; this transport
+// never touches LiveControl/ShowController/BeatClock directly,
+// eliminating the cross-core data race. See control_queue.h/beat_queue.h
+// for the rationale.
 //
 // DIN-MIDI over UART, standard 31250-8N1, RX only (no MIDI OUT/THRU on
 // this device). Running-status is NOT handled -- a real DIN-MIDI keyboard
 // that leans on it (repeated Note On without resending the status byte)
 // will drop messages here; adding that is a straightforward extension to
-// midi_input_handle_byte's framing (track the last status byte across
-// calls) if a real controller needs it. Byte framing/UART wiring lives in
-// this file; message parsing itself is parseMidi (live_control.h,
-// host-tested).
+// MidiByteReader::feed (track the last status byte across calls) if a
+// real controller needs it.
 //
 
 #include "midi_input.h"
 
-#include "control_queue.h"  // IControlEventQueue, ControlEvent (transitively)
-#include "live_control.h"   // ControlType, parseMidi
+#include "control_queue.h"   // IControlEventQueue, ControlEvent (transitively)
+#include "live_control.h"    // ControlType, parseMidi
+#include "midi_realtime.h"   // MidiByteReader (host-tested byte framing)
+#include "beat_queue.h"      // glow::IBeatEventQueue, glow::BeatEvent
 
 #include "driver/uart.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -34,11 +41,15 @@
 static const char* TAG = "midi_input";
 
 static IControlEventQueue* g_queue = nullptr;
+static glow::IBeatEventQueue* g_beatQueue = nullptr;
 static int g_uartNum = UART_NUM_2;
 static int g_rxGpio = -1;
+static MidiByteReader g_reader;
 
-void midi_input_init(IControlEventQueue& queue, int uartNum, int rxGpio) {
+void midi_input_init(IControlEventQueue& queue, glow::IBeatEventQueue* beatQueue,
+                     int uartNum, int rxGpio) {
   g_queue = &queue;
+  g_beatQueue = beatQueue;
   g_uartNum = uartNum;
   g_rxGpio = rxGpio;
 }
@@ -46,21 +57,27 @@ void midi_input_init(IControlEventQueue& queue, int uartNum, int rxGpio) {
 void midi_input_handle_byte(uint8_t byte) {
   if (g_queue == nullptr) return;
 
-  static uint8_t buffer[3];
-  static size_t bufferIdx = 0;
-
-  if (byte & 0x80) {
-    bufferIdx = 0;
-  }
-
-  buffer[bufferIdx++] = byte;
-
-  if (bufferIdx >= 3) {
-    ControlEvent ev;
-    if (parseMidi(buffer, 3, ev)) {
-      g_queue->push(ev);
+  uint8_t msg[3];
+  MidiByteReader::Result r = g_reader.feed(byte, msg);
+  switch (r) {
+    case MidiByteReader::Result::ChannelMessage: {
+      ControlEvent ev;
+      if (parseMidi(msg, 3, ev)) g_queue->push(ev);
+      break;
     }
-    bufferIdx = 0;
+    case MidiByteReader::Result::BeatPulse:
+      // 24 PPQN summed into one beat boundary; bpm/beatInBar unknown --
+      // BeatClock's PLL derives tempo from the interval between these.
+      if (g_beatQueue) {
+        uint64_t nowUs = static_cast<uint64_t>(esp_timer_get_time());
+        g_beatQueue->push(glow::BeatEvent{nowUs, 0.0f, 0, false});
+      }
+      break;
+    case MidiByteReader::Result::TransportStart:
+    case MidiByteReader::Result::TransportStop:
+    case MidiByteReader::Result::TransportContinue:
+    case MidiByteReader::Result::None:
+      break;
   }
 }
 
