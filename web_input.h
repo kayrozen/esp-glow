@@ -62,7 +62,13 @@ WebInputAction web_input_handle_text_frame(const char* json, size_t len,
 // disabled effect per invocation) — see web_input.cpp's header comment on
 // web_input_poll_fx_error for why a single-message version would silently
 // drop effects. Returns the number of notifications delivered this call.
-using FxErrorReplyFn = void (*)(void* ctx, const char* json, size_t len);
+//
+// `effectName`/`err` are the raw (un-JSON-escaped) strings `json` was built
+// from (buildFxErrorJson) -- passed alongside it so a caller that just wants
+// to log the fields (e.g. the HIL suite's `GLOW-TEST: fx_disabled` serial
+// line) doesn't have to parse them back out of the JSON.
+using FxErrorReplyFn = void (*)(void* ctx, const char* effectName, const char* err,
+                                const char* json, size_t len);
 int web_input_poll_fx_error(GlowLuaApi& api, FxErrorReplyFn onFxError, void* ctx);
 
 // Starts the httpd server (console static files + the /ws WebSocket

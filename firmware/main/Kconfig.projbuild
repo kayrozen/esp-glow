@@ -67,4 +67,19 @@ config GLOW_OSC_UDP_PORT
         UDP port the device listens on for incoming OSC control messages
         (cue/scene/fader). 9000 matches common OSC client defaults.
 
+config GLOW_SELFTEST
+    bool "Enable HIL selftest mode (GLOW-TEST: telemetry + serial queries)"
+    default n
+    help
+        Emits structured "GLOW-TEST: ..." lines on the serial console (boot,
+        dmx, artnet, bundle, scripts, once/sec stats, fx_disabled) and
+        answers serial query commands (?dmx0, ?state, ?lua) used by the
+        tests/hil/ hardware-in-the-loop suite. When no "show" partition
+        bundle is present, also swaps the hardcoded demo patch for a
+        deterministic one (universe 0 channel 0 = 200) so the suite's
+        assertions are exact instead of demo-dependent.
+
+        Leave this OFF for any release build: it adds a UART command-reader
+        task and a chatty serial protocol that a real show has no use for.
+
 endmenu

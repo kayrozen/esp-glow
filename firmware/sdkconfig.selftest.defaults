@@ -1,0 +1,7 @@
+# sdkconfig.selftest.defaults — layered on top of sdkconfig.defaults for the
+# tests/hil/ HIL suite's builds only (see conftest.py's
+# build_and_flash_firmware, which passes both files via
+# -D SDKCONFIG_DEFAULTS). Never merge this into sdkconfig.defaults itself:
+# CONFIG_GLOW_SELFTEST must never be on in a release build (see
+# Kconfig.projbuild).
+CONFIG_GLOW_SELFTEST=y

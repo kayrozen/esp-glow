@@ -98,6 +98,13 @@ public:
   // One render pass (see algorithm). Deterministic given t.
   void renderFrame(float t);
 
+  // Read-only access to a universe's current 512-byte DMX buffer (the
+  // state as of the last renderFrame/writeRawUniverse). nullptr if idx is
+  // out of range. Mirrors PixelMatrix::universeData's naming (pixel_matrix.h)
+  // -- "give me the raw buffer for universe i". Used by the HIL selftest
+  // serial query (?dmx0) to assert on DMX output without a loopback.
+  const uint8_t* universeData(uint8_t idx) const;
+
 private:
   struct Universe {
     UniverseMode mode = UniverseMode::Fixture;

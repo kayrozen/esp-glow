@@ -1,0 +1,13 @@
+# bundle_b.show — HIL L3 fixture: 3 fixtures, 1 matrix.
+#
+# See bundle_a.show's header comment; this is its counterpart with
+# different (and non-zero) counts on both axes.
+
+UNIVERSE 0 DMX
+UNIVERSE 1 ARTNET
+
+FIXTURE samples/dimmer.fdef 0 0
+FIXTURE samples/dimmer.fdef 0 10
+FIXTURE samples/dimmer.fdef 0 20
+
+MATRIX 1 0 4 4 SERP H RGB

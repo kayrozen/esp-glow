@@ -258,7 +258,7 @@ int web_input_poll_fx_error(GlowLuaApi& api, FxErrorReplyFn onFxError, void* ctx
   for (const auto& n : notifications) {
     char buf[512];
     size_t len = buildFxErrorJson(n.first.c_str(), n.second.c_str(), buf, sizeof(buf));
-    onFxError(ctx, buf, len);
+    onFxError(ctx, n.first.c_str(), n.second.c_str(), buf, len);
   }
   return (int)notifications.size();
 }

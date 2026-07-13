@@ -1,0 +1,14 @@
+# bundle_a.show — HIL L3 fixture: 2 fixtures, 0 matrices.
+#
+# Compiled by conftest.py's compile_show_bundle() (the `provision` host
+# tool) and flashed straight to the "show" raw partition. Paired with
+# bundle_b.show so L3 can assert "swap bundles -> counts change" against
+# two known-different bundles instead of a single static one.
+#
+# Run from the repo root so samples/dimmer.fdef resolves (see
+# samples/demo.show's own comment on this).
+
+UNIVERSE 0 DMX
+
+FIXTURE samples/dimmer.fdef 0 0
+FIXTURE samples/dimmer.fdef 0 10

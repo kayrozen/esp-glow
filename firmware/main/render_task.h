@@ -67,6 +67,15 @@ bool render_task_running(void);
 // Expose the last frame's "behind" flag for diagnostics (e.g. LED pattern).
 bool render_task_last_frame_behind(void);
 
+// Snapshot cumulative frame/behind/dropped counts accumulated since the
+// last call, then reset them to zero. Only meaningful called from the
+// render task itself (e.g. from a post_render hook) -- it is not
+// synchronized against concurrent callers on another task. See
+// render_pacing.h's PaceResult::droppedFrames for what "dropped" counts
+// (whole frame periods with no render call, e.g. a GC pause) as distinct
+// from "behind" (this frame missed its deadline, but still ran).
+void render_task_get_and_reset_stats(uint32_t* frames, uint32_t* behind, uint32_t* dropped);
+
 #ifdef __cplusplus
 }
 #endif
