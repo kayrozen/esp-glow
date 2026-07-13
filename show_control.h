@@ -74,6 +74,11 @@ private:
     float value;
     uint8_t ownerPrio;
     uint32_t ownerSeq;
+    // v2: carried through so a glow.slot range selection survives priority
+    // resolution instead of being silently flattened into a linear write
+    // (see evaluate()'s merge loop). nullptr/-1 = linear, same as CapIntent.
+    const char* rangeName = nullptr;
+    int16_t rangeIndex = -1;
   };
 
   struct WorkingAim {

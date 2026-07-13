@@ -13,6 +13,21 @@
 // PANRANGE  <deg>                 # head only, e.g. 540
 // TILTRANGE <deg>                 # head only, e.g. 270
 // CAP <Name> <coarse> [<fine>|-] [<default>] [inv]
+//   SLOT <from> <to> <name...>    # discrete slot, attaches to preceding CAP
+//   RANGE <from> <to> <name...>   # continuous sub-range, attaches to preceding CAP
+//
+// SLOT/RANGE lines are indented under a CAP and select a named function
+// range within that capability's raw DMX byte range [0,255] (e.g. a colour
+// wheel's "red" slot at DMX 10-19). A CAP with no SLOT/RANGE lines stays
+// linear -- full backward compatibility with every existing .fdef.
+
+struct FdefRange {
+  uint8_t capIndex;   // index into FixtureDef.caps this range narrows
+  uint8_t dmxFrom;
+  uint8_t dmxTo;      // inclusive
+  bool continuous;    // RANGE = true, SLOT = false
+  std::string name;   // rest of the line; may be empty
+};
 
 struct FixtureDef {
   std::string name;
@@ -21,6 +36,7 @@ struct FixtureDef {
   float panRangeDeg = 540.0f;
   float tiltRangeDeg = 270.0f;
   std::vector<ChannelMap> caps;
+  std::vector<FdefRange> ranges;
 };
 
 // Parse a .fdef text and populate `out`. Returns false on any parse error.

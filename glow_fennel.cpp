@@ -24,7 +24,8 @@ void copyErr(const char* msg, char* errOut, size_t errCap) {
 bool glowLuaInit(ShowController& show, IMatrixRegistry* matrices, BeatClock& beatClock,
                  const char* fennelSrc, size_t fennelSrcLen,
                  char* errOut, size_t errCap,
-                 size_t capBytes, int frameInstrBudget, int evalInstrBudget) {
+                 size_t capBytes, int frameInstrBudget, int evalInstrBudget,
+                 IFixtureRegistry* fixtures) {
   if (g_ready) return true;  // already initialized; not re-entrant per design (one VM)
 
   size_t cap = capBytes != 0 ? capBytes : LUA_DEFAULT_MEM_CAP_BYTES;
@@ -38,7 +39,7 @@ bool glowLuaInit(ShowController& show, IMatrixRegistry* matrices, BeatClock& bea
     return false;
   }
 
-  g_api = std::make_unique<GlowLuaApi>(*g_vm, show, matrices, beatClock);
+  g_api = std::make_unique<GlowLuaApi>(*g_vm, show, matrices, beatClock, fixtures);
   g_api->install();
 
   char loadErr[256];

@@ -216,7 +216,14 @@ void ShowController::evaluate(float t, std::vector<CapIntent>& outCaps,
 
     // Merge capability intents
     for (const CapIntent& ci : tempCaps_) {
-      if (isIntensityClass(ci.cap)) {
+      // v2: a range selection (glow.slot) is a discrete choice, not a
+      // blendable intensity -- "highest value wins" doesn't mean anything
+      // when two cues pick different named ranges. Always resolve it with
+      // priority (like position LTP below), even for capabilities that are
+      // normally HTP-blended (e.g. ShutterStrobe).
+      bool isRangeSelect = ci.rangeName != nullptr || ci.rangeIndex >= 0;
+
+      if (!isRangeSelect && isIntensityClass(ci.cap)) {
         // HTP: highest value wins, scaled by weight
         float val = w * ci.norm01;
 
@@ -224,17 +231,23 @@ void ShowController::evaluate(float t, std::vector<CapIntent>& outCaps,
         bool found = false;
         for (auto& e : workingCaps_) {
           if (e.fixtureId == ci.fixtureId && e.cap == ci.cap) {
-            e.value = std::max(e.value, val);
+            if (val >= e.value) {
+              // This plain write is (or ties) the new max -- it wins outright,
+              // including clearing any range selection a previous entry held.
+              e.value = val;
+              e.rangeName = nullptr;
+              e.rangeIndex = -1;
+            }
             found = true;
             break;
           }
         }
 
         if (!found) {
-          workingCaps_.push_back({ci.fixtureId, ci.cap, val, cue->priority, cue->activationSeq});
+          workingCaps_.push_back({ci.fixtureId, ci.cap, val, cue->priority, cue->activationSeq, nullptr, -1});
         }
       } else {
-        // Position LTP: highest priority wins, ties go to later activationSeq
+        // Position/range-select LTP: highest priority wins, ties go to later activationSeq
         bool found = false;
         for (auto& e : workingCaps_) {
           if (e.fixtureId == ci.fixtureId && e.cap == ci.cap) {
@@ -243,6 +256,8 @@ void ShowController::evaluate(float t, std::vector<CapIntent>& outCaps,
               e.value = ci.norm01;
               e.ownerPrio = cue->priority;
               e.ownerSeq = cue->activationSeq;
+              e.rangeName = ci.rangeName;
+              e.rangeIndex = ci.rangeIndex;
             }
             found = true;
             break;
@@ -250,7 +265,8 @@ void ShowController::evaluate(float t, std::vector<CapIntent>& outCaps,
         }
 
         if (!found) {
-          workingCaps_.push_back({ci.fixtureId, ci.cap, ci.norm01, cue->priority, cue->activationSeq});
+          workingCaps_.push_back({ci.fixtureId, ci.cap, ci.norm01, cue->priority, cue->activationSeq,
+                                  ci.rangeName, ci.rangeIndex});
         }
       }
     }
@@ -280,7 +296,7 @@ void ShowController::evaluate(float t, std::vector<CapIntent>& outCaps,
 
   // Emit resolved intents
   for (const auto& e : workingCaps_) {
-    outCaps.push_back({e.fixtureId, e.cap, e.value});
+    outCaps.push_back({e.fixtureId, e.cap, e.value, e.rangeName, e.rangeIndex});
   }
 
   for (const auto& e : workingAims_) {

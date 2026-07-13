@@ -2,6 +2,7 @@
 #include "show_bundle.h"
 #include <cassert>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <cmath>
 
@@ -105,6 +106,126 @@ TEST(parse_fdef_bad_footprint) {
   std::string err;
   CHECK(!parseFixtureDef(fdefText, def, err));
   CHECK(!err.empty());
+}
+
+TEST(capFromName_v2_valid) {
+  Capability cap;
+  CHECK(capFromName("ColorWheel", cap) && cap == Capability::ColorWheel);
+  CHECK(capFromName("GoboRotation", cap) && cap == Capability::GoboRotation);
+  CHECK(capFromName("Prism", cap) && cap == Capability::Prism);
+  CHECK(capFromName("PrismRotation", cap) && cap == Capability::PrismRotation);
+  CHECK(capFromName("Frost", cap) && cap == Capability::Frost);
+  CHECK(capFromName("Iris", cap) && cap == Capability::Iris);
+  CHECK(capFromName("CTO", cap) && cap == Capability::CTO);
+  CHECK(capFromName("AnimationWheel", cap) && cap == Capability::AnimationWheel);
+  CHECK(capFromName("Macro", cap) && cap == Capability::Macro);
+}
+
+TEST(parse_fdef_with_ranges) {
+  std::string fdefText = R"(
+    FIXTURE Lyre
+    FOOTPRINT 2
+    CAP ColorWheel 0
+      SLOT 0 9    open
+      SLOT 10 19  red
+      SLOT 20 29  blue
+    CAP ShutterStrobe 1
+      SLOT 0 31   closed
+      RANGE 32 63 strobe
+  )";
+
+  FixtureDef def;
+  std::string err;
+  CHECK(parseFixtureDef(fdefText, def, err));
+  CHECK(def.caps.size() == 2);
+  CHECK(def.ranges.size() == 5);
+
+  CHECK(def.ranges[0].capIndex == 0);
+  CHECK(def.ranges[0].dmxFrom == 0);
+  CHECK(def.ranges[0].dmxTo == 9);
+  CHECK(!def.ranges[0].continuous);
+  CHECK(def.ranges[0].name == "open");
+  CHECK(def.ranges[1].name == "red");
+  CHECK(def.ranges[2].name == "blue");
+
+  CHECK(def.ranges[3].capIndex == 1);
+  CHECK(def.ranges[3].name == "closed");
+  CHECK(!def.ranges[3].continuous);
+
+  CHECK(def.ranges[4].capIndex == 1);
+  CHECK(def.ranges[4].dmxFrom == 32);
+  CHECK(def.ranges[4].dmxTo == 63);
+  CHECK(def.ranges[4].continuous);
+  CHECK(def.ranges[4].name == "strobe");
+}
+
+TEST(parse_fdef_cap_without_ranges_stays_linear) {
+  std::string fdefText = R"(
+    FIXTURE Par
+    FOOTPRINT 4
+    CAP Dimmer 0
+    CAP Red 1
+  )";
+
+  FixtureDef def;
+  std::string err;
+  CHECK(parseFixtureDef(fdefText, def, err));
+  CHECK(def.caps.size() == 2);
+  CHECK(def.ranges.empty());
+}
+
+TEST(parse_fdef_slot_before_cap_error) {
+  std::string fdefText = R"(
+    FIXTURE Bad
+    FOOTPRINT 1
+    SLOT 0 9 open
+    CAP Dimmer 0
+  )";
+
+  FixtureDef def;
+  std::string err;
+  CHECK(!parseFixtureDef(fdefText, def, err));
+  CHECK(!err.empty());
+}
+
+TEST(parse_fdef_slot_bad_range) {
+  std::string fdefText = R"(
+    FIXTURE Bad
+    FOOTPRINT 1
+    CAP Dimmer 0
+      SLOT 50 10 backwards
+  )";
+
+  FixtureDef def;
+  std::string err;
+  CHECK(!parseFixtureDef(fdefText, def, err));
+  CHECK(!err.empty());
+}
+
+TEST(encode_profile_with_ranges) {
+  std::string fdefText = R"(
+    FIXTURE Lyre
+    FOOTPRINT 2
+    CAP ColorWheel 0
+      SLOT 0 9   open
+      SLOT 10 19 red
+    CAP ShutterStrobe 1
+      RANGE 32 63 strobe
+  )";
+
+  FixtureDef def;
+  std::string err;
+  CHECK(parseFixtureDef(fdefText, def, err));
+
+  auto blob = encodeProfile(def);
+  CHECK(blob[4] == 2);  // ranges present -> v2
+
+  FixtureProfile parsed;
+  CHECK(parseProfile(blob.data(), blob.size(), parsed));
+  CHECK(parsed.rangeCount == 3);
+  CHECK(rangeCount(parsed, Capability::ColorWheel) == 2);
+  CHECK(std::strcmp(rangeName(parsed, Capability::ColorWheel, 1), "red") == 0);
+  CHECK(rangeIsContinuous(parsed, Capability::ShutterStrobe, 0));
 }
 
 TEST(parse_fdef_unknown_cap) {
@@ -370,6 +491,12 @@ int main() {
   RUN_TEST(parse_fdef_basic);
   RUN_TEST(capFromName_valid);
   RUN_TEST(capFromName_invalid);
+  RUN_TEST(capFromName_v2_valid);
+  RUN_TEST(parse_fdef_with_ranges);
+  RUN_TEST(parse_fdef_cap_without_ranges_stays_linear);
+  RUN_TEST(parse_fdef_slot_before_cap_error);
+  RUN_TEST(parse_fdef_slot_bad_range);
+  RUN_TEST(encode_profile_with_ranges);
   RUN_TEST(parse_fdef_missing_footprint);
   RUN_TEST(parse_fdef_bad_footprint);
   RUN_TEST(parse_fdef_unknown_cap);

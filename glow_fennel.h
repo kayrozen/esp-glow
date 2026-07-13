@@ -13,6 +13,7 @@
 
 class ShowController;
 class IMatrixRegistry;
+class IFixtureRegistry;
 class GlowLuaApi;
 namespace glow {
 class LuaVM;
@@ -33,13 +34,17 @@ namespace glow {
 // capBytes/frameInstrBudget/evalInstrBudget of 0 mean "use LuaVM's
 // defaults"; tests override them to get small, fast-to-trip limits.
 //
+// fixtures backs glow.ranges (v2 introspection); nullptr disables it with a
+// clear Lua error, same "device has none of this" convention as matrices.
+//
 // Returns false (fills errOut) on failure. The caller's contract per the
 // design doc is: fall back to a safe blackout, never run with a
 // half-initialized VM.
 bool glowLuaInit(ShowController& show, IMatrixRegistry* matrices, BeatClock& beatClock,
                  const char* fennelSrc, size_t fennelSrcLen,
                  char* errOut, size_t errCap,
-                 size_t capBytes = 0, int frameInstrBudget = 0, int evalInstrBudget = 0);
+                 size_t capBytes = 0, int frameInstrBudget = 0, int evalInstrBudget = 0,
+                 IFixtureRegistry* fixtures = nullptr);
 
 // Host tests only: tears down the singleton so the next glowLuaInit starts
 // clean. Never called on device — there is exactly one VM for the

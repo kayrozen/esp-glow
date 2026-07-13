@@ -218,6 +218,17 @@ public:
 };
 static MainMatrixRegistry g_matrixRegistry;
 
+// v2: exposes g_show's patched fixtures to glow.ranges by fixture id (see
+// glow_lua_api.h's IFixtureRegistry).
+class MainFixtureRegistry : public IFixtureRegistry {
+public:
+  const FixtureProfile* profile(uint16_t fixtureId) override {
+    const PatchedFixture* f = g_show.fixture(fixtureId);
+    return f ? &f->profile : nullptr;
+  }
+};
+static MainFixtureRegistry g_fixtureRegistry;
+
 // F6: whether the Lua VM ever initialized -- gates render_tick_hooks' Lua-
 // dependent work below (fx_error poll, gcStepSlack). Skipping that work
 // when g_luaReady is false is the correct behavior, not an oversight:
@@ -581,7 +592,8 @@ static void setup_lua() {
   size_t fennelLen = static_cast<size_t>(fennel_lua_end - fennel_lua_start);
 
   char err[256];
-  g_luaReady = glow::glowLuaInit(g_controller, &g_matrixRegistry, g_beatClock, fennelSrc, fennelLen, err, sizeof(err));
+  g_luaReady = glow::glowLuaInit(g_controller, &g_matrixRegistry, g_beatClock, fennelSrc, fennelLen, err, sizeof(err),
+                                 0, 0, 0, &g_fixtureRegistry);
   if (!g_luaReady) {
     ESP_LOGE(TAG, "Lua/Fennel init failed (scripts disabled this boot): %s", err);
     // F5: whatever a bundle's matrices are doing (e.g. the default rainbow
