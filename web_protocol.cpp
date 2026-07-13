@@ -737,3 +737,42 @@ size_t buildFxErrorJson(const char* effectName, const char* err,
   }
   return w;
 }
+
+// ---------------------------------------------------------------------------
+// F5: buildBlackoutJson / buildOtaStatusJson
+// ---------------------------------------------------------------------------
+
+size_t buildBlackoutJson(const char* reason, char* buf, size_t bufLen) {
+  size_t w = 0;
+  w = appendRaw(buf, bufLen, w, "{\"type\":\"blackout\",\"reason\":");
+  w = appendString(buf, bufLen, w, reason);
+  w = appendChar(buf, bufLen, w, '}');
+
+  if (buf != nullptr && bufLen > 0) {
+    size_t termPos = w < bufLen ? w : bufLen - 1;
+    buf[termPos] = '\0';
+  }
+  return w;
+}
+
+size_t buildOtaStatusJson(const char* phase, const char* message, int percent,
+                          char* buf, size_t bufLen) {
+  size_t w = 0;
+  w = appendRaw(buf, bufLen, w, "{\"type\":\"ota\",\"phase\":");
+  w = appendString(buf, bufLen, w, phase);
+  if (message != nullptr) {
+    w = appendRaw(buf, bufLen, w, ",\"message\":");
+    w = appendString(buf, bufLen, w, message);
+  }
+  if (percent >= 0) {
+    w = appendRaw(buf, bufLen, w, ",\"percent\":");
+    w = appendUInt(buf, bufLen, w, (uint32_t)percent);
+  }
+  w = appendChar(buf, bufLen, w, '}');
+
+  if (buf != nullptr && bufLen > 0) {
+    size_t termPos = w < bufLen ? w : bufLen - 1;
+    buf[termPos] = '\0';
+  }
+  return w;
+}

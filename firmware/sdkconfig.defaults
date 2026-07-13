@@ -59,14 +59,34 @@ CONFIG_HTTPD_MAX_URI_LEN=512
 # --- mbedTLS (OTA over HTTPS in F5) ---
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 
-# --- OTA ---
-CONFIG_APP_ROLLBACK_ENABLE=y
+# --- OTA (F5: A/B rollback) ---
+# The real Kconfig symbol is bootloader-scoped (this is a bootloader
+# feature, not an app one) -- CONFIG_APP_ROLLBACK_ENABLE alone is not a
+# real option and idf.py silently ignores it. This is what actually makes
+# "the bootloader rolls back an image that crashes before being marked
+# valid" happen (see ota_manager.h for the app-level half: mandatory
+# self-validation before esp_ota_mark_app_valid_cancel_rollback()).
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
 # --- Task watchdog (F5 robustness) ---
+# CONFIG_ESP_TASK_WDT (already present pre-F5) both enables the Task WDT
+# component and initializes it at startup. CONFIG_ESP_TASK_WDT_PANIC is the
+# part that actually reboots the board on timeout -- without it, a TWDT trip
+# just logs which tasks stalled and the device keeps running frozen. See
+# render_task.cpp for the render task's subscription (esp_task_wdt_add) and
+# main.cpp's render_tick_hooks for the per-frame reset (esp_task_wdt_reset).
 CONFIG_ESP_TASK_WDT=y
+CONFIG_ESP_TASK_WDT_PANIC=y
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
+
+# --- Core dump (F5: panic -> flash -> pull with espcoredump.py) ---
+# The "coredump" partition (partitions.csv) is where this actually lands;
+# without ENABLE_TO_FLASH a panic still reboots (see the Task WDT config
+# above) but leaves no backtrace to pull afterward.
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
 
 # --- Core affinity (WiFi/DMX coexistence) ---
 # The render task pins itself to core 1 at runtime (xTaskCreatePinnedToCore).

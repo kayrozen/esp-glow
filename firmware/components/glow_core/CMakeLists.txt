@@ -52,6 +52,9 @@ idf_component_register(
         ${GLOW_ROOT}/render_pacing.cpp
         # F3: host-tested patch routing from a LoadedShow
         ${GLOW_ROOT}/apply_loaded_show.cpp
+        # F5: host-tested safe-blackout core (stop every cue, zero every
+        # Raw universe) -- see safe_blackout.h
+        ${GLOW_ROOT}/safe_blackout.cpp
         # device-only DMX sink (#ifdef ESP_PLATFORM guarded; filled in F1)
         ${GLOW_ROOT}/dmx_sink.cpp
         # device-only Art-Net sink (#ifdef ESP_PLATFORM guarded; filled in F2)
@@ -86,11 +89,15 @@ idf_component_register(
         ${GLOW_ROOT}/web_input.cpp
         ${GLOW_ROOT}/midi_input.cpp
         ${GLOW_ROOT}/osc_input.cpp
+        # F5: OTA over the existing web console httpd server, with A/B
+        # rollback + self-validation (#ifdef ESP_PLATFORM guarded; see
+        # ota_manager.h)
+        ${GLOW_ROOT}/ota_manager.cpp
     INCLUDE_DIRS
         ${GLOW_ROOT}
         ${GLOW_ROOT}/third_party/lua
     REQUIRES esp_dmx esp_wifi lwip lua
-    PRIV_REQUIRES littlefs esp_http_server driver
+    PRIV_REQUIRES littlefs esp_http_server driver app_update
     EMBED_FILES
         # The console bundle web_input.cpp's static_file_handler serves
         # (see its kStaticFiles table) -- EMBED_FILES has to live in

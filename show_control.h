@@ -22,7 +22,21 @@ public:
   void goScene(uint16_t sceneId, float t);
   void releaseScene(uint16_t sceneId, float t);
 
+  // F5 safe blackout: deactivate every cue immediately, with no fade-out.
+  // Unlike release() (which starts a fadeOutSec-paced ramp down), this is
+  // the "the show is over right now" primitive a safety path needs -- a
+  // corrupt bundle or a failing OTA image can't wait out a fade. The next
+  // evaluate() call emits no intents for any of these cues, so
+  // Show::renderFrame's per-frame zero+applyDefaults pass is all that's
+  // left to run (see safe_blackout.h).
+  void stopAll();
+
   bool isActive(uint16_t cueId) const;
+
+  // True if any cue is currently active (regardless of fade phase). Used to
+  // refuse OTA while a show is running (see T4: "refuse OTA while cues are
+  // running") -- a reboot mid-set is exactly what this exists to prevent.
+  bool anyActive() const;
 
   // Fills up to `cap` currently-active cue ids into `out` (cues with
   // active==true, regardless of fade/release state -- same definition as

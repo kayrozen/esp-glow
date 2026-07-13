@@ -229,6 +229,50 @@ void test_auto_hold() {
   delete effects[0];
 }
 
+// F5 safe blackout: stopAll() must deactivate immediately, no fade, and
+// anyActive() must reflect it right away (no lingering release() ramp).
+void test_stop_all() {
+  TEST("stopAll: immediate deactivation, no fade, anyActive() tracks it");
+
+  ShowController ctrl;
+  std::vector<IEffect*> effectsA;
+  effectsA.push_back(new ConstCapEffect{7, Capability::Dimmer, 1.0f});
+  std::vector<IEffect*> effectsB;
+  effectsB.push_back(new ConstCapEffect{8, Capability::Dimmer, 1.0f});
+
+  // Long fade times so a release()-based stop would still show weight > 0
+  // right after stopping -- stopAll() must not go through that path at all.
+  uint16_t cueA = ctrl.addCue(effectsA, 0.0f, 10.0f, 0, 0.0f);
+  uint16_t cueB = ctrl.addCue(effectsB, 0.0f, 10.0f, 0, 0.0f);
+
+  CHECK(!ctrl.anyActive());
+  ctrl.go(cueA, 0.0f);
+  ctrl.go(cueB, 0.0f);
+  CHECK(ctrl.anyActive());
+  CHECK(ctrl.isActive(cueA));
+  CHECK(ctrl.isActive(cueB));
+
+  std::vector<CapIntent> caps;
+  std::vector<AimIntent> aims;
+  ctrl.evaluate(0.0f, caps, aims);
+  CHECK(caps.size() == 2);
+
+  ctrl.stopAll();
+  CHECK(!ctrl.anyActive());
+  CHECK(!ctrl.isActive(cueA));
+  CHECK(!ctrl.isActive(cueB));
+
+  // Immediately after stopAll(), even at the same instant a fade would
+  // still be ramping, evaluate() must emit nothing.
+  caps.clear();
+  aims.clear();
+  ctrl.evaluate(0.0f, caps, aims);
+  CHECK(caps.empty());
+
+  delete effectsA[0];
+  delete effectsB[0];
+}
+
 // Blending tests
 void test_intensity_scaling() {
   TEST("Intensity scaling: single cue fadeIn 2 with Dimmer 1.0, at t=1 should be 0.5");
@@ -565,6 +609,7 @@ int main() {
   test_manual_release();
   test_release_mid_fade_in();
   test_auto_hold();
+  test_stop_all();
 
   printf("\n");
 

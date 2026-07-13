@@ -580,6 +580,29 @@ void test_build_fx_error_json() {
        R"({"type":"fx_error","effect":"breathe","err":"attempt to index nil value"})");
 }
 
+void test_build_blackout_json() {
+  TEST("build blackout: reason only");
+  char buf[128];
+  buildBlackoutJson("show partition: bad magic", buf, sizeof(buf));
+  CHECK(std::string(buf) ==
+       R"({"type":"blackout","reason":"show partition: bad magic"})");
+}
+
+void test_build_ota_status_json_full() {
+  TEST("build ota status: phase + message + percent");
+  char buf[128];
+  buildOtaStatusJson("receiving", "flashing ota_1", 42, buf, sizeof(buf));
+  CHECK(std::string(buf) ==
+       R"({"type":"ota","phase":"receiving","message":"flashing ota_1","percent":42})");
+}
+
+void test_build_ota_status_json_no_message_no_percent() {
+  TEST("build ota status: phase only (message null, percent negative omits both)");
+  char buf[128];
+  buildOtaStatusJson("validating", nullptr, -1, buf, sizeof(buf));
+  CHECK(std::string(buf) == R"({"type":"ota","phase":"validating"})");
+}
+
 // ---------------------------------------------------------------------------
 
 int main() {
@@ -659,6 +682,11 @@ int main() {
   test_build_scripts_json_empty();
   test_build_script_json();
   test_build_fx_error_json();
+
+  // F5: safe blackout + OTA status
+  test_build_blackout_json();
+  test_build_ota_status_json_full();
+  test_build_ota_status_json_no_message_no_percent();
 
   if (g_failCount == 0) {
     printf("\nAll tests passed.\n");

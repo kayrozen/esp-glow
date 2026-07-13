@@ -34,6 +34,7 @@
 #include "glow_lua_api.h"    // GlowLuaApi::pollNewlyDisabledEffects (web_input_poll_fx_error)
 #include "live_control.h"    // ControlType (for parseWebCommand's out param)
 #include "scripts_storage.h"
+#include "ota_manager.h"     // F5: /ota registers onto this same httpd server
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -438,8 +439,14 @@ void web_server_task(void* /*ctx*/) {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   // Every URI registered below is an exact path (no wildcards needed), so
   // this stays at IDF's default single-worker, exact-match config --
-  // handlers above rely on running one at a time (see kWsBufCap).
-  config.max_uri_handlers = kNumStaticFiles + 1;  // +1 for /ws
+  // handlers above rely on running one at a time (see kWsBufCap). +1 for
+  // /ws, +1 for /ota (F5 -- see ota_manager.h; reuses this same server
+  // rather than starting a second one).
+  config.max_uri_handlers = kNumStaticFiles + 2;
+  // OTA uploads (up to a full ota_0/ota_1 partition, several MB) can take
+  // a while over a venue's WiFi; the default recv timeout is tuned for
+  // small console requests, not that.
+  config.recv_wait_timeout = 30;
 
   if (httpd_start(&g_server, &config) != ESP_OK) {
     ESP_LOGE(TAG, "httpd_start failed");
@@ -462,7 +469,9 @@ void web_server_task(void* /*ctx*/) {
     httpd_register_uri_handler(g_server, &uri);
   }
 
-  ESP_LOGI(TAG, "web console + /ws ready");
+  ota_register_handlers(g_server);
+
+  ESP_LOGI(TAG, "web console + /ws + /ota ready");
 }
 
 #endif  // ESP_PLATFORM
