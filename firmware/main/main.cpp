@@ -545,7 +545,7 @@ extern "C" void app_main(void) {
   // into, drained into g_beatClock every frame (see on_pre_render). Beats
   // arrive far less often than control events (at most a few Hz even at
   // fast tempos), so a smaller capacity than g_controlQueue is plenty. ---
-  g_beatQueue = createDeviceBeatEventQueue(16);
+  g_beatQueue = glow::createDeviceBeatEventQueue(16);
 
   // --- F6: Lua/Fennel VM + boot.fnl (see setup_lua's comment) ---
   setup_lua();
