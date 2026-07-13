@@ -65,9 +65,23 @@ void ShowController::releaseScene(uint16_t sceneId, float t) {
   }
 }
 
+void ShowController::stopAll() {
+  for (auto& cue : cues_) {
+    cue.active = false;
+    cue.released = false;
+  }
+}
+
 bool ShowController::isActive(uint16_t cueId) const {
   const Cue* cue = findCue(cueId);
   return cue && cue->active;
+}
+
+bool ShowController::anyActive() const {
+  for (const auto& cue : cues_) {
+    if (cue.active) return true;
+  }
+  return false;
 }
 
 ShowController::Cue* ShowController::findCue(uint16_t cueId) {

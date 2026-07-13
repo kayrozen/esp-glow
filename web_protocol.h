@@ -164,3 +164,29 @@ size_t buildScriptJson(const char* name, const char* src, size_t srcLen,
 // Build an unsolicited `fx_error` JSON message into `buf`.
 size_t buildFxErrorJson(const char* effectName, const char* err,
                         char* buf, size_t bufLen);
+
+//
+// F5 robustness: safe blackout + OTA status. Both are unsolicited,
+// broadcast to every connected client the same way fx_error is (see
+// web_ws_broadcast) -- a blackout or an in-flight OTA is exactly the kind
+// of state any connected console needs to see, not just whoever triggered
+// it.
+//
+//   Device -> UI (unsolicited):
+//     { "type":"blackout", "reason":"show partition: bad magic" }
+//     { "type":"ota", "phase":"receiving", "message":"...", "percent":42 }
+//
+
+// Build an unsolicited `blackout` JSON message into `buf`. `reason` should
+// be a short, specific, human-readable diagnosis (see glow_safe_blackout in
+// main.cpp) -- a blackout with no reason is a debugging nightmare at 2am.
+size_t buildBlackoutJson(const char* reason, char* buf, size_t bufLen);
+
+// Build an unsolicited `ota` status JSON message into `buf`. `phase` is a
+// short machine-readable tag ("receiving", "validating", "done", "error",
+// "refused", ...); `message` is human-readable detail (may be nullptr to
+// omit); `percent` is upload progress in [0,100], or a negative value to
+// omit the field entirely (progress isn't always knowable, e.g. before the
+// upload's Content-Length is known).
+size_t buildOtaStatusJson(const char* phase, const char* message, int percent,
+                          char* buf, size_t bufLen);

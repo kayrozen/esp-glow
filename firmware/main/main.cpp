@@ -10,9 +10,13 @@
 // (esptool-js) writes the compiled SHW1 bundle directly at the partition's
 // flash offset, and the device just reads it back with esp_partition_read().
 //
-// If the bundle is missing or corrupt we fall back to the F1/F2 hardcoded
-// patch (one dimmer + a 16x8 rainbow matrix) so the board still does
-// something. F5 replaces this fallback with a safe blackout.
+// F5: if the bundle is missing or corrupt, the board no longer falls back
+// to a hardcoded demo patch -- it calls glow_safe_blackout() instead (see
+// safe_blackout.h). A rig with no valid show should go dark and say why,
+// not surprise the room with an unrequested rainbow. The same call is used
+// for every other F5 failure path: a scripts partition that won't mount, a
+// boot.fnl that errors, and an OTA image that fails self-validation (see
+// ota_manager.h).
 //
 // What to observe (F3):
 //   - Serial: "show loaded from partition 'show': U universes, F fixtures,
@@ -37,13 +41,14 @@
 #include "render_task.h"
 #include "wifi_manager.h"
 #include "storage_manager.h"
+#include "safe_blackout.h"
+#include "ota_manager.h"
+#include "esp_task_wdt.h"
 
 #include "show.h"
 #include "show_control.h"
 #include "live_control.h"
 #include "control_queue.h"
-#include "effects.h"
-#include "fixture_profile.h"
 #include "dmx_sink.h"
 #include "artnet_sink.h"
 #include "pixel_matrix.h"
@@ -111,10 +116,7 @@ static ArtNetSink*   g_artnet = nullptr;
 // scenes, fades, HTP/LTP -- funnels through this one instance, and it in
 // turn is what emits the resolved intents Show::renderFrame consumes. Any
 // effect added to g_show directly instead would run permanently, outside
-// every cue, invisible and unstoppable from Lua/the web console/MIDI/OSC
-// -- which is exactly what the old hardcoded-fallback DimmerEffect used to
-// do (removed in setup_hardcoded_fallback; it's a cue now, like everything
-// else).
+// every cue, invisible and unstoppable from Lua/the web console/MIDI/OSC.
 //
 // Three things converge on this one instance: glow.cue.*/glow.scene.*
 // (glow_lua_api.cpp, via glowLuaInit below), the web console, and MIDI/OSC
@@ -143,11 +145,15 @@ static IEvalSubmissionQueue* g_evalQueue = nullptr;
 
 // F4: demo cue metadata for the web console + the MIDI/OSC binding table
 // -- intentionally minimal (one togglable cue, one master fader), matching
-// README_WEB_CONSOLE.md's documented setup pattern. Only populated when
-// setup_hardcoded_fallback() runs (no "show" bundle): a bundle-loaded show
-// has no cue metadata to expose yet -- applyLoadedShow patches fixtures
-// directly, it doesn't wrap them in cues -- so richer per-bundle cue/scene
-// metadata for the console is a natural follow-up, not solved here.
+// README_WEB_CONSOLE.md's documented setup pattern. Currently never
+// populated (F5 removed the hardcoded no-bundle demo patch that used to be
+// the one thing that filled this in -- see main.cpp's header comment): a
+// bundle-loaded show has no cue metadata to expose yet either --
+// applyLoadedShow patches fixtures directly, it doesn't wrap them in cues
+// -- so richer per-bundle cue/scene metadata for the console remains a
+// natural follow-up, not solved here. web_input_init/send_state_to_ws
+// below stay written against this general (N cues, not just 0 or 1) shape
+// for whenever that follow-up lands.
 static WebCueInfo g_wsCues[1];
 static size_t     g_nWsCues = 0;
 static uint16_t   g_demoShowCueId = 0;  // ShowController cue id (isActive() takes this)
@@ -204,9 +210,81 @@ static MainMatrixRegistry g_matrixRegistry;
 // there is nothing Lua-related to poll or collect.
 static bool g_luaReady = false;
 
+// F5: true once glow_safe_blackout() has fired this boot. Checked by
+// on_pre_render (gates re-driving Raw universes -- see safe_blackout.h) and
+// by the ~1Hz periodic re-announce in render_tick_hooks. Deliberately
+// sticky for the rest of this boot: blackout is a terminal safety state,
+// not something later code paths clear on their own. It does NOT lock out
+// manual control -- an operator can still go() a cue from the console/
+// MIDI/OSC/REPL afterward (see glow_safe_blackout's comment); it only
+// stops main.cpp's own matrix-pattern loop from fighting the zeros.
+static bool g_blackout = false;
+static char g_blackoutReason[160] = {0};
+
 // Fx-error broadcast: every connected client sees it (any of them may be
 // running the live REPL waiting to know an effect just died).
 static void send_fx_error_to_ws(void* /*ctx*/, const char* json, size_t len) {
+  web_ws_broadcast(json, len);
+}
+
+// F5: the ONE path every failure mode funnels into -- corrupt/missing SHW1
+// bundle, a scripts partition that won't mount, a boot.fnl that errors, an
+// OTA image that fails self-validation (see ota_manager.h). Safe to call
+// more than once (each call re-stops every cue and re-zeros every Raw
+// universe; idempotent) -- but see g_blackout's comment: an operator
+// manually starting a cue afterward is a deliberate override, not
+// something this function or its periodic re-announce should fight.
+//
+// Always reports why, on both channels: ESP_LOGE for serial (reliable even
+// with nobody connected to the console yet) and a `blackout` WS broadcast
+// (best-effort -- see send_blackout_status_to_ws for the periodic re-send
+// that catches clients connecting after the fact). A blackout with no
+// reason is a debugging nightmare at 2am.
+static void glow_safe_blackout(const char* reason) {
+  bool wasAlready = g_blackout;
+  g_blackout = true;
+  std::snprintf(g_blackoutReason, sizeof(g_blackoutReason), "%s", reason ? reason : "unknown");
+
+  safeBlackoutCore(g_show, g_controller);
+  led_status_set(LED_ERROR);
+
+  if (wasAlready) {
+    ESP_LOGW(TAG, "SAFE BLACKOUT (re-triggered): %s", g_blackoutReason);
+  } else {
+    ESP_LOGE(TAG, "SAFE BLACKOUT: %s", g_blackoutReason);
+  }
+
+  char buf[256];
+  size_t n = buildBlackoutJson(g_blackoutReason, buf, sizeof(buf));
+  web_ws_broadcast(buf, n);
+}
+
+// Re-announces the current blackout state once/sec (see render_tick_hooks)
+// so a console that connects AFTER the triggering event still learns about
+// it -- web_ws_broadcast only reaches clients connected at call time, and
+// the initial glow_safe_blackout() call very often happens before
+// web_server_task has any clients at all (most triggers fire during boot).
+// Deliberately does NOT touch g_controller/safeBlackoutCore -- only the
+// one-shot glow_safe_blackout() call sites do that (see g_blackout's
+// comment on why re-stopping cues here would defeat manual recovery).
+static void send_blackout_status_to_ws() {
+  if (!g_blackout) return;
+  char buf[256];
+  size_t n = buildBlackoutJson(g_blackoutReason, buf, sizeof(buf));
+  web_ws_broadcast(buf, n);
+}
+
+// F5 OTA callbacks (ota_manager.h) -- kept here, not in ota_manager.cpp,
+// because only main.cpp has visibility into g_controller/glow_safe_blackout/
+// web_ws_broadcast (see OtaCallbacks' own header comment for the
+// decoupling rationale).
+static void ota_cb_rollback_imminent(const char* reason) {
+  glow_safe_blackout(reason);
+}
+static bool ota_cb_cues_active() {
+  return g_controller.anyActive();
+}
+static void ota_cb_broadcast(const char* json, size_t len) {
   web_ws_broadcast(json, len);
 }
 
@@ -266,6 +344,21 @@ static void render_tick_hooks(RenderTickPhase phase, float t, uint32_t slack_us)
       break;
 
     case RenderTickPhase::Post: {
+      // F3/T3: proof of life for the render loop, once per frame,
+      // unconditionally -- see render_task.cpp's esp_task_wdt_add. Kept
+      // first in this phase so nothing below it (Lua, OTA, blackout) can
+      // ever cause a frame to skip feeding the watchdog.
+      esp_task_wdt_reset();
+
+      // F5: OTA self-validation criteria + tick. Cheap (a couple of bool
+      // checks once validated) and independent of g_luaReady/g_blackout --
+      // a Lua-less or already-blacked-out boot must still be able to
+      // prove itself and cancel its own pending rollback (see
+      // ota_manager.h).
+      ota_manager_note_frame_rendered();
+      if (wifi_is_connected()) ota_manager_note_wifi_connected();
+      ota_manager_tick();
+
       // State doesn't touch the Lua VM, so this runs regardless of
       // g_luaReady -- a broken boot.fnl shouldn't also take down
       // cue-state feedback.
@@ -273,6 +366,7 @@ static void render_tick_hooks(RenderTickPhase phase, float t, uint32_t slack_us)
       if (++frameCounter >= 44) {  // ~once/sec at the render task's 44 Hz
         frameCounter = 0;
         send_state_to_ws();
+        send_blackout_status_to_ws();
       }
 
       if (!g_luaReady) break;
@@ -301,6 +395,13 @@ static void on_pre_render(void* /*ctx*/, float t, Show* show) {
 
   render_tick_hooks(RenderTickPhase::Pre, t, 0);
 
+  // F5: once blacked out, stop re-driving Raw universes -- safeBlackoutCore
+  // already zeroed them; a still-running matrix pattern would immediately
+  // overwrite that zero on this very frame otherwise (see safe_blackout.h).
+  // Control-event/eval draining above still ran, so a manual cue trigger
+  // from the console/MIDI/OSC/REPL after blackout is not blocked by this.
+  if (g_blackout) return;
+
   for (PixelMatrix* m : g_md.matrices) {
     m->render(t);
     for (uint8_t i = 0; i < m->universeCount(); ++i) {
@@ -315,17 +416,17 @@ static void on_post_render(void* /*ctx*/, uint32_t slack_us) {
   render_tick_hooks(RenderTickPhase::Post, 0.0f, slack_us);
 }
 
-// F6: initialize the single process-wide Lua VM, install glow.*, load the
-// vendored Fennel compiler, and evaluate boot.fnl if the "scripts"
-// partition has one. A missing/corrupt boot.fnl (or a "scripts" partition
-// that fails to mount -- see scripts_storage_mount) is not fatal: boot.fnl
-// only ever ADDS Lua-defined cues
-// on top of whatever setup_show_from_bundle/setup_hardcoded_fallback
-// already patched, so skipping it just means no Lua-driven cue goes
-// active -- the base show still renders. This is this phase's version of
-// "fall back to blackout, never boot into a broken show": there is
-// nothing partially-applied to unwind, because boot.fnl failing leaves
-// the Lua layer simply inactive, not the render loop.
+// F6/F5: initialize the single process-wide Lua VM, install glow.*, load
+// the vendored Fennel compiler, and evaluate boot.fnl if the "scripts"
+// partition has one. boot.fnl only ever ADDS Lua-defined cues on top of
+// whatever setup_show_from_bundle already patched -- but a bundle's
+// matrices (if any) run their default pattern independent of Lua entirely
+// (see setup_show_from_bundle), so a VM that never comes up, a scripts
+// partition that won't mount, or a boot.fnl that errors all mean nobody
+// ever gets a chance to configure or quiet that pattern. Each of those
+// three is therefore a real failure, not a shrug -- see glow_safe_blackout
+// below. A missing boot.fnl (nothing saved yet) is the one truly benign
+// case and does not blackout.
 static void setup_lua() {
   const char* fennelSrc = reinterpret_cast<const char*>(fennel_lua_start);
   size_t fennelLen = static_cast<size_t>(fennel_lua_end - fennel_lua_start);
@@ -334,6 +435,15 @@ static void setup_lua() {
   g_luaReady = glow::glowLuaInit(g_controller, &g_matrixRegistry, fennelSrc, fennelLen, err, sizeof(err));
   if (!g_luaReady) {
     ESP_LOGE(TAG, "Lua/Fennel init failed (scripts disabled this boot): %s", err);
+    // F5: whatever a bundle's matrices are doing (e.g. the default rainbow
+    // pattern setup_show_from_bundle attaches) runs unconditionally,
+    // independent of Lua -- without boot.fnl ever getting a chance to
+    // configure/quiet it, that pattern would otherwise keep painting the
+    // venue with unrequested content. Safe blackout, loudly reported,
+    // beats a surprise demo animation.
+    char reason[160];
+    std::snprintf(reason, sizeof(reason), "Lua/Fennel VM init failed: %s", err);
+    glow_safe_blackout(reason);
     return;
   }
   ESP_LOGI(TAG, "Lua/Fennel VM ready (Fennel compiler loaded, %u bytes source)",
@@ -341,78 +451,28 @@ static void setup_lua() {
 
   if (!scripts_storage_mount()) {
     ESP_LOGW(TAG, "scripts partition not mounted; no boot.fnl this boot.");
+    glow_safe_blackout("scripts partition failed to mount; no boot.fnl this boot");
     return;
   }
 
   static char bootBuf[16 * 1024];  // generous for a hand-written boot script
   size_t bootLen = 0;
   if (!scripts_storage_read_boot(bootBuf, sizeof(bootBuf), &bootLen)) {
+    // A missing boot.fnl is normal (nothing saved yet), not a failure --
+    // does NOT blackout. Contrast with the mount failure above and the
+    // eval failure below, both of which are real errors.
     ESP_LOGI(TAG, "no boot.fnl found; nothing to evaluate this boot.");
     return;
   }
 
   if (!glow_lua_eval_fennel(bootBuf, bootLen, err, sizeof(err))) {
     ESP_LOGE(TAG, "boot.fnl failed, base show still renders: %s", err);
+    char reason[220];
+    std::snprintf(reason, sizeof(reason), "boot.fnl failed: %s", err);
+    glow_safe_blackout(reason);
     return;
   }
   ESP_LOGI(TAG, "boot.fnl evaluated successfully.");
-}
-
-static FixtureProfile makeDimmerProfile() {
-  FixtureProfile p{};
-  p.footprint = 1;
-  p.channelCount = 1;
-  p.channels[0] = { Capability::Dimmer, 0, 0xFF, 0, 0 };
-  return p;
-}
-
-// F1/F2 fallback: hardcoded dimmer + 16x8 rainbow matrix. Used when no bundle.
-//
-// The dimmer goes through a cue on g_controller, not a bare g_show.addEffect
-// -- an effect added straight to g_show would run permanently, outside any
-// cue, invisible and unstoppable from Lua/the web console/MIDI/OSC (see the
-// comment on g_controller). go()ing it immediately at boot preserves the
-// original "board does something without a bundle" behavior, just through
-// the same path every other cue takes.
-static void setup_hardcoded_fallback() {
-  ESP_LOGW(TAG, "using hardcoded fallback patch (no bundle found).");
-  g_show.setUniverseCount(3);
-  g_show.configureUniverse(0, UniverseMode::Fixture, g_dmx);
-  g_show.configureUniverse(1, UniverseMode::Raw, g_artnet);
-  g_show.configureUniverse(2, UniverseMode::Raw, g_artnet);
-
-  FixtureProfile dimmer = makeDimmerProfile();
-  g_show.patch(dimmer, 0, 0);
-  static uint16_t ids[] = { 0 };
-  static DimmerEffect fx(std::vector<uint16_t>{ids[0]}, 0.5f);
-  uint16_t cueId = g_controller.addCue({&fx}, /*fadeInSec=*/0.0f, /*fadeOutSec=*/0.0f, /*priority=*/0);
-  g_controller.go(cueId, 0.0f);
-
-  // F4: expose this cue to the web console/MIDI/OSC as controlId 0 (see
-  // the g_wsCues/g_oscBindings comment above). It stays on by default
-  // (go() above); the binding just makes it possible to turn it back off
-  // from a client instead of being permanently stuck on. bindFader(Master)
-  // is wired for protocol completeness (hasMaster=true in web_input_init
-  // below) -- LiveControl::masterLevel() isn't consumed by the render
-  // pipeline yet (a pre-existing gap, not F4's to close), so moving that
-  // fader has no visible brightness effect until that's wired up
-  // separately.
-  g_liveControl.bindButton(0, ActionKind::CueToggle, cueId);
-  g_liveControl.bindFader(0, ActionKind::Master);
-  g_wsCues[0] = { /*id=*/0, "Dimmer", "#ffaa00", ActionKind::CueToggle };
-  g_nWsCues = 1;
-  g_demoShowCueId = cueId;
-  g_hasDemoCue = true;
-
-  MatrixMap mm = {};
-  mm.width = 16; mm.height = 8; mm.serpentine = true; mm.vertical = false;
-  mm.order = ColorOrder::RGB; mm.startUniverse = 1; mm.startChannel = 0;
-  PixelMatrix* m = new PixelMatrix(mm);
-  IPixelPattern* p = new RainbowScrollPattern(4.0f, 2.0f);
-  m->setPattern(p);
-  m->setMasterBrightness(0.8f);
-  g_md.matrices.push_back(m);
-  g_md.patterns.push_back(p);  // PixelMatrix does not own it; we do.
 }
 
 // F3: build the show from a loaded bundle via the host-tested applyLoadedShow.
@@ -460,7 +520,7 @@ extern "C" void app_main(void) {
   esp_flash_get_size(nullptr, &flash_size);
   ESP_LOGI(TAG, "");
   ESP_LOGI(TAG, "========================================");
-  ESP_LOGI(TAG, "  esp-glow firmware  (ESP32-S3)  F3");
+  ESP_LOGI(TAG, "  esp-glow firmware  (ESP32-S3)  F5");
   ESP_LOGI(TAG, "  %s %s", __DATE__, __TIME__);
   ESP_LOGI(TAG, "========================================");
   ESP_LOGI(TAG, "chip: rev %d, cores %d", chip.revision, chip.cores);
@@ -478,6 +538,18 @@ extern "C" void app_main(void) {
     nvs_flash_init();
   }
 
+  // --- F5: OTA self-validation wiring. Set the callbacks and check
+  // whether this boot is a pending-verify OTA slot BEFORE anything else --
+  // ota_manager_tick starts getting called from the very first rendered
+  // frame (render_tick_hooks), so the callbacks must already be in place
+  // by then (see ota_manager.h). ---
+  OtaCallbacks otaCb = {};
+  otaCb.onRollbackImminent = ota_cb_rollback_imminent;
+  otaCb.cuesActive = ota_cb_cues_active;
+  otaCb.broadcast = ota_cb_broadcast;
+  ota_manager_set_callbacks(&otaCb);
+  ota_manager_init();
+
   // --- F1: DMX sink ---
   g_dmx = new DmxSink(DMX_NUM_1, CONFIG_GLOW_DMX_TX_GPIO, CONFIG_GLOW_DMX_RX_GPIO, CONFIG_GLOW_DMX_RTS_GPIO);
   if (!g_dmx->begin()) {
@@ -485,12 +557,15 @@ extern "C" void app_main(void) {
     led_status_set(LED_ERROR);
     return;
   }
+  ota_manager_note_dmx_ready();  // F5: one of the three self-validation criteria
 
-  // --- F2: WiFi (STA) ---
+  // --- F2/F5: WiFi (STA), with a SoftAP fallback after repeated failed
+  // reconnects so the console stays reachable even when the venue's WiFi
+  // is gone (see wifi_manager.h's HIL flag on AP+DMX coexistence). ---
   WifiStaConfig wc = {};
   wc.ssid = CONFIG_GLOW_WIFI_SSID;
   wc.password = CONFIG_GLOW_WIFI_PASS;
-  wc.ap_fallback = false;
+  wc.ap_fallback = true;
   wifi_start_sta(&wc);
 
   // --- F2: Art-Net sink ---
@@ -501,10 +576,21 @@ extern "C" void app_main(void) {
     ESP_LOGE(TAG, "Art-Net socket failed; matrix output disabled.");
   }
 
-  // --- F3: load the show from the raw "show" partition, else fall back ---
+  // --- F5: always keep at least one DMX universe configured and
+  // streaming, independent of whether a show bundle loads -- "safe
+  // blackout" means the DMX line keeps carrying zero frames, and that only
+  // works if a universe exists to send them on. setup_show_from_bundle
+  // overwrites this via applyLoadedShow's own setUniverseCount/
+  // configureUniverse if a bundle loads successfully (see apply_loaded_show.cpp). ---
+  g_show.setUniverseCount(1);
+  g_show.configureUniverse(0, UniverseMode::Fixture, g_dmx);
+
+  // --- F3/F5: load the show from the raw "show" partition; a missing or
+  // corrupt bundle is now a safe blackout, not a hardcoded demo patch --
+  // see glow_safe_blackout and this file's header comment. ---
   bool from_bundle = setup_show_from_bundle();
   if (!from_bundle) {
-    setup_hardcoded_fallback();
+    glow_safe_blackout("show partition: missing or corrupt SHW1 bundle (no valid show)");
   }
 
   // --- F6: g_controller is g_show's ONE effect (see its declaration's
@@ -544,11 +630,11 @@ extern "C" void app_main(void) {
   }
   led_status_set(LED_BLINK_FAST);
 
-  // --- F4: web console (WS httpd + console static files) + MIDI + OSC ---
-  // Bindings (g_liveControl.bindButton/bindFader above, in
-  // setup_hardcoded_fallback) are already in place before any of these
-  // start -- "configured once, before tasks start, and never mutated" is
-  // what makes transport-side binding reads race-free.
+  // --- F4/F5: web console (WS httpd + console static files + /ota) + MIDI
+  // + OSC --- any g_liveControl bindings would need to already be in place
+  // before any of these start -- "configured once, before tasks start, and
+  // never mutated" is what makes transport-side binding reads race-free
+  // (none are bound yet -- see g_wsCues' comment).
   web_input_init(*g_controlQueue, *g_evalQueue,
                  g_nWsCues ? g_wsCues : nullptr, g_nWsCues,
                  /*scenes=*/nullptr, /*nScenes=*/0,
@@ -563,8 +649,8 @@ extern "C" void app_main(void) {
   xTaskCreatePinnedToCore(osc_server_task, "osc", 4096 / sizeof(StackType_t),
                           nullptr, 5, nullptr, 0);
 
-  ESP_LOGI(TAG, "F3 complete: show is %s.",
-           from_bundle ? "loaded from the 'show' partition" : "hardcoded fallback");
+  ESP_LOGI(TAG, "F5 complete: show is %s.",
+           from_bundle ? "loaded from the 'show' partition" : "in safe blackout (no valid bundle)");
   ESP_LOGI(TAG, "Reflash the 'show' partition and reboot to change the patch.");
 
   while (true) {

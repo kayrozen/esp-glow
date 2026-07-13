@@ -38,8 +38,9 @@ idf_component_register(
 #
 # data/show.shw1 is the demo SHW1 bundle (replace with your own; see
 # samples/). It's optional at configure time — if absent, the "show"
-# partition is left blank and the device falls back to its hardcoded patch
-# at boot (see main.cpp). esptool_py_flash_to_partition() records the
+# partition is left blank and the device boots into a safe blackout (see
+# glow_safe_blackout in main.cpp) rather than a hardcoded demo patch.
+# esptool_py_flash_to_partition() records the
 # binary's path relative to the build dir, so it's copied into the build
 # dir first: that keeps `firmware/build/*.shw1` a valid glob for CI
 # artifact upload, and keeps flasher_args.json's path flat (no "../") so
