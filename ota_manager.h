@@ -29,7 +29,15 @@
 
 #ifdef ESP_PLATFORM
 
-#include "esp_http_server.h"
+// Deliberately NOT `#include "esp_http_server.h"` here: this header is
+// included from main.cpp, which only calls the callback/lifecycle
+// functions below and never touches httpd_handle_t directly -- only
+// web_input.cpp (registering the /ota handler on its already-running
+// server) needs the real type, and it gets esp_http_server.h on its own
+// (glow_core PRIV_REQUIRES esp_http_server; main does not, and doesn't
+// need to just for this). ota_register_handlers takes an opaque `void*`
+// here and casts back to httpd_handle_t inside ota_manager.cpp, which
+// does include the real header.
 
 #ifdef __cplusplus
 extern "C" {
@@ -64,8 +72,10 @@ void ota_manager_set_callbacks(const OtaCallbacks* cb);
 
 // Registers the /ota POST handler on the already-running httpd server (see
 // web_input.cpp's web_server_task -- OTA reuses that server; it never
-// starts a second one). Call after httpd_start.
-void ota_register_handlers(httpd_handle_t server);
+// starts a second one). `server` is actually an httpd_handle_t -- see this
+// file's header comment for why it's typed as void* here. Call after
+// httpd_start.
+void ota_register_handlers(void* server);
 
 // Call once at boot (main.cpp, before the render task starts): checks
 // whether this boot is running a pending-verify OTA slot (i.e. this is the

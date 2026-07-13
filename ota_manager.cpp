@@ -7,6 +7,7 @@
 #include "ota_manager.h"
 #include "web_protocol.h"  // buildOtaStatusJson
 
+#include "esp_http_server.h"  // not pulled in by ota_manager.h -- see its header comment
 #include "esp_ota_ops.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -231,12 +232,13 @@ esp_err_t ota_post_handler(httpd_req_t* req) {
 
 }  // namespace
 
-void ota_register_handlers(httpd_handle_t server) {
+void ota_register_handlers(void* server) {
+  httpd_handle_t handle = static_cast<httpd_handle_t>(server);
   httpd_uri_t otaUri = {};
   otaUri.uri = "/ota";
   otaUri.method = HTTP_POST;
   otaUri.handler = ota_post_handler;
-  httpd_register_uri_handler(server, &otaUri);
+  httpd_register_uri_handler(handle, &otaUri);
   ESP_LOGI(TAG, "/ota (POST) ready");
 }
 
