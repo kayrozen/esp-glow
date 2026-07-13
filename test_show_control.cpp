@@ -229,6 +229,50 @@ void test_auto_hold() {
   delete effects[0];
 }
 
+// F5 safe blackout: stopAll() must deactivate immediately, no fade, and
+// anyActive() must reflect it right away (no lingering release() ramp).
+void test_stop_all() {
+  TEST("stopAll: immediate deactivation, no fade, anyActive() tracks it");
+
+  ShowController ctrl;
+  std::vector<IEffect*> effectsA;
+  effectsA.push_back(new ConstCapEffect{7, Capability::Dimmer, 1.0f});
+  std::vector<IEffect*> effectsB;
+  effectsB.push_back(new ConstCapEffect{8, Capability::Dimmer, 1.0f});
+
+  // Long fade times so a release()-based stop would still show weight > 0
+  // right after stopping -- stopAll() must not go through that path at all.
+  uint16_t cueA = ctrl.addCue(effectsA, 0.0f, 10.0f, 0, 0.0f);
+  uint16_t cueB = ctrl.addCue(effectsB, 0.0f, 10.0f, 0, 0.0f);
+
+  CHECK(!ctrl.anyActive());
+  ctrl.go(cueA, 0.0f);
+  ctrl.go(cueB, 0.0f);
+  CHECK(ctrl.anyActive());
+  CHECK(ctrl.isActive(cueA));
+  CHECK(ctrl.isActive(cueB));
+
+  std::vector<CapIntent> caps;
+  std::vector<AimIntent> aims;
+  ctrl.evaluate(0.0f, caps, aims);
+  CHECK(caps.size() == 2);
+
+  ctrl.stopAll();
+  CHECK(!ctrl.anyActive());
+  CHECK(!ctrl.isActive(cueA));
+  CHECK(!ctrl.isActive(cueB));
+
+  // Immediately after stopAll(), even at the same instant a fade would
+  // still be ramping, evaluate() must emit nothing.
+  caps.clear();
+  aims.clear();
+  ctrl.evaluate(0.0f, caps, aims);
+  CHECK(caps.empty());
+
+  delete effectsA[0];
+  delete effectsB[0];
+}
+
 // Blending tests
 void test_intensity_scaling() {
   TEST("Intensity scaling: single cue fadeIn 2 with Dimmer 1.0, at t=1 should be 0.5");
@@ -527,6 +571,36 @@ void test_end_to_end() {
   delete effects[0];
 }
 
+void test_active_cue_ids() {
+  TEST("activeCueIds() lists only cues with active==true, matching isActive()");
+
+  ShowController ctrl;
+  std::vector<IEffect*> effects;
+  effects.push_back(new ConstCapEffect{0, Capability::Dimmer, 1.0f});
+
+  uint16_t cue0 = ctrl.addCue(effects, 0.0f, 0.0f, 0, 0.0f);  // no fade -- go()/release() are immediate
+  uint16_t cue1 = ctrl.addCue(effects, 0.0f, 0.0f, 0, 0.0f);
+  uint16_t cue2 = ctrl.addCue(effects, 0.0f, 0.0f, 0, 0.0f);
+
+  uint16_t ids[8];
+  CHECK(ctrl.activeCueIds(ids, 8) == 0);  // nothing active yet
+
+  ctrl.go(cue0, 0.0f);
+  ctrl.go(cue2, 0.0f);
+  size_t n = ctrl.activeCueIds(ids, 8);
+  CHECK(n == 2);
+  CHECK(ids[0] == cue0);
+  CHECK(ids[1] == cue2);
+  CHECK(ctrl.isActive(cue0));
+  CHECK(!ctrl.isActive(cue1));
+  CHECK(ctrl.isActive(cue2));
+
+  // Cap truncates rather than overflowing the caller's buffer.
+  CHECK(ctrl.activeCueIds(ids, 1) == 1);
+
+  delete effects[0];
+}
+
 int main() {
   printf("=== ShowController Tests ===\n\n");
 
@@ -535,6 +609,7 @@ int main() {
   test_manual_release();
   test_release_mid_fade_in();
   test_auto_hold();
+  test_stop_all();
 
   printf("\n");
 
@@ -551,6 +626,10 @@ int main() {
 
   // End-to-end
   test_end_to_end();
+
+  printf("\n");
+
+  test_active_cue_ids();
 
   printf("\n=== Results ===\n");
   if (g_failCount == 0) {

@@ -24,8 +24,23 @@ PaceResult paceNextFrame(uint32_t targetPeriodUs, uint64_t nowUs,
     r.behind = true;
     r.sleepUs = 0;
     r.nextDeadlineUs = nowUs + targetPeriodUs;
+
+    // How many whole periods elapsed since `base` before this frame finally
+    // ran. One period late is ordinary scheduling jitter (already captured
+    // by `behind`); anything beyond that is a period nothing rendered in at
+    // all -- e.g. a GC pause that ate several frame budgets in one gulp.
+    // targetPeriodUs == 0 can't express "a period", so there's nothing to
+    // count (also avoids a divide by zero).
+    if (targetPeriodUs != 0) {
+      uint64_t elapsed = nowUs - base;
+      uint64_t periods = elapsed / targetPeriodUs;
+      r.droppedFrames = (periods > 1) ? static_cast<uint32_t>(periods - 1) : 0;
+    } else {
+      r.droppedFrames = 0;
+    }
   } else {
     r.behind = false;
+    r.droppedFrames = 0;
     r.sleepUs = static_cast<int32_t>(next - nowUs);
     r.nextDeadlineUs = next;
   }

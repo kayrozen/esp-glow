@@ -22,6 +22,7 @@
 
 #include "esp_timer.h"
 #include "esp_log.h"
+#include "esp_task_wdt.h"
 
 static const char* TAG = "render_task";
 
@@ -34,11 +35,42 @@ static void*               s_pre_render_ctx = nullptr;
 static render_post_render_fn s_post_render = nullptr;
 static void*                 s_post_render_ctx = nullptr;
 
+// Cumulative counters for render_task_get_and_reset_stats(). Written only
+// from render_loop (this task); read/reset only from a post_render hook,
+// which also runs on this task (see main.cpp's render_tick_hooks) -- so
+// this is same-task, not cross-task, and needs no synchronization.
+static uint32_t s_statFrames = 0;
+static uint32_t s_statBehind = 0;
+static uint32_t s_statDropped = 0;
+
 static void render_loop(void*) {
   ESP_LOGI(TAG, "render loop started on core %d (period=%lu us%s%s)",
            xPortGetCoreID(), (unsigned long)s_periodUs,
            s_pre_render ? ", pre_render=on" : "",
            s_post_render ? ", post_render=on" : "");
+
+  // F5: subscribe THIS task to the Task WDT (see sdkconfig.defaults'
+  // CONFIG_ESP_TASK_WDT*). If the render loop ever hangs -- a runaway
+  // native (C++) effect, a driver stall inside show->renderFrame -- the
+  // watchdog reboots the board instead of leaving a frozen rig on stage.
+  // This is a DIFFERENT backstop from the Lua instruction-count hook
+  // (lua_vm.h's LuaVM instruction budget): that one bounds *scripted*
+  // runtime and disables the offending effect without ever reaching this
+  // watchdog; this one exists for hangs the Lua layer has no way to see,
+  // so removing either thinking the other covers it would reopen a gap.
+  // Fed once per frame from render_tick_hooks' post phase (main.cpp), not
+  // from here -- the reset has to happen after a full frame actually
+  // completes, which this function has no visibility into.
+  //
+  // Deliberately NOT done for midi_uart_task/osc_server_task/the httpd
+  // worker (see main.cpp): a blocked socket waiting on a peer is normal,
+  // not a fatal condition, and subscribing a task that can legitimately
+  // block for a while would turn ordinary network stalls into reboots.
+  esp_err_t wdtErr = esp_task_wdt_add(nullptr);
+  if (wdtErr != ESP_OK) {
+    ESP_LOGW(TAG, "esp_task_wdt_add failed (%s); render task will not be "
+                  "watchdog-protected this boot", esp_err_to_name(wdtErr));
+  }
 
   uint64_t prevDeadline = 0;  // 0 => paceNextFrame seeds from nowUs
   uint32_t frames = 0;
@@ -81,6 +113,10 @@ static void render_loop(void*) {
     }
 
     frames++;
+    s_statFrames++;
+    if (r.behind) s_statBehind++;
+    s_statDropped += r.droppedFrames;
+
     if (now - lastReport >= 5'000'000u) {
       ESP_LOGI(TAG, "stats: %u frames, %u behind in last 5s",
                (unsigned)frames, (unsigned)behindCount);
@@ -127,3 +163,12 @@ void render_task_stop(void) {
 bool render_task_running(void) { return s_task != nullptr; }
 
 bool render_task_last_frame_behind(void) { return s_behind; }
+
+void render_task_get_and_reset_stats(uint32_t* frames, uint32_t* behind, uint32_t* dropped) {
+  if (frames) *frames = s_statFrames;
+  if (behind) *behind = s_statBehind;
+  if (dropped) *dropped = s_statDropped;
+  s_statFrames = 0;
+  s_statBehind = 0;
+  s_statDropped = 0;
+}

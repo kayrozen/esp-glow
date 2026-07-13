@@ -94,6 +94,11 @@ void Show::writeRawUniverse(uint8_t idx, const uint8_t* data, uint16_t len) {
   for (uint16_t i = 0; i < n; ++i) u.data[i] = data[i];
 }
 
+const uint8_t* Show::universeData(uint8_t idx) const {
+  if (idx >= MAX_UNIVERSES) return nullptr;
+  return universes_[idx].data;
+}
+
 void Show::renderFrame(float t) {
   // 1. Reset Fixture-mode universes.
   for (uint8_t u = 0; u < universeCount_; ++u) {
