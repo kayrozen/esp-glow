@@ -231,6 +231,37 @@ void test_unknown_fixture_id_safe_noop() {
   CHECK(sink.last[0] == 0);
 }
 
+void test_universe_data_read_accessor() {
+  TEST("universeData() reads back a Fixture universe's resolved bytes and a Raw universe's blit");
+
+  ProfileBuilder builder;
+  builder.setFootprint(1).add(Capability::Red, 0, 0xFF, 0, false);
+  FixtureProfile p = buildProfile(builder);
+
+  Show show;
+  MockSink sink0, sink1;
+  show.setUniverseCount(2);
+  show.configureUniverse(0, UniverseMode::Fixture, &sink0);
+  show.configureUniverse(1, UniverseMode::Raw, &sink1);
+  uint16_t id = show.patch(p, 0, 0);
+
+  // 200/255 -- the exact value the HIL selftest fixture drives channel 0 to
+  // (see main.cpp's setup_selftest_fixture): round(200/255 * 255) == 200
+  // with no rounding slop, so this doubles as a regression check for that
+  // fixture's math.
+  StaticColorEffect fx(id, static_cast<float>(200) / 255.0f, 0.0f, 0.0f);
+  show.addEffect(&fx);
+  show.renderFrame(0.0f);
+  CHECK(show.universeData(0)[0] == 200);
+
+  uint8_t raw[DMX_UNIVERSE_SIZE] = {0};
+  raw[5] = 77;
+  show.writeRawUniverse(1, raw, DMX_UNIVERSE_SIZE);
+  CHECK(show.universeData(1)[5] == 77);
+
+  CHECK(show.universeData(MAX_UNIVERSES) == nullptr);
+}
+
 int main() {
   test_static_color();
   test_defaults_reset_each_frame();
@@ -239,6 +270,7 @@ int main() {
   test_last_write_wins();
   test_raw_universe_passthrough();
   test_unknown_fixture_id_safe_noop();
+  test_universe_data_read_accessor();
 
   if (g_failCount == 0) {
     printf("All tests passed.\n");

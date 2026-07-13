@@ -24,6 +24,12 @@ public:
 
   bool isActive(uint16_t cueId) const;
 
+  // Fills up to `cap` currently-active cue ids into `out` (cues with
+  // active==true, regardless of fade/release state -- same definition as
+  // isActive()). Returns the number written. Used by the HIL selftest
+  // serial query (?state) to assert on live cue state without a WS client.
+  size_t activeCueIds(uint16_t* out, size_t cap) const;
+
   // IEffect
   void evaluate(float t, std::vector<CapIntent>& caps,
                 std::vector<AimIntent>& aims) override;
