@@ -278,8 +278,16 @@ let sharpyStandardModel; // reused by the cross-format comparison below
   check("Vector's 4 extra Speed/Time channels -> plain linear Generic (no bogus ranges)",
     extraChannels.every((c) => c.cap === "Generic" && c.ranges.length === 0), extraChannels);
 
+  // The real reason MAX_RANGES/MAX_RANGE_NAME_BLOB were raised (see
+  // fixture_profile.h): a Sharpy-class moving head needs every one of its
+  // ~101 ranges to actually be useful. fitRangeBudget is a last-resort
+  // safety net now, not something a real fixture should ever hit.
+  const { dropped } = fitRangeBudget(model);
+  check("Sharpy Standard fits PFX2's budget with room to spare -- nothing dropped", dropped.length === 0, dropped);
+
   const { result } = roundTrip(model);
-  check("Sharpy Standard round-trips through fdef_check (even after budget trimming)", result.ok === true, result);
+  check("Sharpy Standard round-trips through fdef_check with EVERY range intact", result.ok === true &&
+    result.caps.reduce((n, c) => n + c.ranges.length, 0) === model.caps.reduce((n, c) => n + c.ranges.length, 0), result);
   check("round-trip footprint == 16", result.footprint === 16);
   const rtPan = result.caps.find((c) => c.coarse === 9);
   check("round-trip preserves the Pan 16-bit pair exactly", rtPan?.cap === "Pan" && rtPan.fine === 10, rtPan);

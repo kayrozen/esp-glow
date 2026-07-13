@@ -33,7 +33,7 @@ Version 2 inserts one extra field between `nameLen` and `name`:
 
 | Offset | Size (bytes) | Name       | Type    | Description |
 |--------|--------------|------------|---------|-------------|
-| 9      | 2            | rangeCount | uint16  | Number of function-range records (0..MAX_RANGES=64) |
+| 9      | 2            | rangeCount | uint16  | Number of function-range records (0..MAX_RANGES=192) |
 | 11     | nameLen      | name       | uint8[] | UTF-8 fixture name, NOT null-terminated |
 
 So version 2's header is **11 + nameLen** bytes before the capability records. `rangeCount` is a genuine header field (not part of the range table), which is why it comes before `name` -- everything from `name` onward shifts by 2 bytes relative to v1.
@@ -230,8 +230,8 @@ The parser (`parseProfile`) enforces these strict rules for both versions:
 Version 2 additionally enforces:
 
 8. Buffer must be at least 11 bytes before `rangeCount` is read.
-9. `rangeCount` must be ≤ MAX_RANGES (64).
-10. The trailing name blob must fit within MAX_RANGE_NAME_BLOB (512 bytes).
+9. `rangeCount` must be ≤ MAX_RANGES (192).
+10. The trailing name blob must fit within MAX_RANGE_NAME_BLOB (2048 bytes).
 11. For each range record:
     - `capIndex` must be < capCount.
     - `dmxFrom` must be ≤ `dmxTo`.

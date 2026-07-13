@@ -62,16 +62,15 @@ export function makeCap({
 // PFX2's function-range table is a fixed-size, no-heap array on the
 // device (FixtureProfile is a value type copied around freely), so these
 // are hard device-side ceilings, not a knob this importer gets to move.
-// A handful of real commercial moving heads (see fitRangeBudget below)
-// exceed MAX_RANGES once every discrete slot and speed sub-range is
-// carried through -- that's a real gap between today's PFX2 budget and
-// what the industry's own fixture files describe, worth raising in a
-// follow-up that also re-verifies the device-side memory budget (every
-// patched fixture in a show carries its own copy of this table); it is
-// NOT something to silently paper over by inflating these constants from
-// the importer side without that review.
-export const MAX_RANGES = 64;
-export const MAX_RANGE_NAME_BLOB = 512;
+// Both were raised (64->192, 512->2048) specifically to fit a real
+// commercial moving head's full breakdown -- see fixture_profile.h's own
+// comment on MAX_RANGES for the worked case (~101 ranges / ~1.7kB of
+// names for a Sharpy-class fixture) and FORMAT.md. fitRangeBudget below
+// is now a last-resort safety net, not the primary mechanism: with these
+// ceilings, no real fixture this importer has been tested against comes
+// close to triggering it.
+export const MAX_RANGES = 192;
+export const MAX_RANGE_NAME_BLOB = 2048;
 
 const utf8Encoder = new TextEncoder();
 function utf8Length(s) {
@@ -94,11 +93,13 @@ function nameBlobBytes(caps) {
   return bytes;
 }
 
-// Trims a model's ranges down to what PFX2 can actually encode, if it
-// doesn't fit already. Never touches capabilities, offsets, footprint, or
-// defaults -- only removes named ranges, so a trimmed capability just
-// degrades to a plainer (or partially named) linear channel; nothing
-// about DMX safety changes. Priority, most-disposable first:
+// Last-resort safety net: trims a model's ranges down to what PFX2 can
+// actually encode, on the rare fixture that still doesn't fit even under
+// the current (real-fixture-sized) MAX_RANGES/MAX_RANGE_NAME_BLOB budget.
+// Never touches capabilities, offsets, footprint, or defaults -- only
+// removes named ranges, so a trimmed capability just degrades to a
+// plainer (or partially named) linear channel; nothing about DMX safety
+// changes. Priority, most-disposable first:
 //  1. Generic (housekeeping/unmapped) channels' ranges -- the capability
 //     byte still works, it just loses its named breakdown.
 //  2. Once no Generic ranges remain, the tail of whichever remaining
