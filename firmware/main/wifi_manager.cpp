@@ -132,7 +132,10 @@ static void reconnect_task(void*) {
                                         pdMS_TO_TICKS(1000));
     if (b & BIT_LOST_IP) {
       vTaskDelay(pdMS_TO_TICKS(backoff * 1000));
-      s_attempts++;
+      // Plain read + plain store, not `s_attempts++` -- compound increment
+      // on a volatile-qualified operand is deprecated as of C++20 (P1152R4)
+      // and this toolchain's default C++ standard rejects it under -Werror.
+      s_attempts = s_attempts + 1;
       ESP_LOGI(TAG, "reconnect attempt (backoff=%ds)", backoff);
       ESP_LOGI(TAG, "GLOW-TEST: wifi state=retrying attempts=%u", (unsigned)s_attempts);
       esp_wifi_connect();
