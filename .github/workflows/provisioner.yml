@@ -17,17 +17,21 @@
 # artifacts are copied alongside it. The whole thing is served as static
 # files.
 #
-# Trigger: push to main touching web/provision-wasm/**, web/provisioner-static/**,
-# provision.cpp, provision.h, fixture_profile.*, profile_encoder.*, show_bundle.*,
-# or the workflow itself; also whenever the Firmware build workflow finishes on
-# main (so a firmware change republishes fresh binaries to the flasher). Also
-# manual dispatch.
+# Trigger: any push or pull request touching web/provision-wasm/**,
+# web/provisioner-static/**, provision.cpp, provision.h, fixture_profile.*,
+# profile_encoder.*, show_bundle.*, test_provision.cpp, or the workflow
+# itself -- build-wasm runs
+# (and must pass) on every branch/PR, not just main, so a WASM-only
+# regression is caught before merge instead of after (this used to be
+# push-to-main-only, so a WASM build/test break could merge cleanly and only
+# surface once it hit main). deploy-pages still only fires for an actual
+# push to main (or the Firmware build workflow finishing on main, or manual
+# dispatch) -- see its own `if:` below.
 
 name: Build & deploy provisioner
 
 on:
   push:
-    branches: [main]
     paths:
       - "web/provision-wasm/**"
       - "web/provisioner-static/**"
@@ -42,6 +46,24 @@ on:
       - "controller_encoder.*"
       - "show_bundle.*"
       - "vec_math.*"
+      - "test_provision.cpp"
+      - ".github/workflows/provisioner.yml"
+  pull_request:
+    paths:
+      - "web/provision-wasm/**"
+      - "web/provisioner-static/**"
+      - "web/shared/**"
+      - "web/vendor/**"
+      - "web/littlefs-image/**"
+      - "provision.cpp"
+      - "provision.h"
+      - "fixture_profile.*"
+      - "profile_encoder.*"
+      - "mdef.*"
+      - "controller_encoder.*"
+      - "show_bundle.*"
+      - "vec_math.*"
+      - "test_provision.cpp"
       - ".github/workflows/provisioner.yml"
   workflow_run:
     workflows: ["Firmware build"]
@@ -105,6 +127,11 @@ jobs:
   deploy-pages:
     name: Deploy to GitHub Pages
     needs: build-wasm
+    # build-wasm now runs on every push/PR so a WASM regression is caught
+    # before merge, but only an actual push to main (or the Firmware build
+    # workflow finishing on main, or a manual dispatch) should publish --
+    # never a pull_request event or a push to some other branch.
+    if: github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     environment:
       name: github-pages

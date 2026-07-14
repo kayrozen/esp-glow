@@ -5,8 +5,6 @@
 #include <cstring>
 #include <map>
 #include <cmath>
-#include <fstream>
-#include <sstream>
 
 static int testsPassed = 0;
 static int testsFailed = 0;
@@ -1028,19 +1026,119 @@ static const uint8_t kDemoShowGoldenBytes[] = {
   0, 111, 102, 102, 0, 121, 101, 108, 108, 111, 119, 0, 111, 114, 97, 110, 103, 101, 0,
 };
 
-static std::string readFileFromDiskForTest(const std::string& path) {
-  std::ifstream file(path);
-  if (!file.is_open()) return std::string();
-  std::stringstream buffer;
-  buffer << file.rdbuf();
-  return buffer.str();
-}
-
+// Mirrors samples/demo.show and the .fdef/.mdef files it references
+// (samples/dimmer.fdef, samples/head.fdef, samples/apc40.mdef) as string
+// literals, rather than reading them off disk: this test also runs under
+// the WASM/Node CI build (build-wasm.sh), whose Emscripten virtual
+// filesystem has no access to the real repo tree, only whatever's
+// preloaded -- unlike every other compileShow test in this file (which
+// already use an in-memory fileMap), a disk read here would silently
+// return "" and fail with a confusing "file not found"-shaped error under
+// WASM while passing fine on host. Keep this text in sync with the real
+// samples/ files by hand if either changes.
 TEST(show_demo_golden_bytes_unchanged_by_1_indexing_migration) {
-  std::string showText = readFileFromDiskForTest("samples/demo.show");
-  CHECK(!showText.empty());  // run from the repo root (see samples/demo.show's own comment)
+  std::map<std::string, std::string> fileMap;
+  fileMap["samples/dimmer.fdef"] = R"(FIXTURE Dimmer RGB
+FOOTPRINT 4
+CAP Dimmer 0
+CAP Red    1
+CAP Green  2
+CAP Blue   3
+)";
+  fileMap["samples/head.fdef"] = R"(FIXTURE Moving Head
+FOOTPRINT 9
+HEAD
+PANRANGE 540
+TILTRANGE 270
+CAP Dimmer 0
+CAP Pan    1 2
+CAP Tilt   3 4
+CAP Red    5
+CAP Green  6
+CAP Blue   7
+CAP ShutterStrobe 8 - 8
+)";
+  fileMap["samples/apc40.mdef"] = R"(CONTROLLER Akai APC40 mkII
+MIDI_CHANNEL 0
 
-  CompileResult result = compileShow(showText, readFileFromDiskForTest);
+PAD 0 39
+PAD 48 52
+PAD 58 66
+PAD 80 81
+PAD 82 86
+PAD 87 103
+
+FADER CC 7   track      # 9 track faders (0x07, track = MIDI channel)
+FADER CC 14  master     # master fader (0x0E)
+FADER CC 15  crossfader # crossfader (0x0F)
+FADER CC 16 23          # 8 DEVICE CONTROL knobs (0x10..0x17), absolute
+FADER CC 48 55          # 8 TRACK CONTROL knobs (0x30..0x37), absolute
+
+ENCODER CC 13 relative-2c   # tempo knob
+ENCODER CC 47 relative-2c   # cue level
+
+LED NOTE 0 39 velocity
+  COLOR off       0
+  COLOR grey-dim  1
+  COLOR grey      2
+  COLOR white     3
+  COLOR red       5
+  COLOR orange    9
+  COLOR yellow    13
+  COLOR lime      17
+  COLOR green     21
+  COLOR spring    29
+  COLOR aqua      33
+  COLOR sky-blue  37
+  COLOR blue      41
+  COLOR indigo    45
+  COLOR violet    49
+  COLOR magenta   53
+  COLOR pink      57
+LED NOTE 82 86 velocity
+  COLOR off   0
+  COLOR white 3
+  COLOR red   5
+  COLOR green 21
+  COLOR blue  41
+LED NOTE 52 52 velocity
+  COLOR off   0
+  COLOR on    1
+  COLOR blink 2
+LED NOTE 66 66 velocity
+  COLOR off    0
+  COLOR yellow 1
+  COLOR orange 2
+)";
+
+  std::string showText = R"(SHOW 2
+
+UNIVERSE 1 DMX
+UNIVERSE 2 ARTNET
+UNIVERSE 3 ARTNET
+UNIVERSE 4 ARTNET
+
+FIXTURE samples/dimmer.fdef 1 2
+FIXTURE samples/dimmer.fdef 1 12
+
+FIXTURE samples/head.fdef 1 22
+POS 2.0 1.0 0.0
+ROT 0 0 0
+CENTER 0.5 0.5
+
+FIXTURE samples/dimmer.fdef 2 2
+
+MATRIX 3 1 16 8 SERP H RGB
+
+CONTROLLER samples/apc40.mdef
+)";
+
+  auto readFile = [&](const std::string& name) {
+    auto it = fileMap.find(name);
+    return it != fileMap.end() ? it->second : std::string();
+  };
+
+  CompileResult result = compileShow(showText, readFile);
   CHECK(result.ok);
 
   size_t goldenLen = sizeof(kDemoShowGoldenBytes) / sizeof(kDemoShowGoldenBytes[0]);
