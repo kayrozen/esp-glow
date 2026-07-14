@@ -14,13 +14,30 @@
 
 #include "eval_queue.h"
 
+#include "esp_log.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+
+static const char* kEvalQueueTag = "eval_queue";
 
 class FreeRtosEvalSubmissionQueue : public IEvalSubmissionQueue {
 public:
   explicit FreeRtosEvalSubmissionQueue(size_t capacity) {
     handle_ = xQueueCreate(capacity, sizeof(EvalSubmission));
+    if (!handle_) {
+      // See control_queue_freertos.cpp's FreeRtosControlEventQueue
+      // constructor comment -- same internal-RAM-only reasoning, same
+      // "loud, no-op, never a panic" policy. EvalSubmission is
+      // considerably bigger than ControlEvent/BeatEvent (EVAL_SRC_MAX=4096
+      // bytes of source per slot -- see eval_queue.h), so this is the one
+      // of the three queues actually likely to hit this path; see the
+      // capacity comment at this queue's call site in main.cpp for the
+      // sizing fix that should keep it from doing so in practice.
+      ESP_LOGE(kEvalQueueTag,
+               "xQueueCreate(capacity=%u, item=%u bytes) failed -- the "
+               "live-coding REPL (glow.eval over WS) disabled this boot.",
+               (unsigned)capacity, (unsigned)sizeof(EvalSubmission));
+    }
   }
 
   ~FreeRtosEvalSubmissionQueue() override {
@@ -28,10 +45,12 @@ public:
   }
 
   bool push(const EvalSubmission& sub) override {
+    if (!handle_) return false;
     return xQueueSend(handle_, &sub, 0) == pdTRUE;
   }
 
   bool pop(EvalSubmission& sub) override {
+    if (!handle_) return false;
     return xQueueReceive(handle_, &sub, 0) == pdTRUE;
   }
 

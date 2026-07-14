@@ -10,15 +10,27 @@
 
 #include "beat_queue.h"
 
+#include "esp_log.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
 namespace glow {
 
+static const char* kBeatQueueTag = "beat_queue";
+
 class FreeRtosBeatEventQueue : public IBeatEventQueue {
 public:
   explicit FreeRtosBeatEventQueue(size_t capacity) {
     handle_ = xQueueCreate(capacity, sizeof(BeatEvent));
+    if (!handle_) {
+      // See control_queue_freertos.cpp's FreeRtosControlEventQueue
+      // constructor comment -- same reasoning (internal-RAM-only FreeRTOS
+      // allocation), same "loud, no-op, never a panic" policy.
+      ESP_LOGE(kBeatQueueTag,
+               "xQueueCreate(capacity=%u, item=%u bytes) failed -- musical "
+               "time input (MIDI clock/DJ Link/tap) disabled this boot.",
+               (unsigned)capacity, (unsigned)sizeof(BeatEvent));
+    }
   }
 
   ~FreeRtosBeatEventQueue() override {
@@ -26,11 +38,13 @@ public:
   }
 
   bool push(const BeatEvent& ev) override {
+    if (!handle_) return false;
     return xQueueSend(handle_, &ev, 0) == pdTRUE;
   }
 
   // For ISR producers, same rationale as FreeRtosControlEventQueue's.
   bool pushFromISR(const BeatEvent& ev) {
+    if (!handle_) return false;
     BaseType_t higherPriorityTaskWoken = pdFALSE;
     bool ok = xQueueSendFromISR(handle_, &ev, &higherPriorityTaskWoken) == pdTRUE;
     portYIELD_FROM_ISR(higherPriorityTaskWoken);
@@ -38,6 +52,7 @@ public:
   }
 
   bool pop(BeatEvent& ev) override {
+    if (!handle_) return false;
     return xQueueReceive(handle_, &ev, 0) == pdTRUE;
   }
 

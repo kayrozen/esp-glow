@@ -904,8 +904,21 @@ extern "C" void app_main(void) {
   // control_queue.h's own guidance. ---
   g_controlQueue = createDeviceControlEventQueue(64);
 
-  // --- F4: eval submission queue, same sizing rationale as g_controlQueue ---
-  g_evalQueue = createDeviceEvalSubmissionQueue(64);
+  // --- F4: eval submission queue. NOT the same sizing as g_controlQueue --
+  // EvalSubmission carries a fixed EVAL_SRC_MAX=4096-byte source buffer per
+  // slot (eval_queue.h), unlike ControlEvent/BeatEvent's few bytes, and
+  // FreeRTOS queue storage is internal-RAM-only, always (ESP-IDF maps it
+  // to MALLOC_CAP_INTERNAL unconditionally -- see
+  // components/freertos/heap_idf.c -- so CONFIG_SPIRAM_USE_MALLOC does not
+  // help here). Capacity 64 here was ~256 KB of required internal RAM --
+  // most of the whole internal heap on an ESP32-S3 -- and xQueueCreate
+  // failed outright on first real boot (QEMU found this; see
+  // eval_queue_freertos.cpp's constructor for the resulting safe-no-op
+  // fallback if this ever happens again). A human at a REPL submits one
+  // eval at a time and waits for its result (web_protocol.h's eval/
+  // eval_result round trip) -- 8 in flight is already generous headroom
+  // for multiple simultaneous console clients, at a sane ~32 KB. ---
+  g_evalQueue = createDeviceEvalSubmissionQueue(8);
 
   // --- Musical time: the beat-event queue MIDI clock/DJ-Link/tap push
   // into, drained into g_beatClock every frame (see on_pre_render). Beats
