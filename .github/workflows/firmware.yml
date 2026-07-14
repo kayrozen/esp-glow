@@ -19,8 +19,8 @@ jobs:
       - name: Build the show bundle (raw "show" partition input)
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror -O2 \
-              provision_main.cpp provision.cpp profile_encoder.cpp \
-              fixture_profile.cpp pixel_matrix.cpp color.cpp vec_math.cpp \
+              provision_main.cpp provision.cpp profile_encoder.cpp controller_encoder.cpp \
+              fixture_profile.cpp mdef.cpp pixel_matrix.cpp color.cpp vec_math.cpp \
               aim.cpp show_bundle.cpp -o /tmp/provision -lm
           mkdir -p firmware/main/data
           /tmp/provision samples/demo.show firmware/main/data/show.shw1
