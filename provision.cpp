@@ -5,6 +5,8 @@
 #include <map>
 #include <algorithm>
 #include <cstring>
+#include <cstdlib>
+#include <cerrno>
 
 // ============================================================================
 // .fdef Parsing
@@ -68,6 +70,60 @@ static std::string& stripComments(std::string& line) {
   return line;
 }
 
+// Parses `s` as a base-10 integer without ever throwing. This compiler's
+// contract (like the rest of the .fdef/.show/.mdef grammar) is "no
+// exceptions -- report errors via a return value + an err string": every
+// text field a user (or an importer translating a QLC+/GDTF file of
+// unknown origin) can type ends up here. On the host, where exceptions are
+// enabled, a stoi-in-a-try/catch "works" -- but under Emscripten's default
+// WASM build (no -fexceptions), a throw aborts the whole module instead of
+// unwinding to the catch, so a plain typo (`FOOTPRINT abc`) that should
+// produce a clean error message instead kills the provisioner with an
+// opaque Aborted(). This helper -- and parseFloatToken below -- replace
+// every stoi/stof call in this file so that guarantee actually holds
+// everywhere text gets parsed, not just where it happened to be tested.
+// Returns false (out untouched) if `s` isn't a valid integer (empty,
+// non-digit characters after an optional leading '-'/'+', or an overflow
+// past what fits in a long); every caller range-checks/truncates the
+// result itself, matching the pre-existing (pre-fix) behavior exactly.
+static bool parseIntToken(const std::string& s, int& out) {
+  if (s.empty()) return false;
+  size_t i = 0;
+  bool neg = false;
+  if (s[0] == '-' || s[0] == '+') {
+    neg = (s[0] == '-');
+    i = 1;
+  }
+  if (i >= s.size()) return false;
+  long v = 0;
+  for (; i < s.size(); ++i) {
+    if (s[i] < '0' || s[i] > '9') return false;
+    v = v * 10 + (s[i] - '0');
+    if (v > 1000000000L) return false;  // overflow guard; every real field fits in 0..65535
+  }
+  out = static_cast<int>(neg ? -v : v);
+  return true;
+}
+
+// Parses `s` as a float without ever throwing -- the parseIntToken of
+// std::stof. strtod (plain C, never throws) does the real work; the only
+// job here is rejecting what stof's exception used to reject: an empty
+// string, or trailing garbage after the number (strtod itself would
+// silently accept "12abc" as 12.0 and just stop early, unlike stof/strtod's
+// own error signaling via a NULL endptr advance -- checking `end` against
+// the full string length is what makes this behave like stof, not silently
+// accept partial matches).
+static bool parseFloatToken(const std::string& s, float& out) {
+  if (s.empty()) return false;
+  errno = 0;
+  char* end = nullptr;
+  double v = std::strtod(s.c_str(), &end);
+  if (end != s.c_str() + s.size()) return false;  // empty parse or trailing garbage
+  if (errno == ERANGE) return false;               // overflow/underflow
+  out = static_cast<float>(v);
+  return true;
+}
+
 bool parseFixtureDef(const std::string& text, FixtureDef& out, std::string& err) {
   out = FixtureDef();
   err.clear();
@@ -101,17 +157,16 @@ bool parseFixtureDef(const std::string& text, FixtureDef& out, std::string& err)
         err = "FOOTPRINT: missing value";
         return false;
       }
-      try {
-        int fp = std::stoi(tokens[1]);
-        if (fp < 1 || fp > 255) {
-          err = "FOOTPRINT: out of range (1..255)";
-          return false;
-        }
-        out.footprint = static_cast<uint8_t>(fp);
-      } catch (...) {
+      int fp;
+      if (!parseIntToken(tokens[1], fp)) {
         err = "FOOTPRINT: invalid integer";
         return false;
       }
+      if (fp < 1 || fp > 255) {
+        err = "FOOTPRINT: out of range (1..255)";
+        return false;
+      }
+      out.footprint = static_cast<uint8_t>(fp);
     } else if (cmd == "HEAD") {
       out.isHead = true;
     } else if (cmd == "PANRANGE") {
@@ -119,9 +174,7 @@ bool parseFixtureDef(const std::string& text, FixtureDef& out, std::string& err)
         err = "PANRANGE: missing value";
         return false;
       }
-      try {
-        out.panRangeDeg = std::stof(tokens[1]);
-      } catch (...) {
+      if (!parseFloatToken(tokens[1], out.panRangeDeg)) {
         err = "PANRANGE: invalid float";
         return false;
       }
@@ -130,9 +183,7 @@ bool parseFixtureDef(const std::string& text, FixtureDef& out, std::string& err)
         err = "TILTRANGE: missing value";
         return false;
       }
-      try {
-        out.tiltRangeDeg = std::stof(tokens[1]);
-      } catch (...) {
+      if (!parseFloatToken(tokens[1], out.tiltRangeDeg)) {
         err = "TILTRANGE: invalid float";
         return false;
       }
@@ -150,11 +201,13 @@ bool parseFixtureDef(const std::string& text, FixtureDef& out, std::string& err)
       uint8_t coarse, fine = 0xFF, def = 0;
       bool inverted = false;
 
-      try {
-        coarse = static_cast<uint8_t>(std::stoi(tokens[2]));
-      } catch (...) {
-        err = "CAP: invalid coarse channel";
-        return false;
+      {
+        int coarseInt;
+        if (!parseIntToken(tokens[2], coarseInt)) {
+          err = "CAP: invalid coarse channel";
+          return false;
+        }
+        coarse = static_cast<uint8_t>(coarseInt);
       }
 
       size_t tokenIdx = 3;
@@ -162,24 +215,24 @@ bool parseFixtureDef(const std::string& text, FixtureDef& out, std::string& err)
       // Fine channel
       if (tokenIdx < tokens.size() && tokens[tokenIdx] != "inv") {
         if (tokens[tokenIdx] != "-") {
-          try {
-            fine = static_cast<uint8_t>(std::stoi(tokens[tokenIdx]));
-          } catch (...) {
+          int fineInt;
+          if (!parseIntToken(tokens[tokenIdx], fineInt)) {
             err = "CAP: invalid fine channel";
             return false;
           }
+          fine = static_cast<uint8_t>(fineInt);
         }
         tokenIdx++;
       }
 
       // Default value
       if (tokenIdx < tokens.size() && tokens[tokenIdx] != "inv") {
-        try {
-          def = static_cast<uint8_t>(std::stoi(tokens[tokenIdx]));
-        } catch (...) {
+        int defInt;
+        if (!parseIntToken(tokens[tokenIdx], defInt)) {
           err = "CAP: invalid default value";
           return false;
         }
+        def = static_cast<uint8_t>(defInt);
         tokenIdx++;
       }
 
@@ -208,10 +261,7 @@ bool parseFixtureDef(const std::string& text, FixtureDef& out, std::string& err)
       }
 
       int from, to;
-      try {
-        from = std::stoi(tokens[1]);
-        to = std::stoi(tokens[2]);
-      } catch (...) {
+      if (!parseIntToken(tokens[1], from) || !parseIntToken(tokens[2], to)) {
         err = cmd + ": invalid from/to";
         return false;
       }
@@ -285,6 +335,14 @@ static bool parseEncoderMode(const std::string& s, EncoderMode& out) {
   return false;
 }
 
+// FADER/ENCODER below use parseIntToken (defined above, near tokenize) not
+// just for genuinely malformed input but as *routine* control flow: peeking
+// at the next token to decide "is this a <to> number, or does the name/mode
+// start here?". A named fader (`FADER CC 7 master`) or a moded encoder
+// (`ENCODER CC 16 23 relative-2c`) hits the "not a number" branch on nearly
+// every real .mdef file -- this is exactly the path that used to throw on
+// the *common* case, not just the error case, before parseIntToken existed.
+
 bool parseControllerDef(const std::string& text, ControllerBuilder& out, std::string& err) {
   out = ControllerBuilder();
   err.clear();
@@ -307,16 +365,15 @@ bool parseControllerDef(const std::string& text, ControllerBuilder& out, std::st
     } else if (cmd == "MIDI_CHANNEL") {
       if (tokens.size() < 2) { err = "MIDI_CHANNEL: missing value"; return false; }
       int ch;
-      try { ch = std::stoi(tokens[1]); } catch (...) { err = "MIDI_CHANNEL: invalid integer"; return false; }
+      if (!parseIntToken(tokens[1], ch)) { err = "MIDI_CHANNEL: invalid integer"; return false; }
       if (ch < 0 || ch > 16) { err = "MIDI_CHANNEL: out of range (0..16)"; return false; }
       out.midiChannel = static_cast<uint8_t>(ch);
     } else if (cmd == "PAD") {
       if (tokens.size() < 2) { err = "PAD: missing note"; return false; }
       int from, to;
-      try {
-        from = std::stoi(tokens[1]);
-        to = (tokens.size() >= 3) ? std::stoi(tokens[2]) : from;
-      } catch (...) { err = "PAD: invalid note number"; return false; }
+      if (!parseIntToken(tokens[1], from)) { err = "PAD: invalid note number"; return false; }
+      to = from;
+      if (tokens.size() >= 3 && !parseIntToken(tokens[2], to)) { err = "PAD: invalid note number"; return false; }
       if (from < 0 || from > 127 || to < 0 || to > 127) { err = "PAD: note out of range (0..127)"; return false; }
       if (from > to) { err = "PAD: from must be <= to"; return false; }
       out.pads.push_back({static_cast<uint8_t>(from), static_cast<uint8_t>(to)});
@@ -326,17 +383,13 @@ bool parseControllerDef(const std::string& text, ControllerBuilder& out, std::st
         return false;
       }
       int from;
-      try { from = std::stoi(tokens[2]); } catch (...) { err = "FADER: invalid CC number"; return false; }
+      if (!parseIntToken(tokens[2], from)) { err = "FADER: invalid CC number"; return false; }
       size_t idx = 3;
       int to = from;
-      if (idx < tokens.size()) {
-        try {
-          size_t consumed = 0;
-          int candidate = std::stoi(tokens[idx], &consumed);
-          if (consumed == tokens[idx].size()) { to = candidate; idx++; }
-        } catch (...) {
-          // Not a number: leave to=from; this token starts the fader's name.
-        }
+      if (idx < tokens.size() && parseIntToken(tokens[idx], to)) {
+        idx++;
+      } else {
+        to = from;  // not a number: this token starts the fader's name instead
       }
       if (from < 0 || from > 127 || to < 0 || to > 127) { err = "FADER: CC out of range (0..127)"; return false; }
       if (from > to) { err = "FADER: from must be <= to"; return false; }
@@ -352,17 +405,13 @@ bool parseControllerDef(const std::string& text, ControllerBuilder& out, std::st
         return false;
       }
       int from;
-      try { from = std::stoi(tokens[2]); } catch (...) { err = "ENCODER: invalid CC number"; return false; }
+      if (!parseIntToken(tokens[2], from)) { err = "ENCODER: invalid CC number"; return false; }
       size_t idx = 3;
       int to = from;
-      if (idx < tokens.size()) {
-        try {
-          size_t consumed = 0;
-          int candidate = std::stoi(tokens[idx], &consumed);
-          if (consumed == tokens[idx].size()) { to = candidate; idx++; }
-        } catch (...) {
-          // Not a number: leave to=from; this token is the mode.
-        }
+      if (idx < tokens.size() && parseIntToken(tokens[idx], to)) {
+        idx++;
+      } else {
+        to = from;  // not a number: this token is the mode instead
       }
       if (from < 0 || from > 127 || to < 0 || to > 127) { err = "ENCODER: CC out of range (0..127)"; return false; }
       if (from > to) { err = "ENCODER: from must be <= to"; return false; }
@@ -390,10 +439,10 @@ bool parseControllerDef(const std::string& text, ControllerBuilder& out, std::st
       else { err = "LED: expected NOTE or CC, got '" + tokens[1] + "'"; return false; }
 
       int from, to;
-      try {
-        from = std::stoi(tokens[2]);
-        to = std::stoi(tokens[3]);
-      } catch (...) { err = "LED: invalid address range"; return false; }
+      if (!parseIntToken(tokens[2], from) || !parseIntToken(tokens[3], to)) {
+        err = "LED: invalid address range";
+        return false;
+      }
       if (from < 0 || from > 127 || to < 0 || to > 127) { err = "LED: address out of range (0..127)"; return false; }
       if (from > to) { err = "LED: from must be <= to"; return false; }
 
@@ -413,7 +462,7 @@ bool parseControllerDef(const std::string& text, ControllerBuilder& out, std::st
       if (lastLedIndex < 0) { err = "COLOR: no preceding LED"; return false; }
       if (tokens.size() < 3) { err = "COLOR: missing name or value"; return false; }
       int value;
-      try { value = std::stoi(tokens[2]); } catch (...) { err = "COLOR: invalid value"; return false; }
+      if (!parseIntToken(tokens[2], value)) { err = "COLOR: invalid value"; return false; }
       if (value < 0 || value > 127) { err = "COLOR: value out of range (0..127)"; return false; }
       out.leds[static_cast<size_t>(lastLedIndex)].colors.push_back({tokens[1], static_cast<uint8_t>(value)});
     } else if (!cmd.empty()) {
@@ -507,13 +556,12 @@ CompileResult compileShow(const std::string& showText,
         result.err = "UNIVERSE: missing index or transport";
         return result;
       }
-      uint8_t idx;
-      try {
-        idx = static_cast<uint8_t>(std::stoi(tokens[1]));
-      } catch (...) {
+      int idxInt;
+      if (!parseIntToken(tokens[1], idxInt)) {
         result.err = "UNIVERSE: invalid index";
         return result;
       }
+      uint8_t idx = static_cast<uint8_t>(idxInt);
 
       UniverseTransport transport;
       const std::string& tName = tokens[2];
@@ -545,16 +593,13 @@ CompileResult compileShow(const std::string& showText,
       }
 
       const std::string& defFile = tokens[1];
-      uint8_t univ;
-      uint16_t baseAddr;
-
-      try {
-        univ = static_cast<uint8_t>(std::stoi(tokens[2]));
-        baseAddr = static_cast<uint16_t>(std::stoi(tokens[3]));
-      } catch (...) {
+      int univInt, baseInt;
+      if (!parseIntToken(tokens[2], univInt) || !parseIntToken(tokens[3], baseInt)) {
         result.err = "FIXTURE: invalid universe or base";
         return result;
       }
+      uint8_t univ = static_cast<uint8_t>(univInt);
+      uint16_t baseAddr = static_cast<uint16_t>(baseInt);
 
       if (univ >= 8) {
         result.err = "FIXTURE: universe out of range (0..7)";
@@ -602,11 +647,9 @@ CompileResult compileShow(const std::string& showText,
         return result;
       }
 
-      try {
-        lastFixture->posX = std::stof(tokens[1]);
-        lastFixture->posY = std::stof(tokens[2]);
-        lastFixture->posZ = std::stof(tokens[3]);
-      } catch (...) {
+      if (!parseFloatToken(tokens[1], lastFixture->posX) ||
+          !parseFloatToken(tokens[2], lastFixture->posY) ||
+          !parseFloatToken(tokens[3], lastFixture->posZ)) {
         result.err = "POS: invalid coordinates";
         return result;
       }
@@ -627,11 +670,9 @@ CompileResult compileShow(const std::string& showText,
         return result;
       }
 
-      try {
-        lastFixture->yaw = std::stof(tokens[1]);
-        lastFixture->pitch = std::stof(tokens[2]);
-        lastFixture->roll = std::stof(tokens[3]);
-      } catch (...) {
+      if (!parseFloatToken(tokens[1], lastFixture->yaw) ||
+          !parseFloatToken(tokens[2], lastFixture->pitch) ||
+          !parseFloatToken(tokens[3], lastFixture->roll)) {
         result.err = "ROT: invalid angles";
         return result;
       }
@@ -652,10 +693,8 @@ CompileResult compileShow(const std::string& showText,
         return result;
       }
 
-      try {
-        lastFixture->panCenterNorm = std::stof(tokens[1]);
-        lastFixture->tiltCenterNorm = std::stof(tokens[2]);
-      } catch (...) {
+      if (!parseFloatToken(tokens[1], lastFixture->panCenterNorm) ||
+          !parseFloatToken(tokens[2], lastFixture->tiltCenterNorm)) {
         result.err = "CENTER: invalid values";
         return result;
       }
@@ -676,15 +715,13 @@ CompileResult compileShow(const std::string& showText,
         return result;
       }
 
-      try {
-        int invPan = std::stoi(tokens[1]);
-        int invTilt = std::stoi(tokens[2]);
-        lastFixture->invertPan = (invPan != 0);
-        lastFixture->invertTilt = (invTilt != 0);
-      } catch (...) {
+      int invPan, invTilt;
+      if (!parseIntToken(tokens[1], invPan) || !parseIntToken(tokens[2], invTilt)) {
         result.err = "INVERT: invalid flags";
         return result;
       }
+      lastFixture->invertPan = (invPan != 0);
+      lastFixture->invertTilt = (invTilt != 0);
 
     } else if (cmd == "MATRIX") {
       if (tokens.size() < 8) {
@@ -693,15 +730,18 @@ CompileResult compileShow(const std::string& showText,
       }
 
       MatrixInstance mi;
-      try {
-        mi.startUniverse = static_cast<uint8_t>(std::stoi(tokens[1]));
-        mi.startChannel = static_cast<uint16_t>(std::stoi(tokens[2]));
-        mi.width = static_cast<uint16_t>(std::stoi(tokens[3]));
-        mi.height = static_cast<uint16_t>(std::stoi(tokens[4]));
-      } catch (...) {
+      int startUniverseInt, startChannelInt, widthInt, heightInt;
+      if (!parseIntToken(tokens[1], startUniverseInt) ||
+          !parseIntToken(tokens[2], startChannelInt) ||
+          !parseIntToken(tokens[3], widthInt) ||
+          !parseIntToken(tokens[4], heightInt)) {
         result.err = "MATRIX: invalid numeric parameters";
         return result;
       }
+      mi.startUniverse = static_cast<uint8_t>(startUniverseInt);
+      mi.startChannel = static_cast<uint16_t>(startChannelInt);
+      mi.width = static_cast<uint16_t>(widthInt);
+      mi.height = static_cast<uint16_t>(heightInt);
 
       mi.serpentine = (tokens[5] == "SERP");
       mi.vertical = (tokens[6] == "V");

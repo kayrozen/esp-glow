@@ -251,6 +251,20 @@ $(OSC_PARSER_TARGET): $(OSC_PARSER_OBJECTS)
 $(LITTLEFS_IMAGE_TARGET): $(LITTLEFS_IMAGE_SOURCES)
 	$(CC) $(LITTLEFS_IMAGE_CFLAGS) $(LITTLEFS_IMAGE_SOURCES) -o $(LITTLEFS_IMAGE_TARGET) -lm
 
+# provision.cpp (the .fdef/.show/.mdef text compiler) is also built to WASM
+# by web/provision-wasm/build-wasm.sh, where Emscripten's default (no
+# -fexceptions) turns any throw into a silent abort instead of unwinding to
+# a catch -- fatal for a compiler whose whole job is reporting a user's
+# typo (or an importer's malformed QLC+/GDTF translation) as a clean error
+# message, not crashing the tab. -fno-exceptions here is the host-side
+# guardrail: a `try`/`catch` reintroduced into provision.cpp fails this
+# build immediately, instead of only surfacing as an opaque WASM abort
+# discovered later in CI (or by a user). Explicit (non-pattern) rule so it
+# overrides the generic %.o: %.cpp rule below for this one file only --
+# provision.cpp isn't shared with any target that needs exceptions.
+provision.o: provision.cpp
+	$(CXX) $(CXXFLAGS) -fno-exceptions -c $< -o $@
+
 # Compile object files
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
