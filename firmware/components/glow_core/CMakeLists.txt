@@ -6,7 +6,12 @@
 # `#ifdef ESP_PLATFORM` and compile to nothing on host.
 #
 # Modules NOT included here (host-only):
-#   provision.cpp / profile_encoder.cpp (PC compiler toolchain, provision_main)
+#   provision.cpp / profile_encoder.cpp / controller_encoder.cpp
+#                                    (PC compiler toolchain, provision_main --
+#                                     .fdef/.mdef text parsing + encoding;
+#                                     the device only ever sees the compiled
+#                                     PFX1/MDF1 binary blobs, via
+#                                     fixture_profile.cpp/mdef.cpp)
 #   test_*.cpp                      (host test harness)
 #
 # -fno-exceptions -fno-rtti are enforced here to match the host build.
@@ -48,6 +53,12 @@ idf_component_register(
         ${GLOW_ROOT}/pixel_patterns.cpp
         # bundle loader
         ${GLOW_ROOT}/show_bundle.cpp
+        # A5/.mdef: MDF1 controller-definition runtime parser (the MIDI
+        # twin of fixture_profile.cpp), consumed by show_bundle.cpp's v2
+        # controller table, and the LED feedback engine that reads it
+        # (host-tested; see mdef.h/led_feedback.h)
+        ${GLOW_ROOT}/mdef.cpp
+        ${GLOW_ROOT}/led_feedback.cpp
         # F1: host-tested render-pacing math
         ${GLOW_ROOT}/render_pacing.cpp
         # Musical time: PLL-smoothed beat clock (host-tested; the transports

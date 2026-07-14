@@ -215,6 +215,35 @@ void test_master_fader() {
   CHECK_NEAR(live.masterLevel(), 0.75f);
 }
 
+void test_clear() {
+  TEST("clear(): wipes bindings, leaves masterLevel untouched (glow.bind.clear)");
+
+  ShowController ctrl;
+  uint16_t cueId = ctrl.addCue({}, 0.0f, 0.0f, 0, 0.0f);
+
+  LiveControl live(ctrl);
+  live.bindButton(60, ActionKind::CueFlash, cueId);
+  live.bindFader(200, ActionKind::Master);
+  live.handle({ControlType::Fader, 200, false, 0.5f}, 0.0f);
+  CHECK_NEAR(live.masterLevel(), 0.5f);
+
+  live.clear();
+
+  // The pad binding is gone: a press that used to trigger the cue is now a
+  // silent no-op, same as any other unbound id.
+  live.handle({ControlType::Button, 60, true, 0.0f}, 0.0f);
+  CHECK(!ctrl.isActive(cueId));
+
+  // masterLevel is a fader *value*, not a binding -- clear() must not reset
+  // it (see live_control.h's comment on clear()).
+  CHECK_NEAR(live.masterLevel(), 0.5f);
+
+  // Rebinding after clear() works normally.
+  live.bindButton(60, ActionKind::CueFlash, cueId);
+  live.handle({ControlType::Button, 60, true, 0.0f}, 0.0f);
+  CHECK(ctrl.isActive(cueId));
+}
+
 void test_unbound_event() {
   TEST("Unbound event: no-op, no crash");
 
@@ -358,6 +387,7 @@ int main() {
   test_scene_go();
   test_scene_toggle();
   test_master_fader();
+  test_clear();
   test_unbound_event();
   test_type_mismatch();
   test_midi_parse_note_on();

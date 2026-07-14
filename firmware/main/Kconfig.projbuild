@@ -58,7 +58,15 @@ config GLOW_MIDI_RX_GPIO
     help
         GPIO wired to a standard opto-isolated MIDI IN circuit (6N137 output,
         DIN-5 pins 4/5 through the usual 220-ohm current-limiting resistors).
-        TX is left unconnected -- this device only ever receives MIDI.
+
+config GLOW_MIDI_TX_GPIO
+    int "MIDI TX GPIO (-1 to disable MIDI OUT / LED feedback)"
+    default -1
+    help
+        GPIO wired straight to a DIN-5 MIDI OUT jack (pins 4/5 through the
+        usual 220-ohm resistors -- no optocoupler needed on the TX side,
+        that's the receiver's job). Drives LED feedback (A5/.mdef); -1
+        leaves MIDI OUT disabled and glow.led.* stays a no-op.
 
 config GLOW_OSC_UDP_PORT
     int "OSC UDP listen port"

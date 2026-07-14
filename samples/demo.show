@@ -27,3 +27,7 @@ FIXTURE samples/dimmer.fdef 1 1
 
 # A 16x8 RGB matrix on Art-Net universes 2..3, serpentine horizontal, RGB order.
 MATRIX 2 0 16 8 SERP H RGB
+
+# An Akai APC40 mkII for MIDI control + LED feedback (see FORMAT.md's MDF1
+# section, glow.bind.*/glow.led.* in README_LIVE_CONTROL.md).
+CONTROLLER samples/apc40.mdef

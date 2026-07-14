@@ -416,6 +416,208 @@ TEST(show_pos_without_head_error) {
 }
 
 // ============================================================================
+// .mdef Parsing Tests
+// ============================================================================
+
+TEST(parse_mdef_basic) {
+  std::string text = R"(
+    CONTROLLER Akai APC40 mkII
+    MIDI_CHANNEL 1
+    PAD  53 60
+    PAD  0
+    FADER CC 48 55
+    FADER CC 7   master
+    ENCODER CC 16 23 relative-2c
+    LED NOTE 53 60 velocity
+      COLOR off    0
+      COLOR green  1
+      COLOR red    3
+    LED CC 48 55 value
+  )";
+
+  ControllerBuilder def;
+  std::string err;
+  CHECK(parseControllerDef(text, def, err));
+  CHECK(err.empty());
+
+  CHECK(def.name == "Akai APC40 mkII");
+  CHECK(def.midiChannel == 1);
+
+  CHECK(def.pads.size() == 2);
+  CHECK(def.pads[0].noteFrom == 53 && def.pads[0].noteTo == 60);
+  CHECK(def.pads[1].noteFrom == 0 && def.pads[1].noteTo == 0);
+
+  CHECK(def.faders.size() == 2);
+  CHECK(def.faders[0].ccFrom == 48 && def.faders[0].ccTo == 55);
+  CHECK(def.faders[0].name.empty());
+  CHECK(def.faders[1].ccFrom == 7 && def.faders[1].ccTo == 7);
+  CHECK(def.faders[1].name == "master");
+
+  CHECK(def.encoders.size() == 1);
+  CHECK(def.encoders[0].ccFrom == 16 && def.encoders[0].ccTo == 23);
+  CHECK(def.encoders[0].mode == EncoderMode::Relative2C);
+
+  CHECK(def.leds.size() == 2);
+  CHECK(def.leds[0].msgType == LedMsgType::Note);
+  CHECK(def.leds[0].addrFrom == 53 && def.leds[0].addrTo == 60);
+  CHECK(def.leds[0].semantic == LedSemantic::Velocity);
+  CHECK(def.leds[0].colors.size() == 3);
+  CHECK(def.leds[0].colors[0].name == "off" && def.leds[0].colors[0].value == 0);
+  CHECK(def.leds[0].colors[1].name == "green" && def.leds[0].colors[1].value == 1);
+  CHECK(def.leds[0].colors[2].name == "red" && def.leds[0].colors[2].value == 3);
+
+  CHECK(def.leds[1].msgType == LedMsgType::Cc);
+  CHECK(def.leds[1].semantic == LedSemantic::Value);
+  CHECK(def.leds[1].colors.empty());
+
+  // Encode + parse round-trip through the runtime (device-side) type too.
+  std::string encErr;
+  std::vector<uint8_t> blob = encodeController(def, encErr);
+  CHECK(encErr.empty());
+  MidiControllerProfile p;
+  CHECK(parseMidiController(blob.data(), blob.size(), p));
+  CHECK(p.padCount == 2);
+  CHECK(p.ledCount == 2);
+  CHECK(p.colorCount == 3);
+}
+
+TEST(parse_mdef_encoder_default_mode_absolute) {
+  std::string text = R"(
+    CONTROLLER Generic
+    ENCODER CC 16 23
+  )";
+  ControllerBuilder def;
+  std::string err;
+  CHECK(parseControllerDef(text, def, err));
+  CHECK(def.encoders.size() == 1);
+  CHECK(def.encoders[0].mode == EncoderMode::Absolute);
+}
+
+TEST(parse_mdef_color_before_led_error) {
+  std::string text = R"(
+    CONTROLLER Generic
+    COLOR red 3
+  )";
+  ControllerBuilder def;
+  std::string err;
+  CHECK(!parseControllerDef(text, def, err));
+  CHECK(!err.empty());
+}
+
+TEST(parse_mdef_missing_name_error) {
+  std::string text = R"(
+    PAD 0
+  )";
+  ControllerBuilder def;
+  std::string err;
+  CHECK(!parseControllerDef(text, def, err));
+  CHECK(!err.empty());
+}
+
+TEST(parse_mdef_unknown_encoder_mode_error) {
+  std::string text = R"(
+    CONTROLLER Generic
+    ENCODER CC 16 23 sideways
+  )";
+  ControllerBuilder def;
+  std::string err;
+  CHECK(!parseControllerDef(text, def, err));
+}
+
+// ============================================================================
+// .show CONTROLLER / SHW1 v2 Tests
+// ============================================================================
+
+TEST(show_compile_and_load_roundtrip_with_controller) {
+  std::map<std::string, std::string> fileMap;
+
+  fileMap["par.fdef"] = R"(
+    FIXTURE Par
+    FOOTPRINT 5
+    CAP Dimmer 0
+  )";
+
+  fileMap["apc.mdef"] = R"(
+    CONTROLLER Akai APC40 mkII
+    PAD 53 60
+    LED NOTE 53 60 velocity
+      COLOR off   0
+      COLOR green 1
+  )";
+
+  std::string showText = R"(
+    UNIVERSE 0 DMX
+    FIXTURE par.fdef 0 0
+    CONTROLLER apc.mdef
+  )";
+
+  auto readFile = [&](const std::string& name) {
+    auto it = fileMap.find(name);
+    if (it != fileMap.end()) return it->second;
+    return std::string();
+  };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(result.ok);
+  CHECK(!result.bundle.empty());
+  CHECK(result.bundle[4] == 2);  // version bumped once a CONTROLLER is present
+
+  LoadedShow loaded;
+  CHECK(loadShow(result.bundle.data(), result.bundle.size(), loaded));
+
+  CHECK(loaded.fixtures.size() == 1);  // fixture table untouched by the new section
+  CHECK(loaded.controllers.size() == 1);
+
+  const MidiControllerProfile& ctrl = loaded.controllers[0];
+  CHECK(ctrl.padCount == 1);
+  CHECK(ctrl.pads[0].noteFrom == 53 && ctrl.pads[0].noteTo == 60);
+  CHECK(ctrl.ledCount == 1);
+  CHECK(ctrl.leds[0].colorCount == 2);
+
+  uint8_t value = 255;
+  CHECK(ledColorValueByName(ctrl, ctrl.leds[0], "green", value));
+  CHECK(value == 1);
+}
+
+TEST(show_compile_no_controller_stays_v1) {
+  std::map<std::string, std::string> fileMap;
+  fileMap["par.fdef"] = R"(
+    FIXTURE Par
+    FOOTPRINT 5
+    CAP Dimmer 0
+  )";
+  std::string showText = R"(
+    UNIVERSE 0 DMX
+    FIXTURE par.fdef 0 0
+  )";
+  auto readFile = [&](const std::string& name) {
+    auto it = fileMap.find(name);
+    if (it != fileMap.end()) return it->second;
+    return std::string();
+  };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(result.ok);
+  CHECK(result.bundle[4] == 1);  // no CONTROLLER -> byte-identical v1 layout
+
+  LoadedShow loaded;
+  CHECK(loadShow(result.bundle.data(), result.bundle.size(), loaded));
+  CHECK(loaded.controllers.empty());
+}
+
+TEST(show_controller_missing_deffile_error) {
+  std::string showText = R"(
+    UNIVERSE 0 DMX
+    CONTROLLER missing.mdef
+  )";
+  auto readFile = [&](const std::string&) { return std::string(); };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(!result.ok);
+  CHECK(!result.err.empty());
+}
+
+// ============================================================================
 // Loader Strictness Tests
 // ============================================================================
 
@@ -504,6 +706,14 @@ int main() {
   RUN_TEST(show_compile_and_load_roundtrip);
   RUN_TEST(show_profile_deduplication);
   RUN_TEST(show_pos_without_head_error);
+  RUN_TEST(parse_mdef_basic);
+  RUN_TEST(parse_mdef_encoder_default_mode_absolute);
+  RUN_TEST(parse_mdef_color_before_led_error);
+  RUN_TEST(parse_mdef_missing_name_error);
+  RUN_TEST(parse_mdef_unknown_encoder_mode_error);
+  RUN_TEST(show_compile_and_load_roundtrip_with_controller);
+  RUN_TEST(show_compile_no_controller_stays_v1);
+  RUN_TEST(show_controller_missing_deffile_error);
   RUN_TEST(loader_bad_magic);
   RUN_TEST(loader_truncated_header);
   RUN_TEST(loader_truncated_fixture_table);

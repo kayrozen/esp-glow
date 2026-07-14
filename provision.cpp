@@ -275,6 +275,166 @@ std::vector<uint8_t> encodeProfile(const FixtureDef& def) {
 }
 
 // ============================================================================
+// .mdef Parsing
+// ============================================================================
+
+static bool parseEncoderMode(const std::string& s, EncoderMode& out) {
+  if (s == "absolute") { out = EncoderMode::Absolute; return true; }
+  if (s == "relative-2c") { out = EncoderMode::Relative2C; return true; }
+  if (s == "relative-signmag") { out = EncoderMode::RelativeSignMag; return true; }
+  return false;
+}
+
+bool parseControllerDef(const std::string& text, ControllerBuilder& out, std::string& err) {
+  out = ControllerBuilder();
+  err.clear();
+
+  std::istringstream iss(text);
+  std::string line;
+  int lastLedIndex = -1;  // out.leds index the next COLOR line attaches to
+
+  while (std::getline(iss, line)) {
+    stripComments(line);
+    auto tokens = tokenize(line);
+    if (tokens.empty()) continue;
+
+    const std::string& cmd = tokens[0];
+
+    if (cmd == "CONTROLLER") {
+      if (tokens.size() < 2) { err = "CONTROLLER: missing name"; return false; }
+      out.name = tokens[1];
+      for (size_t i = 2; i < tokens.size(); i++) out.name += " " + tokens[i];
+    } else if (cmd == "MIDI_CHANNEL") {
+      if (tokens.size() < 2) { err = "MIDI_CHANNEL: missing value"; return false; }
+      int ch;
+      try { ch = std::stoi(tokens[1]); } catch (...) { err = "MIDI_CHANNEL: invalid integer"; return false; }
+      if (ch < 0 || ch > 16) { err = "MIDI_CHANNEL: out of range (0..16)"; return false; }
+      out.midiChannel = static_cast<uint8_t>(ch);
+    } else if (cmd == "PAD") {
+      if (tokens.size() < 2) { err = "PAD: missing note"; return false; }
+      int from, to;
+      try {
+        from = std::stoi(tokens[1]);
+        to = (tokens.size() >= 3) ? std::stoi(tokens[2]) : from;
+      } catch (...) { err = "PAD: invalid note number"; return false; }
+      if (from < 0 || from > 127 || to < 0 || to > 127) { err = "PAD: note out of range (0..127)"; return false; }
+      if (from > to) { err = "PAD: from must be <= to"; return false; }
+      out.pads.push_back({static_cast<uint8_t>(from), static_cast<uint8_t>(to)});
+    } else if (cmd == "FADER") {
+      if (tokens.size() < 3 || tokens[1] != "CC") {
+        err = "FADER: expected 'CC <from> [<to>] [name]'";
+        return false;
+      }
+      int from;
+      try { from = std::stoi(tokens[2]); } catch (...) { err = "FADER: invalid CC number"; return false; }
+      size_t idx = 3;
+      int to = from;
+      if (idx < tokens.size()) {
+        try {
+          size_t consumed = 0;
+          int candidate = std::stoi(tokens[idx], &consumed);
+          if (consumed == tokens[idx].size()) { to = candidate; idx++; }
+        } catch (...) {
+          // Not a number: leave to=from; this token starts the fader's name.
+        }
+      }
+      if (from < 0 || from > 127 || to < 0 || to > 127) { err = "FADER: CC out of range (0..127)"; return false; }
+      if (from > to) { err = "FADER: from must be <= to"; return false; }
+      std::string fname;
+      for (; idx < tokens.size(); ++idx) {
+        if (!fname.empty()) fname += " ";
+        fname += tokens[idx];
+      }
+      out.faders.push_back({static_cast<uint8_t>(from), static_cast<uint8_t>(to), fname});
+    } else if (cmd == "ENCODER") {
+      if (tokens.size() < 3 || tokens[1] != "CC") {
+        err = "ENCODER: expected 'CC <from> [<to>] [mode]'";
+        return false;
+      }
+      int from;
+      try { from = std::stoi(tokens[2]); } catch (...) { err = "ENCODER: invalid CC number"; return false; }
+      size_t idx = 3;
+      int to = from;
+      if (idx < tokens.size()) {
+        try {
+          size_t consumed = 0;
+          int candidate = std::stoi(tokens[idx], &consumed);
+          if (consumed == tokens[idx].size()) { to = candidate; idx++; }
+        } catch (...) {
+          // Not a number: leave to=from; this token is the mode.
+        }
+      }
+      if (from < 0 || from > 127 || to < 0 || to > 127) { err = "ENCODER: CC out of range (0..127)"; return false; }
+      if (from > to) { err = "ENCODER: from must be <= to"; return false; }
+      EncoderMode mode = EncoderMode::Absolute;
+      if (idx < tokens.size()) {
+        if (!parseEncoderMode(tokens[idx], mode)) {
+          err = "ENCODER: unknown mode '" + tokens[idx] + "'";
+          return false;
+        }
+        idx++;
+      }
+      if (idx < tokens.size()) {
+        err = "ENCODER: unexpected extra token '" + tokens[idx] + "'";
+        return false;
+      }
+      out.encoders.push_back({static_cast<uint8_t>(from), static_cast<uint8_t>(to), mode});
+    } else if (cmd == "LED") {
+      if (tokens.size() < 5) {
+        err = "LED: expected 'NOTE|CC <from> <to> velocity|value'";
+        return false;
+      }
+      LedMsgType msgType;
+      if (tokens[1] == "NOTE") msgType = LedMsgType::Note;
+      else if (tokens[1] == "CC") msgType = LedMsgType::Cc;
+      else { err = "LED: expected NOTE or CC, got '" + tokens[1] + "'"; return false; }
+
+      int from, to;
+      try {
+        from = std::stoi(tokens[2]);
+        to = std::stoi(tokens[3]);
+      } catch (...) { err = "LED: invalid address range"; return false; }
+      if (from < 0 || from > 127 || to < 0 || to > 127) { err = "LED: address out of range (0..127)"; return false; }
+      if (from > to) { err = "LED: from must be <= to"; return false; }
+
+      LedSemantic semantic;
+      if (tokens[4] == "velocity") semantic = LedSemantic::Velocity;
+      else if (tokens[4] == "value") semantic = LedSemantic::Value;
+      else { err = "LED: expected velocity or value, got '" + tokens[4] + "'"; return false; }
+
+      ControllerLedSpec spec;
+      spec.msgType = msgType;
+      spec.addrFrom = static_cast<uint8_t>(from);
+      spec.addrTo = static_cast<uint8_t>(to);
+      spec.semantic = semantic;
+      out.leds.push_back(std::move(spec));
+      lastLedIndex = static_cast<int>(out.leds.size()) - 1;
+    } else if (cmd == "COLOR") {
+      if (lastLedIndex < 0) { err = "COLOR: no preceding LED"; return false; }
+      if (tokens.size() < 3) { err = "COLOR: missing name or value"; return false; }
+      int value;
+      try { value = std::stoi(tokens[2]); } catch (...) { err = "COLOR: invalid value"; return false; }
+      if (value < 0 || value > 127) { err = "COLOR: value out of range (0..127)"; return false; }
+      out.leds[static_cast<size_t>(lastLedIndex)].colors.push_back({tokens[1], static_cast<uint8_t>(value)});
+    } else if (!cmd.empty()) {
+      err = "Unknown command: " + cmd;
+      return false;
+    }
+  }
+
+  if (out.name.empty()) {
+    err = "CONTROLLER is required";
+    return false;
+  }
+
+  return true;
+}
+
+std::vector<uint8_t> encodeController(const ControllerBuilder& def, std::string& err) {
+  return def.encode(err);
+}
+
+// ============================================================================
 // .show Parsing and Compilation
 // ============================================================================
 
@@ -323,6 +483,8 @@ CompileResult compileShow(const std::string& showText,
   std::map<std::string, FixtureDef> defCache;
   std::map<std::string, int> profileIndexMap;  // defFile -> profileIndex
   std::vector<std::vector<uint8_t>> profileBlobs;
+  std::map<std::string, int> controllerIndexMap;  // defFile -> mdef blob index
+  std::vector<std::vector<uint8_t>> controllerBlobs;
 
   uint8_t maxUniverse = 0;
   FixtureInstance* lastFixture = nullptr;
@@ -555,6 +717,32 @@ CompileResult compileShow(const std::string& showText,
 
       matrices.push_back(mi);
 
+    } else if (cmd == "CONTROLLER") {
+      if (tokens.size() < 2) {
+        result.err = "CONTROLLER: missing deffile";
+        return result;
+      }
+      const std::string& defFile = tokens[1];
+      if (controllerIndexMap.find(defFile) == controllerIndexMap.end()) {
+        std::string defText = readFile(defFile);
+        if (defText.empty()) {
+          result.err = "CONTROLLER: cannot load " + defFile;
+          return result;
+        }
+        ControllerBuilder def;
+        if (!parseControllerDef(defText, def, result.err)) {
+          return result;
+        }
+        std::string encErr;
+        auto blob = encodeController(def, encErr);
+        if (!encErr.empty()) {
+          result.err = "CONTROLLER: " + encErr;
+          return result;
+        }
+        controllerIndexMap[defFile] = static_cast<int>(controllerBlobs.size());
+        controllerBlobs.push_back(std::move(blob));
+      }
+
     } else if (!cmd.empty()) {
       result.err = "Unknown command: " + cmd;
       return result;
@@ -573,20 +761,25 @@ CompileResult compileShow(const std::string& showText,
   // Build universe count
   uint8_t universeCount = maxUniverse + 1;
 
-  // Write SHW1 bundle
+  // Write SHW1 bundle. Version 2 (mdefCount + a trailing controller table)
+  // only when at least one CONTROLLER was compiled -- byte-identical to the
+  // original v1 layout otherwise, same "only bump the version once the new
+  // feature is actually used" convention as ProfileBuilder::encode's PFX2.
   std::vector<uint8_t> bundle;
+  uint8_t version = controllerBlobs.empty() ? 1 : 2;
 
   // Header
   bundle.push_back('S');
   bundle.push_back('H');
   bundle.push_back('W');
   bundle.push_back('1');
-  bundle.push_back(1);  // version
+  bundle.push_back(version);
   bundle.push_back(universeCount);
 
   uint16_t profileCount = static_cast<uint16_t>(profileBlobs.size());
   uint16_t fixtureCount = static_cast<uint16_t>(fixtures.size());
   uint16_t matrixCount = static_cast<uint16_t>(matrices.size());
+  uint16_t mdefCount = static_cast<uint16_t>(controllerBlobs.size());
 
   // Write counts (little-endian u16)
   auto writeU16 = [&](uint16_t v) {
@@ -610,6 +803,9 @@ CompileResult compileShow(const std::string& showText,
   writeU16(profileCount);
   writeU16(fixtureCount);
   writeU16(matrixCount);
+  if (version == 2) {
+    writeU16(mdefCount);
+  }
 
   // Universe table
   for (int i = 0; i < universeCount; i++) {
@@ -661,6 +857,14 @@ CompileResult compileShow(const std::string& showText,
     writeU8(static_cast<uint8_t>(colorOrderFromString(mi.orderStr)));
     writeU8(mi.startUniverse);
     writeU16(mi.startChannel);
+  }
+
+  // Controller (mdef) table -- v2 only.
+  for (const auto& blob : controllerBlobs) {
+    writeU16(static_cast<uint16_t>(blob.size()));
+    for (uint8_t b : blob) {
+      writeU8(b);
+    }
   }
 
   result.ok = true;

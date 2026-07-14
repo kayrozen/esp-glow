@@ -173,8 +173,11 @@ named ranges* onto PFX2. Pick the mode, review the channel table, edit if needed
 - **MCU**: ESP32-S3 (dual-core, hardware FPU, PSRAM — the Lua VM lives there).
 - **DMX out**: RS-485 transceiver (e.g. MAX3485). Default GPIOs: TX 17, RX 18, DE/RTS 8.
 - **Matrices**: Art-Net over WiFi → an Art-Net→DMX bridge.
-- **Inputs**: MIDI (DIN/UART or native USB), OSC (UDP), a web console (HTTP + WebSocket)
-  served from the device, and DJ-Link.
+- **Inputs**: MIDI (DIN/UART, with MIDI OUT for LED feedback — see `.mdef`,
+  FORMAT.md), OSC (UDP), a web console (HTTP + WebSocket) served from the
+  device, and DJ-Link. USB-MIDI host is deliberately not implemented yet
+  (see README_LIVE_CONTROL.md's "Out of Scope") — it needs a board respin
+  for VBUS; a USB-host-to-DIN adapter works today with no hardware change.
 - **Status LED**: GPIO 2.
 
 Render task pinned to core 1; WiFi/lwIP on core 0, so network work never jitters DMX timing.
@@ -285,7 +288,7 @@ matrices inside the cue/blend engine · Ableton Link.
 ```
 *.cpp / *.h              engine, Lua layer, provisioning, live control (host-buildable)
 test_*.cpp               host unit tests            (make test)
-samples/                 example .fdef / .show
+samples/                 example .fdef / .mdef / .show
 scripts/                 vendor_fennel.sh, vendor_lua.sh, build_sample_bundle.sh
 tests/hil/               hardware-in-the-loop suite
 firmware/                ESP-IDF application

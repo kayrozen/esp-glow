@@ -67,6 +67,7 @@
 #include "web_input.h"
 #include "web_protocol.h"  // buildEvalResultJson (send_eval_result_to_ws)
 #include "midi_input.h"
+#include "led_feedback.h"
 #include "osc_input.h"
 #include "djlink_input.h"
 #include "freertos/task.h"  // xTaskCreatePinnedToCore (midi_uart_task/osc_server_task/djlink_*_task)
@@ -134,6 +135,18 @@ static ShowController g_controller;
 // g_controller only from the render task, via pumpControlEvents below --
 // never directly from a transport task (see control_queue.h's rationale).
 static LiveControl g_liveControl(g_controller);
+
+// A5/.mdef: the first CONTROLLER embedded in the loaded SHW1 bundle (B1 --
+// the transports below support one controller at a time). Copied out of
+// LoadedShow (a boot-only local, see setup_show_from_bundle) into a
+// process-lifetime global so LedFeedback's borrowed reference stays valid;
+// g_ledFeedback is constructed only if g_hasController ends up true.
+// g_midiOutput adapts DIN MIDI OUT (midi_input.cpp) to LedFeedback's
+// IMidiOutput seam -- see led_feedback.h.
+static MidiControllerProfile g_controllerProfile;
+static bool                  g_hasController = false;
+static DeviceMidiOutput      g_midiOutput;
+static LedFeedback*          g_ledFeedback = nullptr;
 
 // F4 (pulled forward): the control-event queue itself. Real transports
 // (web httpd, MIDI UART, OSC UDP -- web_input.cpp, midi_input.cpp,
@@ -496,6 +509,15 @@ static void render_tick_hooks(RenderTickPhase phase, float t, uint32_t slack_us)
       if (g_beatQueue) {
         glow::pumpBeatEvents(*g_beatQueue, g_beatClock);
       }
+      // A5/.mdef: LED feedback. Runs after pumpControlEvents above so a
+      // button press dispatched this frame (go()/release() already applied
+      // to g_controller) is reflected in this same frame's LED refresh
+      // instead of lagging a frame behind. Change-detection + rate-limiting
+      // live in LedFeedback itself -- this call is unconditional every
+      // frame, but is a no-op send-wise once nothing has changed.
+      if (g_ledFeedback) {
+        g_ledFeedback->refresh(g_controller, t);
+      }
       break;
 
     case RenderTickPhase::Post: {
@@ -592,8 +614,9 @@ static void setup_lua() {
   size_t fennelLen = static_cast<size_t>(fennel_lua_end - fennel_lua_start);
 
   char err[256];
-  g_luaReady = glow::glowLuaInit(g_controller, &g_matrixRegistry, g_beatClock, fennelSrc, fennelLen, err, sizeof(err),
-                                 0, 0, 0, &g_fixtureRegistry);
+  g_luaReady = glow::glowLuaInit(g_controller, &g_matrixRegistry, g_beatClock, g_liveControl,
+                                 fennelSrc, fennelLen, err, sizeof(err),
+                                 0, 0, 0, &g_fixtureRegistry, g_ledFeedback);
   if (!g_luaReady) {
     ESP_LOGE(TAG, "Lua/Fennel init failed (scripts disabled this boot): %s", err);
     // F5: whatever a bundle's matrices are doing (e.g. the default rainbow
@@ -725,6 +748,18 @@ static bool setup_show_from_bundle() {
              mm.width, mm.height, mm.startUniverse,
              mm.startUniverse + m->universeCount() - 1);
   }
+
+  // A5/.mdef: adopt the first embedded controller definition, if any (B1:
+  // one controller at a time). Copied out of `ls` since it's about to go
+  // out of scope -- see g_controllerProfile's own comment.
+  if (!ls.controllers.empty()) {
+    g_controllerProfile = ls.controllers[0];
+    g_hasController = true;
+    ESP_LOGI(TAG, "controller: mdef loaded (%u pads, %u faders, %u encoders, %u LED ranges)",
+             (unsigned)g_controllerProfile.padCount, (unsigned)g_controllerProfile.faderCount,
+             (unsigned)g_controllerProfile.encoderCount, (unsigned)g_controllerProfile.ledCount);
+  }
+
   return true;
 }
 
@@ -812,6 +847,17 @@ extern "C" void app_main(void) {
   // corrupt bundle is now a safe blackout, not a hardcoded demo patch --
   // see glow_safe_blackout and this file's header comment. ---
   bool from_bundle = setup_show_from_bundle();
+
+  // A5/.mdef: only now (after setup_show_from_bundle populated
+  // g_controllerProfile, if the bundle had a CONTROLLER) is there anything
+  // for LedFeedback to address. g_midiOutput's actual sends stay a no-op
+  // until midi_input_init/midi_uart_task finish bringing up MIDI OUT below
+  // -- constructing this early just means glow.led.* is live from the
+  // first boot.fnl eval instead of racing the UART task's startup.
+  if (g_hasController) {
+    g_ledFeedback = new LedFeedback(g_controllerProfile, &g_midiOutput);
+  }
+
   if (!from_bundle) {
 #ifdef CONFIG_GLOW_SELFTEST
     // HIL builds get a deterministic fixture instead of blackout so the
@@ -887,7 +933,8 @@ extern "C" void app_main(void) {
                  /*hasMaster=*/true);
   web_server_task(nullptr);  // starts httpd; not a FreeRTOS task itself (see web_input.h)
 
-  midi_input_init(*g_controlQueue, g_beatQueue, CONFIG_GLOW_MIDI_UART_NUM, CONFIG_GLOW_MIDI_RX_GPIO);
+  midi_input_init(*g_controlQueue, g_beatQueue, CONFIG_GLOW_MIDI_UART_NUM, CONFIG_GLOW_MIDI_RX_GPIO,
+                  CONFIG_GLOW_MIDI_TX_GPIO);
   xTaskCreatePinnedToCore(midi_uart_task, "midi", 4096 / sizeof(StackType_t),
                           nullptr, 5, nullptr, 0);
 

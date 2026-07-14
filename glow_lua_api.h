@@ -12,12 +12,14 @@
 
 #include "beat_clock.h"  // glow::BeatClock
 #include "lua_glow_include.h"
+#include "live_control.h"  // LiveControl (glow.bind.*)
 #include "show.h"  // IEffect, CapIntent, AimIntent
 
 class ShowController;
 class PixelMatrix;
 class IPixelPattern;
 class LuaEffect;
+class LedFeedback;
 namespace glow {
 class LuaVM;
 }
@@ -54,18 +56,31 @@ public:
 //   glow.matrix.pattern/brightness — wraps PixelMatrix via IMatrixRegistry
 //   glow.beat/bar/beat-number/bpm/locked?/tap — musical time, reads/drives
 //                                    the render task's one BeatClock
+//   glow.bind.pad/fader/clear  — wraps LiveControl: MIDI/OSC/web control ids
+//                                 -> cue triggers. The *show* (live-editable,
+//                                 no file format); see README_LIVE_CONTROL.md.
+//   glow.led.set/auto          — wraps LedFeedback (nullable): LED feedback
+//                                 for a controller with a .mdef. No-op, not
+//                                 an error, when null or the addressed pad/
+//                                 fader has no LED (see mdef.h/FORMAT.md).
 //
 // One instance per LuaVM (see lua_vm.h — there is exactly one VM, owned by
 // the render task; see control_queue.h's rationale, which this reuses).
 class GlowLuaApi {
 public:
-  // matrices may be nullptr if this device has no pixel matrices. beatClock
-  // is never optional -- unlike pixel matrices, every device has SOME
-  // musical clock (a default-constructed glow::BeatClock free-runs at a
-  // sane BPM with zero external input; see beat_clock.h), so there is no
-  // "no musical time on this device" case to model with a null pointer.
+  // matrices/ledFeedback may be nullptr if this device has no pixel
+  // matrices / no .mdef-described LED capability, respectively -- both
+  // degrade to a clear Lua error (matrices) or a silent no-op (LED
+  // feedback; see glow.led.*'s own contract). beatClock and liveControl are
+  // never optional -- every device has SOME musical clock (a default-
+  // constructed glow::BeatClock free-runs at a sane BPM with zero external
+  // input; see beat_clock.h) and SOME control-binding table (an empty
+  // LiveControl is a fully valid "nothing bound yet" state), so there is no
+  // "not present on this device" case to model with a null pointer for
+  // either.
   GlowLuaApi(glow::LuaVM& vm, ShowController& show, IMatrixRegistry* matrices,
-            glow::BeatClock& beatClock, IFixtureRegistry* fixtures = nullptr);
+            glow::BeatClock& beatClock, LiveControl& liveControl,
+            IFixtureRegistry* fixtures = nullptr, LedFeedback* ledFeedback = nullptr);
   ~GlowLuaApi();
 
   GlowLuaApi(const GlowLuaApi&) = delete;
@@ -131,6 +146,12 @@ private:
   static int l_locked(lua_State* L);
   static int l_tap(lua_State* L);
 
+  static int l_bind_pad(lua_State* L);
+  static int l_bind_fader(lua_State* L);
+  static int l_bind_clear(lua_State* L);
+  static int l_led_set(lua_State* L);
+  static int l_led_auto(lua_State* L);
+
   static GlowLuaApi& self(lua_State* L);
 
   // Resolves each entry of the Lua array-table on top of the stack (either
@@ -154,7 +175,9 @@ private:
   ShowController& show_;
   IMatrixRegistry* matrices_;
   glow::BeatClock& beatClock_;
+  LiveControl& liveControl_;
   IFixtureRegistry* fixtures_;
+  LedFeedback* ledFeedback_;
 
   float currentT_ = 0.0f;
   std::vector<CapIntent>* frameCaps_ = nullptr;

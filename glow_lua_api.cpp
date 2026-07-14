@@ -4,6 +4,7 @@
 
 #include "effects.h"
 #include "fixture_profile.h"
+#include "led_feedback.h"
 #include "lua_effect.h"
 #include "lua_vm.h"
 #include "pixel_matrix.h"
@@ -142,8 +143,10 @@ std::vector<uint16_t> checkFixtureIdList(lua_State* L, int idx) {
 }  // namespace
 
 GlowLuaApi::GlowLuaApi(glow::LuaVM& vm, ShowController& show, IMatrixRegistry* matrices,
-                       glow::BeatClock& beatClock, IFixtureRegistry* fixtures)
-    : vm_(vm), show_(show), matrices_(matrices), beatClock_(beatClock), fixtures_(fixtures) {}
+                       glow::BeatClock& beatClock, LiveControl& liveControl,
+                       IFixtureRegistry* fixtures, LedFeedback* ledFeedback)
+    : vm_(vm), show_(show), matrices_(matrices), beatClock_(beatClock),
+      liveControl_(liveControl), fixtures_(fixtures), ledFeedback_(ledFeedback) {}
 
 GlowLuaApi::~GlowLuaApi() = default;
 
@@ -622,6 +625,89 @@ int GlowLuaApi::l_tap(lua_State* L) {
   return 0;
 }
 
+// --- glow.bind.* -- LiveControl bindings (the show, live-editable, no file
+// format; see live_control.h/README_LIVE_CONTROL.md) ------------------------
+
+int GlowLuaApi::l_bind_pad(lua_State* L) {
+  GlowLuaApi& api = self(L);
+  lua_Integer note = luaL_checkinteger(L, 1);
+  if (note < 0 || note > 127) return luaL_error(L, "glow.bind.pad: note out of range (0..127)");
+  const char* mode = luaL_checkstring(L, 2);
+  const char* cueName = luaL_checkstring(L, 3);
+
+  ActionKind action;
+  if (std::strcmp(mode, "flash") == 0) {
+    action = ActionKind::CueFlash;
+  } else if (std::strcmp(mode, "toggle") == 0) {
+    action = ActionKind::CueToggle;
+  } else {
+    return luaL_error(L, "glow.bind.pad: mode must be :flash or :toggle, got '%s'", mode);
+  }
+
+  uint16_t cueId;
+  if (!api.cueIdForName(cueName, cueId)) {
+    return luaL_error(L, "glow.bind.pad: unknown cue '%s'", cueName);
+  }
+
+  api.liveControl_.bindButton(static_cast<uint16_t>(note), action, cueId);
+  return 0;
+}
+
+int GlowLuaApi::l_bind_fader(lua_State* L) {
+  GlowLuaApi& api = self(L);
+  lua_Integer cc = luaL_checkinteger(L, 1);
+  if (cc < 0 || cc > 127) return luaL_error(L, "glow.bind.fader: CC out of range (0..127)");
+  const char* target = luaL_checkstring(L, 2);
+  if (std::strcmp(target, "master") != 0) {
+    return luaL_error(L, "glow.bind.fader: only :master is supported, got '%s'", target);
+  }
+
+  // Fader control ids carry the same +128 offset parseMidi assigns
+  // (live_control.cpp) so this one binding table entry matches a CC
+  // whether it arrived over MIDI, OSC, or the web console.
+  api.liveControl_.bindFader(static_cast<uint16_t>(128 + cc), ActionKind::Master);
+  return 0;
+}
+
+int GlowLuaApi::l_bind_clear(lua_State* L) {
+  GlowLuaApi& api = self(L);
+  api.liveControl_.clear();
+  if (api.ledFeedback_ != nullptr) api.ledFeedback_->clearAuto();
+  return 0;
+}
+
+// --- glow.led.* -- LED feedback (needs a .mdef; nullable, no-op degradation,
+// see led_feedback.h) ---------------------------------------------------------
+
+int GlowLuaApi::l_led_set(lua_State* L) {
+  GlowLuaApi& api = self(L);
+  lua_Integer addr = luaL_checkinteger(L, 1);
+  if (addr < 0 || addr > 127) return luaL_error(L, "glow.led.set: address out of range (0..127)");
+  const char* colorName = luaL_checkstring(L, 2);
+
+  if (api.ledFeedback_ == nullptr) return 0;  // no LED capability on this device -- no-op
+  api.ledFeedback_->set(static_cast<uint8_t>(addr), colorName);
+  return 0;
+}
+
+int GlowLuaApi::l_led_auto(lua_State* L) {
+  GlowLuaApi& api = self(L);
+  lua_Integer addr = luaL_checkinteger(L, 1);
+  if (addr < 0 || addr > 127) return luaL_error(L, "glow.led.auto: address out of range (0..127)");
+  const char* cueName = luaL_checkstring(L, 2);
+  const char* activeColor = luaL_checkstring(L, 3);
+  const char* inactiveColor = luaL_checkstring(L, 4);
+
+  uint16_t cueId;
+  if (!api.cueIdForName(cueName, cueId)) {
+    return luaL_error(L, "glow.led.auto: unknown cue '%s'", cueName);
+  }
+
+  if (api.ledFeedback_ == nullptr) return 0;  // no LED capability on this device -- no-op
+  api.ledFeedback_->setAuto(static_cast<uint8_t>(addr), cueId, activeColor, inactiveColor);
+  return 0;
+}
+
 // --- install -----------------------------------------------------------------
 
 void GlowLuaApi::install() {
@@ -679,6 +765,17 @@ void GlowLuaApi::install() {
   registerFn(L, glowIdx, "bpm", &GlowLuaApi::l_bpm, this);
   registerFn(L, glowIdx, "locked?", &GlowLuaApi::l_locked, this);
   registerFn(L, glowIdx, "tap", &GlowLuaApi::l_tap, this);
+
+  lua_newtable(L);  // glow.bind
+  registerFn(L, -1, "pad", &GlowLuaApi::l_bind_pad, this);
+  registerFn(L, -1, "fader", &GlowLuaApi::l_bind_fader, this);
+  registerFn(L, -1, "clear", &GlowLuaApi::l_bind_clear, this);
+  lua_setfield(L, glowIdx, "bind");
+
+  lua_newtable(L);  // glow.led
+  registerFn(L, -1, "set", &GlowLuaApi::l_led_set, this);
+  registerFn(L, -1, "auto", &GlowLuaApi::l_led_auto, this);
+  lua_setfield(L, glowIdx, "led");
 
   lua_setglobal(L, "glow");
 }

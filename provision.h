@@ -1,6 +1,7 @@
 #pragma once
 
 #include "fixture_profile.h"
+#include "controller_encoder.h"
 #include <string>
 #include <vector>
 #include <functional>
@@ -50,6 +51,33 @@ bool capFromName(const std::string& name, Capability& out);
 // Build a PFX1 blob from a FixtureDef using ProfileBuilder.
 std::vector<uint8_t> encodeProfile(const FixtureDef& def);
 
+// .mdef grammar: one controller (MIDI hardware) definition per file (see
+// FORMAT.md's "MDF1" section). The MIDI twin of .fdef: describes the
+// hardware (pads/faders/encoders/LEDs), never a cue/scene binding -- those
+// belong in Fennel (glow.bind.*/glow.led.*, glow_lua_api.h), live-editable
+// per show, not baked into a shareable controller-library file.
+// CONTROLLER <name...>                    # rest of line is the name
+// MIDI_CHANNEL <0-16>                     # optional, default 0 (any; parseMidi already ignores channel)
+// PAD  <note> [<note2>]                   # a contiguous block of pads (a single pad if note2 omitted)
+// FADER CC <from> [<to>] [<name...>]      # faders on CC <from>..<to>, optionally named
+// ENCODER CC <from> [<to>] [absolute|relative-2c|relative-signmag]  # default: absolute
+// LED NOTE|CC <from> <to> velocity|value  # how a block of pads/faders lights up
+//   COLOR <name> <value>                  # indented under the preceding LED line
+//
+// PAD/FADER/ENCODER declare what exists; LED+COLOR (attaches to the most
+// recent LED line, like SLOT/RANGE attach to the preceding CAP in .fdef)
+// declare how it lights up. A controller with no LED lines still works --
+// glow.led.* is a no-op without them.
+
+// Parse a .mdef text and populate `out`. Returns false on any parse error.
+// On failure, sets `err` to a non-empty error message.
+bool parseControllerDef(const std::string& text, ControllerBuilder& out, std::string& err);
+
+// Build an MDF1 blob from a ControllerBuilder. Returns an empty vector and
+// sets `err` on failure (a count over one of mdef.h's MDEF_MAX_* limits, or
+// too much fader/colour name text -- see controller_encoder.h).
+std::vector<uint8_t> encodeController(const ControllerBuilder& def, std::string& err);
+
 // .show grammar (the patch):
 // UNIVERSE <idx> <DMX|ARTNET|SACN>   # sets transport for that universe
 // FIXTURE  <deffile> <universe> <base> # patch an instance; deffile resolved via callback
@@ -58,6 +86,7 @@ std::vector<uint8_t> encodeProfile(const FixtureDef& def);
 // CENTER   <panNorm> <tiltNorm>      # head only, optional (default 0.5 0.5)
 // INVERT   <0|1> <0|1>               # head only, optional (default 0 0)
 // MATRIX   <startUniverse> <startChannel> <w> <h> <SERP|PROG> <H|V> <ORDER>
+// CONTROLLER <deffile>                # embed a .mdef controller definition; deffile resolved via callback
 
 struct CompileResult {
   bool ok = false;

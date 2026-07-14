@@ -14,6 +14,7 @@
 #include "beat_clock.h"
 #include "eval_queue.h"
 #include "glow_lua_api.h"
+#include "live_control.h"
 #include "show_control.h"
 
 static int g_failCount = 0;
@@ -45,9 +46,10 @@ const std::string& fennelSrc() {
 // Every test starts from a clean singleton (host-tests-only capability;
 // see glow_fennel.h). ShowController must outlive the VM, so it's a static
 // here too, recreated per test via placement into this holder. Same for
-// the BeatClock glowLuaInit borrows.
+// the BeatClock/LiveControl glowLuaInit borrows.
 ShowController* g_show = nullptr;
 glow::BeatClock* g_beatClock = nullptr;
+LiveControl* g_liveControl = nullptr;
 
 void freshInit(size_t capBytes = 0, int frameBudget = 0, int evalBudget = 0) {
   glow::glowLuaShutdown();
@@ -55,8 +57,11 @@ void freshInit(size_t capBytes = 0, int frameBudget = 0, int evalBudget = 0) {
   g_show = new ShowController();
   delete g_beatClock;
   g_beatClock = new glow::BeatClock();
+  delete g_liveControl;
+  g_liveControl = new LiveControl(*g_show);
   char err[256];
-  bool ok = glow::glowLuaInit(*g_show, nullptr, *g_beatClock, fennelSrc().data(), fennelSrc().size(), err,
+  bool ok = glow::glowLuaInit(*g_show, nullptr, *g_beatClock, *g_liveControl,
+                              fennelSrc().data(), fennelSrc().size(), err,
                               sizeof(err), capBytes, frameBudget, evalBudget);
   if (!ok) {
     printf("FATAL: glowLuaInit failed: %s\n", err);

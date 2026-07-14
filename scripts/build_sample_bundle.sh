@@ -9,8 +9,8 @@ cd "$(git rev-parse --show-toplevel)"
 # Compile the provision compiler (provision_main + provision + profile_encoder
 # + their deps). The Makefile does not build this binary, so we do it here.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 \
-    provision_main.cpp provision.cpp profile_encoder.cpp \
-    fixture_profile.cpp pixel_matrix.cpp color.cpp vec_math.cpp aim.cpp \
+    provision_main.cpp provision.cpp profile_encoder.cpp controller_encoder.cpp \
+    fixture_profile.cpp mdef.cpp pixel_matrix.cpp color.cpp vec_math.cpp aim.cpp \
     show_bundle.cpp \
     -o /tmp/provision -lm
 

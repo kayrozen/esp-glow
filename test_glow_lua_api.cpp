@@ -14,6 +14,7 @@
 #include <unordered_map>
 
 #include "fixture_profile.h"
+#include "live_control.h"
 #include "lua_effect.h"
 #include "lua_vm.h"
 #include "pixel_matrix.h"
@@ -72,11 +73,12 @@ struct Harness {
   glow::LuaVM vm;
   IMatrixRegistry* matrices;
   glow::BeatClock beatClock;
+  LiveControl live;
   GlowLuaApi api;
 
   Harness(const std::string& fennelSrc, IMatrixRegistry* mats = nullptr,
          IFixtureRegistry* fixtures = nullptr)
-      : vm(), matrices(mats), api(vm, show, mats, beatClock, fixtures) {
+      : vm(), matrices(mats), live(show), api(vm, show, mats, beatClock, live, fixtures) {
     api.install();
     char err[256];
     if (!vm.loadFennelCompiler(fennelSrc.data(), fennelSrc.size(), err, sizeof(err))) {

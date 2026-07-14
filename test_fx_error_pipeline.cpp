@@ -37,6 +37,7 @@
 #include <string>
 #include <vector>
 
+#include "live_control.h"
 #include "lua_vm.h"
 #include "show_control.h"
 
@@ -65,9 +66,11 @@ struct Harness {
   ShowController show;
   glow::LuaVM vm;
   glow::BeatClock beatClock;
+  LiveControl live;
   GlowLuaApi api;
 
-  explicit Harness(const std::string& fennelSrc) : vm(), api(vm, show, nullptr, beatClock) {
+  explicit Harness(const std::string& fennelSrc)
+      : vm(), live(show), api(vm, show, nullptr, beatClock, live) {
     api.install();
     char err[256];
     if (!vm.loadFennelCompiler(fennelSrc.data(), fennelSrc.size(), err, sizeof(err))) {

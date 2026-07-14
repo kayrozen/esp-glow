@@ -2,6 +2,11 @@
 
 The live control layer transforms incoming control input (MIDI, OSC, WebSocket/HTTP) into real-time cue and scene actions via the `ShowController`.
 
+See also: **FORMAT.md**'s "MDF1 Controller Definition Format" section, which
+describes MIDI *hardware* (pads/faders/encoders/LEDs) so that `glow.led.*`
+(below) has something to address. `.mdef` never contains bindings -- those
+stay here, in Fennel, live-editable per show (`glow.bind.*`).
+
 ## Architecture
 
 The layer splits into two parts:
@@ -98,6 +103,52 @@ float level = live.masterLevel();
 
 Bindings are stored in a vector that grows at setup time only. No heap allocation during dispatch. Unbound ids and type mismatches are silently ignored.
 
+## Fennel API: `glow.bind.*` / `glow.led.*`
+
+`LiveControl::bindButton`/`bindFader`/`clear` are also reachable from Fennel
+(see `glow_lua_api.h`), so a show's bindings can be defined live in
+`boot.fnl` instead of hardcoded C++:
+
+```fennel
+(glow.bind.pad 53 :flash :chorus)      ; note 53 -> momentary cue (CueFlash)
+(glow.bind.pad 54 :toggle :verse)      ; note 54 -> latching cue (CueToggle)
+(glow.bind.fader 48 :master)           ; CC 48 -> grandmaster level
+(glow.bind.clear)                       ; wipe every binding (and every
+                                         ; glow.led.auto tracker -- see below)
+```
+
+`glow.bind.pad`'s cue name must already be defined (`glow.cue.define`); an
+unknown name is a Lua error, same as `glow.cue.go`. `glow.bind.fader` only
+supports `:master` today (the only fader `ActionKind` `LiveControl` has).
+
+### LED feedback: `glow.led.*` (needs a `.mdef`)
+
+```fennel
+(glow.led.set 53 :red)                  ; by colour name, from the pad's
+                                        ;  own LED range palette (.mdef)
+(glow.led.set 53 :off)
+(glow.led.auto 53 :chorus :green :off)  ; pad 53 tracks cue :chorus: green
+                                        ;  while active, off while not
+```
+
+`glow.led.auto` is the one that makes a controller feel alive: register it
+once per pad and it stays in sync with the show with no further scripting.
+Internally it re-evaluates every render frame against `ShowController`
+(`LedFeedback::refresh`, see `led_feedback.h`) and only ever sends MIDI when
+a pad's colour actually changes -- a static show emits zero ongoing MIDI
+traffic, and a burst of simultaneous changes (a scene cut touching 40 pads)
+is rate-limited (default 100 msg/sec) rather than flooding the DIN link.
+
+Both `glow.led.*` calls are **no-ops**, not errors, when:
+- the device has no `LedFeedback` wired up at all (no `.mdef` was embedded
+  in the SHW1 bundle, or the device build has no MIDI OUT transport), or
+- the addressed note/CC has no `LED` range in the loaded `.mdef`, or
+- the colour name isn't in that LED range's palette.
+
+This is the same graceful-degradation contract as `glow.set` on a fixture
+capability the patched fixture doesn't have: a typo or an unsupported
+controller shouldn't take down the whole show.
+
 ## MIDI Parsing
 
 ```cpp
@@ -145,10 +196,21 @@ Converts 3-byte MIDI channel messages to `ControlEvent`:
 
 - Web UI frontend (HTML/CSS/JS) — separate project
 - Full OSC spec (bundles, all type tags, timetags) — address + one scalar arg only
-- Bidirectional feedback (MIDI LED updates, web state reflection) — input-only for now
+- Bidirectional web state reflection — input-only for now (MIDI LED feedback
+  IS implemented, see `glow.led.*` above and FORMAT.md's MDF1 section)
 - Fader crossfaders for manual cue mixing — requires `setManualLevel(cueId, level)` on ShowController
 - MIDI clock, beat sync, tap tempo — separate concern
 - Modifying `ShowController` or other existing modules
+- USB-MIDI host — deliberately deferred. `.mdef`/LED feedback/MIDI OUT work
+  identically over the DIN transport already implemented here; USB host
+  needs an ESP-IDF `usb_host_lib`-based MIDI class driver (none shipped by
+  Espressif) *and* a board respin (the ESP32 must supply 5V VBUS to the
+  controller). A USB-host-to-DIN adapter (~$20) gets the same result today
+  with no firmware or hardware risk. Add it later, as a transport, once
+  the hardware question is settled -- `usb_midi_input.cpp` would be
+  structurally identical to `midi_input.cpp`: strip USB-MIDI event packets
+  to raw MIDI bytes, call the existing host-tested `parseMidi`, push onto
+  the same control queue. Nothing else.
 
 ## Testing
 
