@@ -5,9 +5,13 @@ no JVM, running standalone on a microcontroller. Native C++ does the hard real-t
 your show is written in **Fennel** (a Lisp), compiled **on the device**, and hot-swapped
 while the rig is running.
 
-Point a moving head at a spot in the room, scroll a plasma across an LED matrix, define a
-cue with a two-second fade — then change any of it from a REPL, mid-song, without
-reflashing.
+Point a moving head at a spot in the room, scroll a plasma across an LED matrix, lock a
+strobe to the beat of a track playing on a CDJ — then change any of it from a REPL,
+mid-song, without reflashing.
+
+> **Status:** every subsystem is built, merged, and green on host (25 test suites,
+> `-Wall -Wextra -Werror` + ASan/UBSan/TSan). **It has never run on silicon.** Bring-up is
+> the next step — see §9.
 
 ---
 
@@ -18,46 +22,47 @@ Fennel         — Lisp surface. Self-hosted compiler runs ON the device.
     ↓
 Lua VM         — effects, cues, scenes, config. Composes and parameterises.
     ↓
-C++ / FreeRTOS — render loop @44 Hz, DMX + Art-Net out, pixel engine, aim geometry.
-                 Hard real-time. Never blocked by scripts.
+C++ / FreeRTOS — render loop @44 Hz, DMX + Art-Net out, pixel engine, aim geometry,
+                 beat clock. Hard real-time. Never blocked by scripts.
 ```
 
 **The load-bearing rule: Lua composes, C runs the tight loops.** Scripts choose *what*
 happens and with *which parameters*; the C engine executes the per-pixel and per-channel
-work. This is the same lesson Pixelblaze learned — a general-purpose language cannot drive
-15,000 pixel updates a second on an MCU, but it is perfect for describing a show.
+work. (The same lesson Pixelblaze learned — a general-purpose language cannot drive 15,000
+pixel updates a second on an MCU, but it is perfect for describing a show.)
 
-The engine turns *time* into *DMX frames*. Effects (Lua or built-in C) emit abstract
-intents — "this fixture is blue at 80%", "this head points at that spot" — a resolve layer
-maps them to channel values via per-fixture profiles, and cues blend overlapping intents
-(HTP for intensity, LTP for position) before the result is flushed to the wire.
+The engine turns *time* into *DMX frames*. Effects emit abstract **intents** — "this fixture
+is blue at 80%", "this head points at that spot" — a resolve layer maps them to channel
+values via per-fixture profiles, and cues blend overlapping intents (HTP for intensity, LTP
+for position) before the result is flushed to the wire.
 
-Two data paths, by design:
+**Concurrency, in one sentence:** the render task is the *only* thing that mutates engine
+state. Every input — WebSocket, MIDI, OSC, beat packets, script submissions — is parsed on
+its own task and **pushed onto a queue**, drained on the render core each frame. This
+invariant is the backbone of the whole system.
+
+### Two data paths
 
 - **Per-fixture** — moving heads, PARs, wash, smoke. One resolved value per capability.
-  Heads add pan/tilt inverse kinematics: aim at a point, not an angle.
-- **Per-pixel** — RGB matrices. A 2D canvas rendered by a C pattern engine, packed into
-  DMX universes and sent over Art-Net to a bridge.
+  Heads add pan/tilt inverse kinematics: aim at a *point*, not an angle.
+- **Per-pixel** — RGB matrices. A C pattern engine renders a 2D canvas, packed into DMX
+  universes and sent over Art-Net.
 
-### The two halves of a show
+### Two halves of a show
 
 | | **Patch** | **Show** |
 |---|---|---|
-| What | Which fixtures exist, their addresses, geometry, matrices | What the fixtures *do* over time |
-| Written in | `.fdef` / `.show` text → compiled to a binary `SHW1` bundle | **Fennel** |
+| What | Which fixtures exist, addresses, geometry, matrices | What they *do* over time |
+| Format | `.fdef` / `.show` → binary `PFX2`/`SHW1` bundle | **Fennel** |
 | Changes when | You change the rig | Every song |
 | Lives in | A raw flash partition (browser-flashable) | LittleFS (writable, hot-swappable) |
-
-Scripts never define the patch; the patch never defines the show.
 
 ---
 
 ## 2. Scripting: Fennel on the device
 
-### A first effect
-
-An effect is a function of time that **emits** intents. It does not return them —
-returning tables would allocate on every frame and feed the garbage collector.
+An effect is a function of time that **emits** intents — it never returns them (returning
+tables would allocate every frame and feed the GC).
 
 ```fennel
 (fn breathe [t]
@@ -67,221 +72,226 @@ returning tables would allocate on every frame and feed the garbage collector.
 (glow.cue.define :warm-breath {:effects [breathe] :fade-in 2.0 :fade-out 1.0})
 (glow.cue.go :warm-breath)
 ```
-
-Send that over the WebSocket REPL and the light responds immediately. No reflash.
+Send that over the WebSocket REPL; the light responds immediately.
 
 ### The `glow.*` API
 
 ```fennel
-;; Emit (valid only inside an effect callback)
-(glow.set fixture-id :dimmer 0.8)        ; capability → normalized [0,1]
-(glow.aim  head-id [0 2 5])              ; point a moving head at a world point
+;; Emit (inside an effect callback only)
+(glow.set 1 :dimmer 0.8)                 ; capability → normalized [0,1]
+(glow.aim  2 [0 2 5])                    ; point a head at a world point
+
+;; Named function ranges (PFX2) — how you actually drive a moving head
+(glow.slot 1 :color-wheel "red")         ; discrete slot → centre of its DMX range
+(glow.slot 1 :gobo "dots")
+(glow.slot 1 :gobo 3)                    ; …or by index
+(glow.slot 1 :shutter-strobe "strobe" 0.8)  ; continuous sub-range → 80% across it
+(glow.ranges 1 :gobo)                    ; discover what this fixture can do
+
+;; Musical time
+(glow.beat)  (glow.bar)  (glow.bpm)  (glow.beat-number)  (glow.locked?)
 
 ;; Built-in C effects — fast, use them freely
 (glow.fx.hue-rotate [1 2 3] {:period 4.0})
-(glow.fx.chase      [1 2 3 4] {:period 2.0})
-(glow.fx.sweep      5 [0 0 1] [1 0 1] {:period 6.0})
+(glow.fx.chase [1 2 3 4] {:period 2.0})
+(glow.fx.sweep 5 [0 0 1] [1 0 1] {:period 6.0})
 
-;; Cues and scenes (wrap the C++ ShowController: fades, HTP/LTP blending)
+;; Cues, scenes, matrices, persistence
 (glow.cue.define :verse {:effects [breathe] :fade-in 2.0 :priority 0})
-(glow.cue.go :verse)
-(glow.cue.release :verse)
 (glow.scene.define :chorus [:verse :strobe-hit])
-
-;; Matrices — Lua picks the pattern, C runs the per-pixel loop
 (glow.matrix.pattern 0 :plasma {:speed 0.5 :scale 0.2})
-(glow.matrix.brightness 0 0.8)
-
-;; Persist — boot.fnl is evaluated at startup, so a show survives reboot
 (glow.save :boot "(glow.cue.go :verse)")
 ```
 
-Capabilities: `:dimmer :red :green :blue :white :amber :uv :cyan :magenta :yellow
-:pan :tilt :shutter-strobe :gobo :focus :zoom :fog :fan`. Emitting one a fixture doesn't
-have is a harmless no-op, so effects can be written generically.
+Emitting a capability (or a slot) a fixture doesn't have is a harmless **no-op** — so cues
+written for one head degrade gracefully on another.
 
 ### Writing effects that don't stutter
 
-At 44 Hz you have 22.7 ms per frame. A garbage-collector pause drops a DMX frame, and a
-dropped frame is *visible on stage*. Two rules:
+At 44 Hz you have 22.7 ms per frame. A GC pause drops a DMX frame, and a dropped frame is
+*visible on stage*.
 
 - **Allocate nothing in an effect body.** String *literals* (`:dimmer`) are interned at
   compile time and cost nothing. String *concatenation* (`(.. "dim" n)`), table
-  construction, and closures created per call all allocate. Build them once, outside.
-- **Don't write per-pixel loops in Lua.** Use `glow.matrix.pattern`. If you need a matrix
-  behaviour that doesn't exist, add a C pattern — that's the right layer.
+  construction, and per-call closures all allocate. Build them once, outside.
+- **No per-pixel loops in Lua.** Use `glow.matrix.pattern`; add a C pattern if you need a
+  new one.
 
-### Safety: the show goes on
+### The show goes on
 
-Live-coding means you *will* ship a bug mid-set. The engine is built so a bad script cannot
-take the rig down:
+Live-coding means you *will* ship a bug mid-set. Nothing a script does can take the rig
+down:
 
-- A **syntax error** → reported to the console; nothing changes.
-- A **runtime error** in an effect → that effect is disabled and reported; **its cue keeps
-  running with its other effects**; the rig keeps rendering.
-- An **infinite loop** → an instruction-count hook aborts it.
-- **Out of memory** → the offending script is aborted; rendering continues.
-- A broken **`boot.fnl`** → the device falls back to a safe blackout and reports, rather
-  than booting into a broken show.
+| Failure | What happens |
+|---|---|
+| Syntax error | Reported to the console; nothing changes |
+| Runtime error in an effect | That effect is disabled and reported (`fx_error`); **its cue keeps running its other effects**; the rig keeps rendering |
+| Infinite loop | An instruction-count hook aborts it |
+| Out of memory | The script is aborted; rendering continues |
+| Broken `boot.fnl` | Safe blackout + report — never a brick |
 
-Every script call is protected. Nothing a script does unwinds the render loop.
+Every script call is protected. Nothing unwinds the render loop.
 
 ---
 
-## 3. Hardware
+## 3. Musical time (beat sync)
 
-- **MCU**: ESP32-S3 (dual-core, hardware FPU, PSRAM — the Lua VM lives in PSRAM).
-- **DMX out**: RS-485 transceiver (e.g. MAX3485). Default GPIOs (in `menuconfig`):
-  TX 17, RX 18, DE/RTS 8. Wire to a 3- or 5-pin XLR.
-- **Matrices**: Art-Net over WiFi → an Art-Net→DMX bridge → DMX-input matrices
-  (3 channels per pixel, ~170 pixels per universe).
-- **Inputs**: MIDI (DIN over UART or native USB), OSC (UDP), and a web console
-  (HTTP + WebSocket) served from the device. All triggers funnel into the same cue engine.
+The feature that made Afterglow *Afterglow*. Clock sources are discrete and jittery; effects
+need a smooth phase. A **PLL-based `BeatClock`** reconciles them — gradual phase correction
+(never snapping), garbage rejection, free-run on dropout, and a strictly monotonic beat
+number.
+
+Sources: **MIDI clock** (24 PPQN) · **Pro DJ Link** (passive listening to CDJ beat packets —
+gives you true *downbeats*, parsed against Deep Symmetry's protocol documentation) ·
+**tap tempo** · an internal clock. When no source is live, `(glow.beat)` free-runs rather
+than freezing — a show shouldn't die because a DJ unplugged a CDJ.
+
+---
+
+## 4. Fixtures
+
+Four archetypes, four costs:
+
+- **Wash / PARs** — trivial. RGB(W/A/UV) + dimmer + strobe.
+- **Moving heads** (*lyres*) — the expressive case. 16-bit pan/tilt, and with `POS`/`ROT` in
+  the patch the aim engine computes pan/tilt from a target point. **PFX2 named ranges** make
+  colour wheels, gobos, prisms, and strobe modes addressable by name.
+- **Smoke / haze** — few channels, but with timing semantics (warm-up, duty cycle).
+- **RGB matrices** — the per-pixel path. Wiring (serpentine/progressive), colour order, and
+  multi-universe spans are all config. ~170 RGB pixels per universe.
+
+### Importing real fixtures
+
+Don't hand-write profiles from a PDF. The browser provisioner imports **QLC+ (`.qxf`)**,
+**Open Fixture Library (JSON)**, and **GDTF (`.gdtf`)** — mapping their channels *and their
+named ranges* onto PFX2. Pick the mode, review the channel table, edit if needed, save.
+
+---
+
+## 5. Hardware
+
+- **MCU**: ESP32-S3 (dual-core, hardware FPU, PSRAM — the Lua VM lives there).
+- **DMX out**: RS-485 transceiver (e.g. MAX3485). Default GPIOs: TX 17, RX 18, DE/RTS 8.
+- **Matrices**: Art-Net over WiFi → an Art-Net→DMX bridge.
+- **Inputs**: MIDI (DIN/UART or native USB), OSC (UDP), a web console (HTTP + WebSocket)
+  served from the device, and DJ-Link.
 - **Status LED**: GPIO 2.
 
-The render task is pinned to core 1; WiFi/lwIP live on core 0, so network work never
-jitters DMX timing. The Lua VM is owned by the render task and touched from nowhere else —
-input events and script submissions arrive via queues drained on that task.
+Render task pinned to core 1; WiFi/lwIP on core 0, so network work never jitters DMX timing.
 
 ---
 
-## 4. Build & flash
+## 6. Build & flash
 
-Firmware builds with **ESP-IDF v5.1+**.
+**ESP-IDF v5.1+.** Vendored: **Lua 5.4.6** (`luaconf.h` **must** have `#define LUA_32BITS 1`
+— float/int32 to match the S3's single-precision FPU; it cannot be set with `-D`) and
+**Fennel 1.6.1** as a generated single `fennel.lua` (regenerate via
+`scripts/vendor_fennel.sh` — the repo ships no prebuilt file). `esp_dmx` and LittleFS come
+from the IDF Component Manager.
 
-### 4.1 Vendored dependencies
+**From the browser (easiest):** open the provisioner, plug in over USB, hit **Flash** — it
+writes bootloader, partition table, app, and your compiled patch. Chrome/Edge (Web Serial).
 
-- **Lua 5.4.6** at `firmware/components/lua/`. `luaconf.h` **must** have
-  `#define LUA_32BITS 1` — float/int32 numbers, matching the S3's single-precision FPU
-  (doubles are software-emulated, roughly 10× slower). This cannot be set with `-D`: the
-  macro is already defined in the file, so edit it.
-- **Fennel 1.6.1**, vendored as a single generated `fennel.lua` (~295 KB, MIT), embedded in
-  the firmware. Regenerate with `scripts/vendor_fennel.sh` — it clones the tag and runs
-  `make fennel.lua`, because the repo does **not** ship a prebuilt single file.
-- `esp_dmx` and LittleFS are resolved by the IDF Component Manager.
-
-### 4.2 Flash from the browser (easiest)
-
-Open the web provisioner, plug the board in over USB, hit **Flash**. It writes the
-bootloader, partition table, app, and — if you compiled a patch in the same page — your
-`SHW1` bundle. Requires Chrome or Edge (Web Serial).
-
-### 4.3 Flash from the command line
-
+**From the CLI:**
 ```sh
-. $IDF_PATH/export.sh
-cd firmware
+. $IDF_PATH/export.sh && cd firmware
 idf.py set-target esp32s3
-idf.py menuconfig          # DMX GPIOs, status LED, WiFi SSID/pass, Art-Net bridge IP
-./scripts/build_sample_bundle.sh    # compiles samples/demo.show → the SHW1 bundle
+idf.py menuconfig                    # DMX GPIOs, LED, WiFi, Art-Net bridge IP
+./scripts/build_sample_bundle.sh     # samples/demo.show → SHW1 bundle
 idf.py -p /dev/ttyUSB0 flash monitor
 ```
-
-The firmware is **not one binary**. A full flash writes bootloader (`0x0` — note: 0x0 on
-the S3, not 0x1000), partition table (`0x8000`), otadata (`0x10000`), app (`0x20000`), and
-the show bundle. The build emits `flasher_args.json` with the exact mapping; from
-`firmware/build/`:
-
-```sh
-esptool.py -p /dev/ttyUSB0 write_flash @flash_args
-```
-
-On a fresh or wedged board, run `esptool.py -p /dev/ttyUSB0 erase_flash` first. On boot the
-serial console prints a banner, `render loop started on core 1`, the DMX init result, the
-loaded fixture/matrix counts, and a frame-rate stat line every 5 s.
+The firmware is **not one binary**: bootloader (`0x0` — on the S3, not 0x1000), partition
+table (`0x8000`), otadata (`0x10000`), app (`0x20000`), and the show bundle. `flasher_args.json`
+carries the exact mapping; from `firmware/build/`: `esptool.py write_flash @flash_args`.
+On a fresh or wedged board, `erase_flash` first.
 
 ---
 
-## 5. The patch language (`.fdef` / `.show`)
-
-Compiled off-device by the `provision` tool (or in the browser, via WASM) into the `SHW1`
-bundle. `#` starts a comment.
-
-### Fixture types — `.fdef`
+## 7. Patch language
 
 ```
+# fixture type — .fdef
 FIXTURE Moving Head
-FOOTPRINT 9
+FOOTPRINT 16
 HEAD
 PANRANGE 540
 TILTRANGE 270
 CAP Dimmer 0
-CAP Pan    1 2            # 16-bit: coarse=1, fine=2
-CAP Tilt   3 4
-CAP Red    5
-CAP Green  6
-CAP Blue   7
-CAP ShutterStrobe 8 - 8   # 8-bit, idle value 8 (shutter open)
+CAP Pan 1 2                # 16-bit: coarse, fine
+CAP Tilt 3 4
+CAP ColorWheel 5
+  SLOT 0 9    open
+  SLOT 10 19  red
+  SLOT 20 29  blue
+CAP ShutterStrobe 6
+  SLOT 0 31   closed
+  SLOT 32 63  open
+  RANGE 64 95 strobe       # continuous sub-range
 ```
-`CAP <Capability> <coarse> [<fine>|-] [<default>] [inv]`.
-
-### The patch — `.show`
-
 ```
+# patch — .show
 UNIVERSE 0 DMX
 UNIVERSE 1 ARTNET
-
-FIXTURE samples/dimmer.fdef 0 1      # a PAR at universe 0, base ch 1
-FIXTURE samples/head.fdef   0 21     # a head at universe 0, base ch 21
-POS 2.0 1.0 0.0                       # metres — this is what enables aim-at-a-point
+FIXTURE samples/head.fdef 0 21
+POS 2.0 1.0 0.0            # metres — this is what enables aim-at-a-point
 ROT 0 0 0
-
-MATRIX 1 0 16 8 SERP H RGB           # 16×8 matrix, serpentine wiring, RGB order
+MATRIX 1 0 16 8 SERP H RGB
 ```
-
-Heavy fixture libraries (GDTF / QLC+ / OFL) aren't parsed here — importers that *emit*
-`.fdef`/`.show` are a separate tool; these text formats are the stable seam.
+A `CAP` with no `SLOT`/`RANGE` lines stays linear — every v1 profile still works.
 
 ---
 
-## 6. Development & testing
+## 8. Development & testing
 
 ```sh
-make test    # every suite, -Wall -Wextra -Werror + ASan/UBSan
-             # (the control-queue suite also runs under ThreadSanitizer)
+make test    # 25 suites, -Wall -Wextra -Werror + ASan/UBSan (TSan on the queue suite)
 ```
+Host-tested: the whole engine, the Lua layer (effect emission, error policy, the
+infinite-loop hook, the memory cap, a **zero-allocation check**), the PLL beat clock (jitter
+rejection, monotonicity), the binary formats (fuzzed against malformed input), and the
+importers.
 
-The whole engine is host-tested — including the Lua layer, since Lua builds fine on Linux:
-effect emission, cue/scene state, the error policy, the infinite-loop hook, the memory cap,
-and a **zero-allocation check** (a well-written effect must make zero allocator calls per
-frame).
-
-What can't be host-tested — DMX break/MAB timing, Art-Net on the wire, GC pacing under
-load, hot-swap while rendering — is covered by an automated **hardware-in-the-loop** suite
-(serial telemetry + network capture + a 10-minute soak). Two things stay human: whether a
-head physically aims right, and whether the colours look right.
+**Hardware-in-the-loop** (`tests/hil/`) covers what the host cannot: DMX timing, Art-Net on
+the wire, WS/OSC/MIDI round-trips, the Fennel REPL end to end, every scripting failure mode,
+OTA/rollback, and a **10-minute soak**. Two things stay human: whether a head physically aims
+right, and whether the colours look right.
 
 ---
 
-## 7. Roadmap
+## 9. Status & next steps
 
-**Done, host-tested:** the engine (profiles, aim geometry, show model, effects, cues with
-fades and HTP/LTP blending, pixel matrices), provisioning (`.fdef`/`.show` → `SHW1`), the
-concurrency-safe input dispatch, the web console, and a browser provisioner (WASM).
+**Done, merged, host-green:** the engine · aim geometry · cues with fades and HTP/LTP
+blending · pixel matrices · PFX2 named ranges · the Lua/Fennel live-coding layer with its
+real-time guards · the concurrency-safe input dispatch · firmware F0–F5 (DMX, WiFi/Art-Net,
+show load, WebSocket + MIDI + OSC transports, OTA with rollback, watchdog, safe blackout) ·
+musical time (PLL beat clock, MIDI clock, DJ-Link, tap tempo) · the web console with the
+Fennel REPL · the browser provisioner, fixture importers, and USB flasher · the HIL suite.
 
-**In progress:** firmware bring-up (F0–F3: scaffold, DMX out + render task, WiFi/Art-Net,
-show-load) — the next hardware milestone is a real fixture responding to the engine. Then
-inputs (F4), and the **Lua/Fennel live-coding layer** — the heart of the project.
+**Not done: it has never run on hardware.** That is the next and only real step.
 
-**Next:** hardware-in-the-loop suite · OTA + robustness (F5) · browser firmware flashing.
+The bring-up ladder (see `BENCH_RUNBOOK.md`): boot → DMX out (**the milestone — a real
+fixture responding to the engine**) → WiFi/Art-Net → web console → live-coding → HIL → the
+**soak**. The soak is the one unvalidated risk in the whole stack: whether the Lua GC, paced
+in the frame slack, ever drops a DMX frame under load. No host test can answer that.
 
-**Later:** GDTF/QLC+ importers · gamma correction and audio-reactive matrix patterns ·
-beat/clock sync (MIDI clock, DJ-Link) · a dedicated expression VM if scripted per-pixel
-work is ever wanted.
+**Later:** semantic colour mapping (`:red` → nearest wheel slot *or* RGB — profile v3, the
+format byte is already reserved) · gamma correction and audio-reactive matrix patterns ·
+matrices inside the cue/blend engine · Ableton Link.
 
 ---
 
-## 8. Repository layout
+## 10. Repository layout
 
 ```
-*.cpp / *.h              engine, provisioning, live-control (host-buildable)
+*.cpp / *.h              engine, Lua layer, provisioning, live control (host-buildable)
 test_*.cpp               host unit tests            (make test)
 samples/                 example .fdef / .show
-scripts/                 vendor_fennel.sh, build_sample_bundle.sh
+scripts/                 vendor_fennel.sh, vendor_lua.sh, build_sample_bundle.sh
+tests/hil/               hardware-in-the-loop suite
 firmware/                ESP-IDF application
   main/                  main.cpp, render_task, wifi/storage/ota managers
   components/glow_core/  the engine as an IDF component
   components/lua/        Lua 5.4.6 (LUA_32BITS) + embedded fennel.lua
-  partitions.csv, sdkconfig.defaults
-web/                     console (Preact) + provisioner/flasher (WASM + Web Serial)
+web/                     console (Preact + Fennel REPL) · provisioner (WASM, importers,
+                         Web Serial flasher) · shared editor
 ```
