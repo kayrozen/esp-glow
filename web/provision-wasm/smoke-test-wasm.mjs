@@ -118,13 +118,14 @@ check("capCount 7", blob[7] === 7);
 check("nameLen 10 ('Torrent F1' is 10 chars)", blob[8] === 10, blob[8]);
 
 console.log("== compileShow ==");
-const showText = `UNIVERSE 0 DMX
-UNIVERSE 1 ARTNET
-FIXTURE torrent.fdef 0 1
+const showText = `SHOW 2
+UNIVERSE 1 DMX
+UNIVERSE 2 ARTNET
+FIXTURE torrent.fdef 1 2
 POS 1 2 3
 ROT 0 0 0
-FIXTURE par.fdef 0 20
-MATRIX 1 0 16 16 SERP H GRB
+FIXTURE par.fdef 1 21
+MATRIX 2 1 16 16 SERP H GRB
 `;
 const fdefTorrent = `FIXTURE Torrent F1
 FOOTPRINT 16
@@ -202,8 +203,9 @@ check("ctrl ok=false without CONTROLLER", badCtrl.ok === false);
 check("ctrl err non-empty", badCtrl.err.length > 0);
 
 console.log("== compileShow with CONTROLLER ==");
-const showWithCtrl = `UNIVERSE 0 DMX
-FIXTURE par.fdef 0 1
+const showWithCtrl = `SHOW 2
+UNIVERSE 1 DMX
+FIXTURE par.fdef 1 2
 CONTROLLER pad.mdef
 `;
 const readFile2 = (path) => {
