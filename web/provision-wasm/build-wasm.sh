@@ -61,6 +61,8 @@ LIB_SOURCES=(
   "$REPO_ROOT/vec_math.cpp"
   "$REPO_ROOT/fixture_profile.cpp"
   "$REPO_ROOT/profile_encoder.cpp"
+  "$REPO_ROOT/mdef.cpp"
+  "$REPO_ROOT/controller_encoder.cpp"
   "$REPO_ROOT/show_bundle.cpp"
   "$REPO_ROOT/provision.cpp"
 )
