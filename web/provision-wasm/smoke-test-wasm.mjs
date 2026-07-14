@@ -61,6 +61,7 @@ check("parseFixtureDef exported", typeof Module.parseFixtureDef === "function");
 check("encodeProfile exported",   typeof Module.encodeProfile   === "function");
 check("compileShow exported",     typeof Module.compileShow     === "function");
 check("loadShow exported",        typeof Module.loadShow        === "function");
+check("parseController exported", typeof Module.parseController === "function");
 
 console.log("== parseFixtureDef (valid) ==");
 const fdefText = `FIXTURE Torrent F1
@@ -172,6 +173,47 @@ check("transport[1]=ArtNet (1)", loaded.transports[1] === 1, loaded.transports);
 check("fixtureCount=2", loaded.fixtureCount === 2);
 check("matrixCount=1", loaded.matrixCount === 1);
 check("matrix 16x16", loaded.matWidth[0] === 16 && loaded.matHeight[0] === 16);
+
+console.log("== parseController (valid .mdef) ==");
+const mdefText = `CONTROLLER Test Pad
+MIDI_CHANNEL 0
+PAD 0 7
+FADER CC 7 level
+ENCODER CC 13 relative-2c
+LED NOTE 0 7 velocity
+  COLOR off 0
+  COLOR on  1
+`;
+const ctrl = Module.parseController(mdefText);
+check("ctrl ok=true", ctrl.ok === true, ctrl.err);
+check("ctrl err empty", ctrl.err === "");
+check("ctrl name", ctrl.name === "Test Pad");
+check("ctrl midiChannel 0", ctrl.midiChannel === 0);
+check("ctrl padCount 1", ctrl.padCount === 1);
+check("ctrl faderCount 1", ctrl.faderCount === 1);
+check("ctrl encoderCount 1", ctrl.encoderCount === 1);
+check("ctrl ledCount 1", ctrl.ledCount === 1);
+check("ctrl colorCount 2", ctrl.colorCount === 2);
+check("ctrl blobBytes > 0", ctrl.blobBytes > 0, ctrl.blobBytes);
+
+console.log("== parseController (invalid) ==");
+const badCtrl = Module.parseController("MIDI_CHANNEL 0\nPAD 0 7\n");
+check("ctrl ok=false without CONTROLLER", badCtrl.ok === false);
+check("ctrl err non-empty", badCtrl.err.length > 0);
+
+console.log("== compileShow with CONTROLLER ==");
+const showWithCtrl = `UNIVERSE 0 DMX
+FIXTURE par.fdef 0 1
+CONTROLLER pad.mdef
+`;
+const readFile2 = (path) => {
+  if (path === "par.fdef") return fdefPar;
+  if (path === "pad.mdef") return mdefText;
+  return "";
+};
+const compiledCtrl = Module.compileShow(showWithCtrl, readFile2);
+check("ctrl-show ok=true", compiledCtrl.ok === true, compiledCtrl.err);
+check("ctrl-show bundle non-empty", vecToUint8(compiledCtrl.bundle).length > 0);
 
 console.log("== bundle size meter ==");
 console.log("    bundle size:", compiled.bundle.length, "bytes");

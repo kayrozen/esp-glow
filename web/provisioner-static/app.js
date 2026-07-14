@@ -114,6 +114,11 @@ FIXTURE par.fdef 0 20
 
 # 16x16 LED matrix on universe 1, starting at channel 0
 MATRIX 1 0 16 16 SERP H GRB
+
+# MIDI controller: embeds the APC40 mkII .mdef below into the bundle so the
+# device can drive its pad/scene LEDs. Bindings (which pad triggers which cue)
+# live in boot.fnl via glow.bind.* -- see README_LIVE_CONTROL.md.
+CONTROLLER apc40.mdef
 `,
   },
   boot: {
@@ -158,16 +163,136 @@ CAP White 4
 `,
     },
   ],
+  mdefs: [
+    {
+      name: "apc40.mdef",
+      text: `# Akai APC40 mkII (USB MIDI clip launcher). Transcribed from Akai's
+# official "APC40 Mk2 Communications Protocol" v1.2, Generic Mode. MDF1 is
+# single-channel: the mkII multiplexes the track number onto the MIDI channel
+# (parseMidi ignores it), so per-track controls collapse to one entry each.
+
+CONTROLLER Akai APC40 mkII
+MIDI_CHANNEL 0
+
+# --- Pads (Note-on buttons) --------------------------------------------
+PAD 0 39      # 8x5 RGB clip-launch grid (notes 0x00..0x27)
+PAD 48 52     # per-track: record-arm, solo, activator, select, stop (0x30..0x34)
+PAD 58 66     # device / bank / view + crossfader A/B (0x3A..0x42)
+PAD 80 81     # master-select + stop-all-clips (0x50..0x51)
+PAD 82 86     # scene launch 1..5, RGB (0x52..0x56)
+PAD 87 103    # pan/sends/user/metronome/transport/nav/shift/tap/nudge (0x57..0x67)
+
+# --- Faders / absolute knobs (CC) --------------------------------------
+FADER CC 7   track      # 9 track faders (0x07, track = MIDI channel)
+FADER CC 14  master     # master fader (0x0E)
+FADER CC 15  crossfader # crossfader (0x0F)
+FADER CC 16 23          # 8 device-control knobs (0x10..0x17)
+FADER CC 48 55          # 8 track-control knobs (0x30..0x37)
+
+# --- Relative encoders (CC) --------------------------------------------
+ENCODER CC 13 relative-2c   # tempo knob (0x0D)
+ENCODER CC 47 relative-2c   # cue level (0x2F)
+
+# --- LED feedback ------------------------------------------------------
+# RGB clip grid: velocity picks a colour from the mkII's 128-entry palette
+# (representative subset). Blink/pulse variants use the MIDI channel, not
+# velocity, so aren't encoded here.
+LED NOTE 0 39 velocity
+  COLOR off       0
+  COLOR grey-dim  1
+  COLOR grey      2
+  COLOR white     3
+  COLOR red       5
+  COLOR orange    9
+  COLOR yellow    13
+  COLOR lime      17
+  COLOR green     21
+  COLOR spring    29
+  COLOR aqua      33
+  COLOR sky-blue  37
+  COLOR blue      41
+  COLOR indigo    45
+  COLOR violet    49
+  COLOR magenta   53
+  COLOR pink      57
+LED NOTE 82 86 velocity
+  COLOR off   0
+  COLOR white 3
+  COLOR red   5
+  COLOR green 21
+  COLOR blue  41
+LED NOTE 52 52 velocity
+  COLOR off   0
+  COLOR on    1
+  COLOR blink 2
+LED NOTE 66 66 velocity
+  COLOR off    0
+  COLOR yellow 1
+  COLOR orange 2
+`,
+    },
+    {
+      name: "apc40-original.mdef",
+      text: `# Akai APC40 (original 2009 model, not the mkII). Transcribed from Akai's
+# "Generic Communication Protocol for Akai APC40" Rev 1 (2009), Generic Mode.
+# The original's clip grid is five CLIP LAUNCH note rows (0x35..0x39) with the
+# track chosen by MIDI channel, and a fixed green/red/yellow LED palette (with
+# blink variants) rather than the mkII's RGB scheme. MDF1 is single-channel and
+# parseMidi ignores the channel, so per-track duplicates collapse to one entry.
+
+CONTROLLER Akai APC40
+MIDI_CHANNEL 0
+
+# --- Pads (Note-on buttons) --------------------------------------------
+PAD 48 52     # per-track: record-arm, solo, activator, select, clip-stop (0x30..0x34)
+PAD 53 57     # clip-launch rows 1..5 (0x35..0x39, track = MIDI channel)
+PAD 58 65     # device / view / record-mode buttons (0x3A..0x41)
+PAD 80 81     # master-select + stop-all-clips (0x50..0x51)
+PAD 82 86     # scene launch 1..5 (0x52..0x56)
+PAD 87 90     # pan + send A/B/C selectors (0x57..0x5A)
+PAD 91 101    # transport + navigation (0x5B..0x65)
+
+# --- Faders / absolute knobs (CC) --------------------------------------
+FADER CC 7   track      # 8 track level faders (0x07, track = MIDI channel)
+FADER CC 14  master     # master level (0x0E)
+FADER CC 15  crossfader # crossfader (0x0F)
+FADER CC 16 23          # 8 device-control knobs (0x10..0x17), absolute
+FADER CC 48 55          # 8 track-control knobs (0x30..0x37), absolute
+
+# --- Relative encoders (CC) --------------------------------------------
+ENCODER CC 47 relative-2c   # cue level (0x2F, two's-complement deltas)
+
+# --- LED feedback ------------------------------------------------------
+LED NOTE 53 57 velocity
+  COLOR off          0
+  COLOR green        1
+  COLOR green-blink  2
+  COLOR red          3
+  COLOR red-blink    4
+  COLOR yellow       5
+  COLOR yellow-blink 6
+LED NOTE 52 52 velocity
+  COLOR off   0
+  COLOR on    1
+  COLOR blink 2
+LED NOTE 82 86 velocity
+  COLOR off   0
+  COLOR on    1
+  COLOR blink 2
+`,
+    },
+  ],
 };
 
 // --- app state ---------------------------------------------------------
 
 const state = {
   workspace: structuredClone(DEFAULT_WORKSPACE),
-  selection: { kind: "show" },  // {kind:"show"} | {kind:"fdef", name} | {kind:"boot"}
+  selection: { kind: "show" },  // {kind:"show"} | {kind:"fdef", name} | {kind:"mdef", name} | {kind:"boot"}
   diagnostics: {
     show: { ok: false, err: "Not compiled yet", bundleBytes: null, loaded: null },
     fdefs: {},
+    mdefs: {},
     // boot.fnl: syntax-checked via the real Fennel compiler in-browser
     // (fennel-check.js), not the WASM show compiler above.
     boot: { checking: false, checked: false, ok: null, err: null },
@@ -232,8 +357,9 @@ async function main() {
   try {
     state.module = await createModule({ locateFile: (p) => "./wasm/" + p });
     state.wasmReady = true;
-    // Initial parse of all .fdef files.
+    // Initial parse of all .fdef and .mdef files.
     await reparseFdefs();
+    await reparseMdefs();
     render();
   } catch (e) {
     console.error("main() failed:", e);
@@ -279,7 +405,9 @@ async function compileShowNow() {
     const readFile = (path) => {
       const norm = path.replace(/^\.\//, "").replace(/^\//, "");
       const f = state.workspace.fdefs.find((x) => x.name === norm || x.name === path);
-      return f ? f.text : "";
+      if (f) return f.text;
+      const m = state.workspace.mdefs.find((x) => x.name === norm || x.name === path);
+      return m ? m.text : "";
     };
     const r = state.module.compileShow(state.workspace.show.text, readFile);
     if (!r.ok) {
@@ -348,11 +476,47 @@ async function reparseFdefs() {
   }
 }
 
+// .mdef (MIDI controller) parse -- parity with parseFdef. The WASM
+// parseController binding parses + encodes so we get the same live ok/err
+// feedback and encoded MDF1 size the .show compiler would produce.
+async function parseMdef(text) {
+  const r = state.module.parseController(text);
+  if (!r.ok) return { ok: false, err: r.err };
+  return {
+    ok: true,
+    def: {
+      name: r.name,
+      midiChannel: r.midiChannel,
+      padCount: r.padCount,
+      faderCount: r.faderCount,
+      encoderCount: r.encoderCount,
+      ledCount: r.ledCount,
+      colorCount: r.colorCount,
+      blobBytes: r.blobBytes,
+    },
+  };
+}
+
+async function reparseMdefs() {
+  const entries = await Promise.all(
+    state.workspace.mdefs.map(async (f) => [f.name, await parseMdef(f.text)]),
+  );
+  for (const [name, r] of entries) {
+    state.diagnostics.mdefs[name] = r.ok
+      ? { ok: true, err: "", def: r.def }
+      : { ok: false, err: r.err };
+  }
+}
+
 // --- file operations ---------------------------------------------------
 
 function currentText() {
   if (state.selection.kind === "show") return state.workspace.show.text;
   if (state.selection.kind === "boot") return state.workspace.boot.text;
+  if (state.selection.kind === "mdef") {
+    const m = state.workspace.mdefs.find((x) => x.name === state.selection.name);
+    return m ? m.text : "";
+  }
   const f = state.workspace.fdefs.find((x) => x.name === state.selection.name);
   return f ? f.text : "";
 }
@@ -367,6 +531,9 @@ function setText(text) {
     state.workspace.show.text = text;
   } else if (state.selection.kind === "boot") {
     state.workspace.boot.text = text;
+  } else if (state.selection.kind === "mdef") {
+    const m = state.workspace.mdefs.find((x) => x.name === state.selection.name);
+    if (m) m.text = text;
   } else {
     const f = state.workspace.fdefs.find((x) => x.name === state.selection.name);
     if (f) f.text = text;
@@ -377,6 +544,17 @@ function setText(text) {
     parseTimer = setTimeout(async () => {
       const r = await parseFdef(currentText());
       state.diagnostics.fdefs[state.selection.name] = r.ok
+        ? { ok: true, err: "", def: r.def }
+        : { ok: false, err: r.err };
+      render();
+    }, 250);
+  }
+  // Debounced re-parse of the edited .mdef.
+  if (state.selection.kind === "mdef") {
+    clearTimeout(parseTimer);
+    parseTimer = setTimeout(async () => {
+      const r = await parseMdef(currentText());
+      state.diagnostics.mdefs[state.selection.name] = r.ok
         ? { ok: true, err: "", def: r.def }
         : { ok: false, err: r.err };
       render();
@@ -455,6 +633,10 @@ function handleFiles(files) {
       } else if (lower.endsWith(".fdef")) {
         const others = state.workspace.fdefs.filter((f) => f.name !== file.name);
         state.workspace.fdefs = [...others, { name: file.name, text }];
+      } else if (lower.endsWith(".mdef")) {
+        const others = state.workspace.mdefs.filter((f) => f.name !== file.name);
+        state.workspace.mdefs = [...others, { name: file.name, text }];
+        reparseMdefs();
       }
       next();
     };
@@ -570,7 +752,7 @@ function renderTopbar() {
     el("input", {
       id: "file-input",
       type: "file",
-      accept: ".show,.fdef,.qxf,.gdtf,.json",
+      accept: ".show,.fdef,.mdef,.qxf,.gdtf,.json",
       multiple: "",
       style: "display:none",
       onchange: (e) => {
@@ -642,6 +824,35 @@ function renderSidebar() {
     );
   }
 
+  // Separator + section header for MIDI controllers (.mdef)
+  list.appendChild(el("div", { class: "sidebar-section" }, "Controllers"));
+  for (const m of state.workspace.mdefs) {
+    const d = state.diagnostics.mdefs[m.name];
+    list.appendChild(
+      fileRow(
+        m.name,
+        state.selection.kind === "mdef" && state.selection.name === m.name,
+        "mdef",
+        d?.ok,
+        () => (state.selection = { kind: "mdef", name: m.name }, render()),
+        () => downloadBlob(m.name, "text/plain", m.text),
+        () => copyText(m.text),
+        () => {
+          state.workspace.mdefs = state.workspace.mdefs.filter((x) => x.name !== m.name);
+          if (state.selection.kind === "mdef" && state.selection.name === m.name) {
+            state.selection = { kind: "show" };
+          }
+          render();
+        },
+      ),
+    );
+  }
+  if (state.workspace.mdefs.length === 0) {
+    list.appendChild(
+      el("div", { style: "padding: 8px 12px; color: var(--text-faint); font-style: italic;" }, "No controllers. Click ♪ to add one."),
+    );
+  }
+
   const footer = el("div", { class: "sidebar-footer" });
   if (state.diagnostics.show.ok && state.diagnostics.show.bundleBytes != null) {
     footer.appendChild(el("span", { class: "ok" }, `Last bundle: ${state.diagnostics.show.bundleBytes} bytes`));
@@ -682,6 +893,23 @@ function renderSidebar() {
         },
         icon("plus"),
       ),
+      el(
+        "button",
+        {
+          class: "btn btn-icon",
+          title: "New .mdef",
+          onclick: () => {
+            const name = `controller-${state.workspace.mdefs.length + 1}.mdef`;
+            state.workspace.mdefs.push({
+              name,
+              text: "CONTROLLER New Controller\nMIDI_CHANNEL 0\nPAD 0 7\n",
+            });
+            state.selection = { kind: "mdef", name };
+            reparseMdefs().then(render);
+          },
+        },
+        "♪",
+      ),
     ),
     list,
     footer,
@@ -715,7 +943,7 @@ function renderEditorPane() {
     { class: "editor-header" },
     el("span", { class: "file-icon", html: ICON.file }),
     el("span", {}, currentName()),
-    el("span", { class: "badge" }, state.selection.kind === "show" ? ".show" : ".fdef"),
+    el("span", { class: "badge" }, state.selection.kind === "show" ? ".show" : state.selection.kind === "mdef" ? ".mdef" : ".fdef"),
     el("div", { class: "spacer" }),
     el(
       "div",
@@ -728,6 +956,9 @@ function renderEditorPane() {
           onclick: () => {
             if (state.selection.kind === "show") {
               downloadBlob(state.workspace.show.name, "text/plain", state.workspace.show.text);
+            } else if (state.selection.kind === "mdef") {
+              const m = state.workspace.mdefs.find((x) => x.name === state.selection.name);
+              if (m) downloadBlob(m.name, "text/plain", m.text);
             } else {
               const f = state.workspace.fdefs.find((x) => x.name === state.selection.name);
               if (f) downloadBlob(f.name, "text/plain", f.text);
@@ -848,7 +1079,9 @@ function renderPreviewPane() {
           const readFile = (path) => {
             const norm = path.replace(/^\.\//, "").replace(/^\//, "");
             const f = state.workspace.fdefs.find((x) => x.name === norm || x.name === path);
-            return f ? f.text : "";
+            if (f) return f.text;
+            const m = state.workspace.mdefs.find((x) => x.name === norm || x.name === path);
+            return m ? m.text : "";
           };
           const r = state.module.compileShow(state.workspace.show.text, readFile);
           if (!r.ok) {
@@ -907,6 +1140,27 @@ function renderPreview() {
     );
     return root;
   }
+  // .mdef preview
+  if (state.selection.kind === "mdef") {
+    const dm = state.diagnostics.mdefs[state.selection.name];
+    if (!dm || !dm.ok || !dm.def) {
+      return errorBlock("Parse error", dm?.err ?? "Not parsed yet", "");
+    }
+    const md = dm.def;
+    const root = el("div", {});
+    root.appendChild(section("Controller", [
+      el("div", {}, md.name),
+      el("div", { style: "color: var(--text-dim);" }, `MIDI channel ${md.midiChannel} · ${md.blobBytes}-byte MDF1 blob`),
+    ]));
+    root.appendChild(section("Controls", [
+      row("Pads", String(md.padCount)),
+      row("Faders", String(md.faderCount)),
+      row("Encoders", String(md.encoderCount)),
+      row("LED ranges", String(md.ledCount)),
+      row("Colors", String(md.colorCount)),
+    ]));
+    return root;
+  }
   // .fdef preview
   const d = state.diagnostics.fdefs[state.selection.name];
   if (!d || !d.ok || !d.def) {
@@ -948,6 +1202,15 @@ function renderDiagnostics() {
       d?.ok,
       d?.err,
       d?.ok ? `${d.def.caps.length} caps, footprint ${d.def.footprint}` : null,
+    ));
+  }
+  for (const m of state.workspace.mdefs) {
+    const d = state.diagnostics.mdefs[m.name];
+    root.appendChild(diagRow(
+      m.name,
+      d?.ok,
+      d?.err,
+      d?.ok ? `${d.def.padCount} pads, ${d.def.faderCount} faders, ${d.def.blobBytes}-byte blob` : null,
     ));
   }
   return root;
