@@ -114,6 +114,13 @@ idf_component_register(
         ${GLOW_ROOT}/midi_input.cpp
         ${GLOW_ROOT}/osc_input.cpp
         ${GLOW_ROOT}/djlink_input.cpp
+        # USB-MIDI host: ESP-IDF ships usb_host_lib but no MIDI class
+        # driver -- this is that driver (REQUIRES usb below). Gated at
+        # runtime behind CONFIG_GLOW_USB_MIDI_HOST (Kconfig.projbuild,
+        # default off -- see usb_midi_input.h's hardware note); always
+        # compiled in (like every other #ifdef ESP_PLATFORM transport
+        # here) so flipping the Kconfig flag needs no CMakeLists change.
+        ${GLOW_ROOT}/usb_midi_input.cpp
         # F5: OTA over the existing web console httpd server, with A/B
         # rollback + self-validation (#ifdef ESP_PLATFORM guarded; see
         # ota_manager.h)
@@ -121,7 +128,7 @@ idf_component_register(
     INCLUDE_DIRS
         ${GLOW_ROOT}
         ${GLOW_ROOT}/third_party/lua
-    REQUIRES esp_dmx esp_wifi lwip lua
+    REQUIRES esp_dmx esp_wifi lwip lua usb
     PRIV_REQUIRES littlefs esp_http_server driver app_update
     EMBED_FILES
         # The console bundle web_input.cpp's static_file_handler serves

@@ -175,9 +175,11 @@ named ranges* onto PFX2. Pick the mode, review the channel table, edit if needed
 - **Matrices**: Art-Net over WiFi → an Art-Net→DMX bridge.
 - **Inputs**: MIDI (DIN/UART, with MIDI OUT for LED feedback — see `.mdef`,
   FORMAT.md), OSC (UDP), a web console (HTTP + WebSocket) served from the
-  device, and DJ-Link. USB-MIDI host is deliberately not implemented yet
-  (see README_LIVE_CONTROL.md's "Out of Scope") — it needs a board respin
-  for VBUS; a USB-host-to-DIN adapter works today with no hardware change.
+  device, DJ-Link, and USB-MIDI host (`usb_midi_input.cpp`, opt-in via
+  `CONFIG_GLOW_USB_MIDI_HOST`, off by default — see README_LIVE_CONTROL.md's
+  "Out of Scope"). USB-MIDI host needs a board respin for VBUS (the ESP32
+  must supply 5V to the controller); a USB-host-to-DIN adapter works today
+  with no hardware change if you'd rather skip that.
 - **Status LED**: GPIO 2.
 
 Render task pinned to core 1; WiFi/lwIP on core 0, so network work never jitters DMX timing.

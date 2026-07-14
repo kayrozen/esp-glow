@@ -70,6 +70,7 @@
 #include "led_feedback.h"
 #include "osc_input.h"
 #include "djlink_input.h"
+#include "usb_midi_input.h"
 #include "freertos/task.h"  // xTaskCreatePinnedToCore (midi_uart_task/osc_server_task/djlink_*_task)
 
 // The vendored Fennel compiler, embedded via EMBED_FILES (see
@@ -951,6 +952,16 @@ extern "C" void app_main(void) {
                           nullptr, 5, nullptr, 0);
   xTaskCreatePinnedToCore(djlink_status_task, "djlink_status", 4096 / sizeof(StackType_t),
                           nullptr, 5, nullptr, 0);
+
+#ifdef CONFIG_GLOW_USB_MIDI_HOST
+  // B2: this is a board change, not just a firmware flag -- see
+  // usb_midi_input.h's hardware note and Kconfig.projbuild's help text.
+  // Core 0 (with WiFi), same as every other network/USB transport task;
+  // watch render_task's `dropped` stat for coexistence regressions.
+  usb_midi_input_init(*g_controlQueue);
+  xTaskCreatePinnedToCore(usb_midi_host_task, "usb_midi", 4096 / sizeof(StackType_t),
+                          nullptr, 5, nullptr, 0);
+#endif
 
   const char* showStatus;
   if (from_bundle) {
