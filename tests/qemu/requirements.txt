@@ -1,0 +1,11 @@
+# QEMU Boot Test Harness Dependencies
+#
+# Also requires idf.py + esptool.py on PATH (source an ESP-IDF environment:
+# `. $IDF_PATH/export.sh`) for building the firmware and merging the flash
+# image, and a qemu-system-xtensa with esp32s3 machine support on PATH --
+# see README.md. None of those ship via this file.
+
+pytest>=7.0
+
+# Optional but recommended for better output
+pytest-timeout>=2.1

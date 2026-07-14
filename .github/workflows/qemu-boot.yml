@@ -1,0 +1,73 @@
+name: QEMU boot test
+on:
+  push:
+  pull_request:
+jobs:
+  qemu-boot:
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:v5.1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache ESP Component Manager packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.espressif
+          key: ${{ runner.os }}-esp-components-${{ hashFiles('firmware/main/idf_component.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-esp-components-
+
+      - name: Build the show bundle (raw "show" partition input)
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror -O2 \
+              provision_main.cpp provision.cpp profile_encoder.cpp controller_encoder.cpp \
+              fixture_profile.cpp mdef.cpp pixel_matrix.cpp color.cpp vec_math.cpp \
+              aim.cpp show_bundle.cpp -o /tmp/provision -lm
+          mkdir -p firmware/main/data
+          /tmp/provision samples/demo.show firmware/main/data/show.shw1
+
+      # A CONFIG_GLOW_SELFTEST=y build, same layered sdkconfig
+      # tests/hil/conftest.py flashes to real hardware -- NOT the plain
+      # release build the "Firmware build" workflow produces, which never
+      # prints the GLOW-TEST: telemetry this suite asserts on.
+      - name: Build selftest firmware (CONFIG_GLOW_SELFTEST=y)
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py -C firmware -B firmware/build-qemu-selftest \
+            -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.selftest.defaults" \
+            build
+
+      # Prebuilt Espressif QEMU (xtensa, ESP32-S3 machine support). This
+      # release's URL/checksum come straight from a current ESP-IDF's
+      # tools/tools.json "qemu-xtensa" entry -- v5.1 (pinned above for the
+      # firmware build itself) predates idf.py's own qemu integration, so
+      # this is installed independently rather than via `idf_tools.py
+      # install qemu-xtensa`. See tests/qemu/README.md for the from-source
+      # alternative if this release is ever pulled.
+      - name: Install Espressif QEMU (xtensa)
+        run: |
+          QEMU_URL="https://github.com/espressif/qemu/releases/download/esp-develop-9.2.2-20250817/qemu-xtensa-softmmu-esp_develop_9.2.2_20250817-x86_64-linux-gnu.tar.xz"
+          QEMU_SHA256="588bfaccd0f929650655d10a580f020c6ba9c131712d8fa519280081b8d126eb"
+          curl -fL -o /tmp/qemu-xtensa.tar.xz "$QEMU_URL"
+          echo "${QEMU_SHA256}  /tmp/qemu-xtensa.tar.xz" | sha256sum -c -
+          mkdir -p /opt/qemu-xtensa
+          tar -xJf /tmp/qemu-xtensa.tar.xz -C /opt/qemu-xtensa
+          dirname "$(find /opt/qemu-xtensa -name qemu-system-xtensa -type f | head -1)" >> "$GITHUB_PATH"
+
+      - name: Run QEMU boot tests
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          qemu-system-xtensa --version
+          pip install -r tests/qemu/requirements.txt
+          cd tests/qemu
+          GLOW_SKIP_BUILD=1 pytest -v --tb=short
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qemu-boot-log
+          path: tests/qemu/qemu_test.log
+          if-no-files-found: ignore
