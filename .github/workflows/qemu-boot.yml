@@ -100,7 +100,12 @@ jobs:
           . "$IDF_PATH/export.sh"
           ELF="firmware/build-qemu-selftest/esp-glow.elf"
           ADDR2LINE="$(find /opt/esp/tools -type f -name 'xtensa-esp32s3-elf-addr2line' | head -1)"
-          ADDRS="$(grep -oE '0x[0-9a-fA-F]{8}' /tmp/pytest_output.log | sort -u)"
+          # grep exits 1 on "no matches" (the good case: no crash, no
+          # addresses to decode) -- under this step's default `set -e
+          # -o pipefail`, that would otherwise kill the step and mark a
+          # fully green test run as failed. `|| true` makes "nothing to
+          # decode" a normal outcome instead of an error.
+          ADDRS="$(grep -oE '0x[0-9a-fA-F]{8}' /tmp/pytest_output.log | sort -u || true)"
           if [ -z "$ADDR2LINE" ]; then
             echo "xtensa-esp32s3-elf-addr2line not found on PATH; skipping decode."
           elif [ -z "$ADDRS" ]; then
