@@ -36,7 +36,8 @@ LUA_C_OBJECTS = $(LUA_C_SOURCES:.c=.o)
 GLOW_LUA_SOURCES = lua_vm.cpp glow_lua_api.cpp lua_effect.cpp glow_fennel.cpp eval_queue.cpp \
                    vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp show.cpp \
                    oscillator.cpp color.cpp effects.cpp show_control.cpp pixel_matrix.cpp \
-                   pixel_patterns.cpp beat_clock.cpp
+                   pixel_patterns.cpp beat_clock.cpp mdef_parser.cpp midi_output.cpp \
+                   live_control.cpp
 
 # --- test_aim: aim/vec_math geometry tests ---
 AIM_SOURCES = vec_math.cpp aim.cpp test_aim.cpp
@@ -75,7 +76,8 @@ PIXEL_MATRIX_TARGET  = test_pixel_matrix
 
 # --- test_provision: provisioning compiler/loader tests ---
 PROVISION_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp \
-                    color.cpp pixel_matrix.cpp provision.cpp show_bundle.cpp test_provision.cpp
+                    color.cpp pixel_matrix.cpp provision.cpp show_bundle.cpp test_provision.cpp \
+                    mdef_parser.cpp
 PROVISION_OBJECTS = $(PROVISION_SOURCES:.cpp=.o)
 PROVISION_TARGET  = test_provision
 
@@ -394,6 +396,7 @@ clean:
 	      $(DJLINK_MASTER_OBJECTS) $(DJLINK_MASTER_TARGET) \
 	      $(SAFE_BLACKOUT_OBJECTS) $(SAFE_BLACKOUT_TARGET) \
       $(MDEF_PARSER_OBJECTS) $(MDEF_PARSER_TARGET) \
+      $(USB_MIDI_HOST_OBJECTS) $(USB_MIDI_HOST_TARGET) \
 	      $(FDEF_CHECK_OBJECTS) $(FDEF_CHECK_TARGET) \
 	      $(LUA_C_OBJECTS)
 	rm -f $(wildcard *.d) $(wildcard third_party/lua/*.d)
@@ -407,3 +410,34 @@ clean:
 
 # Rebuild
 rebuild: clean test
+
+# --- test_midi_output: MIDI OUT with change detection and rate limiting ---
+MIDI_OUTPUT_SOURCES = midi_output.cpp test_midi_output.cpp
+MIDI_OUTPUT_OBJECTS = $(MIDI_OUTPUT_SOURCES:.cpp=.o)
+MIDI_OUTPUT_TARGET  = test_midi_output
+$(MIDI_OUTPUT_TARGET): $(MIDI_OUTPUT_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(MIDI_OUTPUT_OBJECTS) -o $(MIDI_OUTPUT_TARGET) -lm
+
+# --- test_usb_midi_host: USB-MIDI host transport tests (host-stubbed) ---
+USB_MIDI_HOST_SOURCES = usb_midi_host.cpp test_usb_midi_host.cpp
+USB_MIDI_HOST_OBJECTS = $(USB_MIDI_HOST_SOURCES:.cpp=.o)
+USB_MIDI_HOST_TARGET  = test_usb_midi_host
+$(USB_MIDI_HOST_TARGET): $(USB_MIDI_HOST_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(USB_MIDI_HOST_OBJECTS) -o $(USB_MIDI_HOST_TARGET) -lm
+
+# --- test_midi_bindings: glow.bind.* and glow.led.* API tests ---
+MIDI_BINDINGS_SOURCES = glow_lua_api.cpp mdef_parser.cpp midi_output.cpp lua_vm.cpp \
+                        lua_effect.cpp show.cpp show_control.cpp fixture_profile.cpp \
+                        beat_clock.cpp effects.cpp control_queue_freertos.cpp \
+                        eval_queue_freertos.cpp render_pacing.cpp vec_math.cpp aim.cpp \
+                        color.cpp oscillator.cpp pixel_matrix.cpp pixel_patterns.cpp \
+                        profile_encoder.cpp live_control.cpp apply_loaded_show.cpp \
+                        provision.cpp web_protocol.cpp web_input.cpp scripts_storage.cpp \
+                        safe_blackout.cpp djlink_input.cpp djlink_parser.cpp \
+                        djlink_master_tracker.cpp artnet_sink.cpp dmx_sink.cpp \
+                        midi_input.cpp midi_realtime.cpp osc_input.cpp osc_parser.cpp \
+                        test_midi_bindings.cpp
+MIDI_BINDINGS_OBJECTS = $(MIDI_BINDINGS_SOURCES:.cpp=.o)
+MIDI_BINDINGS_TARGET  = test_midi_bindings
+$(MIDI_BINDINGS_TARGET): $(MIDI_BINDINGS_OBJECTS) $(LUA_C_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(MIDI_BINDINGS_OBJECTS) $(LUA_C_OBJECTS) -o $(MIDI_BINDINGS_TARGET) -lm

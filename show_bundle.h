@@ -5,6 +5,7 @@
 #include "pixel_matrix.h"
 #include <vector>
 #include <cstdint>
+#include <string>
 
 // SHW1 bundle format: little-endian, portable binary encoding
 // Header:
@@ -14,6 +15,7 @@
 //   profileCount  u16
 //   fixtureCount  u16
 //   matrixCount   u16
+//   mdefCount     u16        (number of .mdef controller definitions)
 // Universe table (universeCount entries):
 //   transport     u8   (0=Dmx, 1=ArtNet, 2=Sacn, 3=Unused)
 // Profile table (profileCount entries):
@@ -37,6 +39,9 @@
 //   order         u8            (ColorOrder value)
 //   startUniverse u8
 //   startChannel  u16
+// Mdef table (mdefCount entries):
+//   blobLen       u16
+//   blob          blobLen bytes   (a .mdef controller definition)
 
 enum class UniverseTransport : uint8_t {
   Dmx = 0,
@@ -58,6 +63,7 @@ struct LoadedShow {
   UniverseTransport transport[8] = {};
   std::vector<PatchEntry> fixtures;
   std::vector<MatrixMap> matrices;
+  std::vector<std::string> mdefs;  // parsed .mdef controller definitions
 };
 
 // Load a SHW1 bundle from a byte buffer.

@@ -12,12 +12,15 @@
 
 #include "beat_clock.h"  // glow::BeatClock
 #include "lua_glow_include.h"
+#include "mdef_parser.h"  // glow::mdef::ControllerDef
+#include "midi_output.h"  // glow::MidiOutput
 #include "show.h"  // IEffect, CapIntent, AimIntent
 
 class ShowController;
 class PixelMatrix;
 class IPixelPattern;
 class LuaEffect;
+class LiveControl;
 namespace glow {
 class LuaVM;
 }
@@ -108,6 +111,18 @@ public:
   // this is host-tested like the rest of this file.
   void pollNewlyDisabledEffects(std::vector<std::pair<std::string, std::string>>& out);
 
+  // Set the controller definition (.mdef) for LED feedback.
+  // Takes ownership of the pointer.
+  void setControllerDef(std::unique_ptr<glow::mdef::ControllerDef> def);
+  
+  // Set the MIDI output manager for LED feedback.
+  // Pointer is borrowed (lifetime managed elsewhere).
+  void setMidiOutput(glow::MidiOutput* out);
+  
+  // Set the LiveControl instance for storing MIDI bindings.
+  // Pointer is borrowed (lifetime managed elsewhere).
+  void setLiveControl(LiveControl* ctrl);
+
 private:
   static int l_set(lua_State* L);
   static int l_aim(lua_State* L);
@@ -130,6 +145,15 @@ private:
   static int l_bpm(lua_State* L);
   static int l_locked(lua_State* L);
   static int l_tap(lua_State* L);
+  
+  // glow.bind.* API
+  static int l_bind_pad(lua_State* L);
+  static int l_bind_fader(lua_State* L);
+  static int l_bind_clear(lua_State* L);
+  
+  // glow.led.* API
+  static int l_led_set(lua_State* L);
+  static int l_led_auto(lua_State* L);
 
   static GlowLuaApi& self(lua_State* L);
 
@@ -167,4 +191,11 @@ private:
   std::vector<std::unique_ptr<LuaEffect>> luaEffects_;         // wrapped bare Lua fns
   std::vector<bool> luaEffectReported_;                        // parallel to luaEffects_
   std::vector<std::unique_ptr<IPixelPattern>> ownedPatterns_;  // glow.matrix.pattern
+  
+  // LED feedback support
+  std::unique_ptr<glow::mdef::ControllerDef> controllerDef_;
+  glow::MidiOutput* midiOutput_ = nullptr;  // borrowed
+  
+  // LiveControl for storing MIDI bindings (borrowed)
+  LiveControl* liveControl_ = nullptr;
 };

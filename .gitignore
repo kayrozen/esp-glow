@@ -1,35 +1,15 @@
 ```
 # Compiled and build artifacts
+*.d
 *.o
 *.obj
 *.out
-build/
-dist/
-
+test_*
 # Dependencies
-node_modules/
-venv/
-.venv/
-__pycache__/
-*.egg-info/
-.pytest_cache/
-.mypy_cache/
-
-# Editors
-.vscode/
-.idea/
-*.swp
-*.swo
-
 # Logs and temp files
 *.log
 *.tmp
-*.temp
-
-# System files
-.DS_Store
-Thumbs.db
-
+*.swp
 # Environment
 .env
 .env.local

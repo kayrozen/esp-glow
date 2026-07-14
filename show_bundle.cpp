@@ -1,5 +1,6 @@
 #include "show_bundle.h"
 #include "vec_math.h"
+#include "mdef_parser.h"
 #include <cstring>
 #include <cstddef>
 
@@ -60,8 +61,8 @@ bool loadShow(const uint8_t* data, size_t len, LoadedShow& out) {
 
   BundleReader reader(data, len);
 
-  // Read header (4 bytes magic + 1 version + 1 universeCount + 2 profileCount + 2 fixtureCount + 2 matrixCount = 12 bytes)
-  if (!reader.ensureRemaining(12)) return false;
+  // Read header (4 bytes magic + 1 version + 1 universeCount + 2 profileCount + 2 fixtureCount + 2 matrixCount + 2 mdefCount = 14 bytes)
+  if (!reader.ensureRemaining(14)) return false;
 
   uint8_t magic[4];
   if (!reader.readBytes(magic, 4)) return false;
@@ -77,10 +78,11 @@ bool loadShow(const uint8_t* data, size_t len, LoadedShow& out) {
   if (!reader.readU8(universeCount)) return false;
   if (universeCount > 8) return false;
 
-  uint16_t profileCount, fixtureCount, matrixCount;
+  uint16_t profileCount, fixtureCount, matrixCount, mdefCount;
   if (!reader.readU16(profileCount)) return false;
   if (!reader.readU16(fixtureCount)) return false;
   if (!reader.readU16(matrixCount)) return false;
+  if (!reader.readU16(mdefCount)) return false;
 
   out.universeCount = universeCount;
 
@@ -209,6 +211,32 @@ bool loadShow(const uint8_t* data, size_t len, LoadedShow& out) {
     m.startChannel = startChannel;
 
     out.matrices.push_back(m);
+  }
+
+  // Read mdef table (blobLen + blob per entry)
+  for (int i = 0; i < mdefCount; i++) {
+    uint16_t blobLen;
+    if (!reader.readU16(blobLen)) return false;
+
+    if (!reader.ensureRemaining(blobLen)) return false;
+
+    // Extract blob as string
+    std::string mdefStr(reinterpret_cast<const char*>(data + reader.getPos()), blobLen);
+    
+    // Validate: try to parse it
+    glow::mdef::ControllerDef def;
+    char err[128];
+    if (!glow::mdef::parseMdef(mdefStr.data(), mdefStr.size(), def, err, sizeof(err))) {
+      return false;  // invalid .mdef in bundle
+    }
+    
+    out.mdefs.push_back(mdefStr);
+
+    // Advance reader past blob
+    uint8_t dummy;
+    for (int j = 0; j < blobLen; j++) {
+      if (!reader.readU8(dummy)) return false;
+    }
   }
 
   return true;

@@ -610,6 +610,7 @@ CompileResult compileShow(const std::string& showText,
   writeU16(profileCount);
   writeU16(fixtureCount);
   writeU16(matrixCount);
+  writeU16(0);  // mdefCount = 0 for now (no .mdef files in test fixtures)
 
   // Universe table
   for (int i = 0; i < universeCount; i++) {

@@ -481,6 +481,88 @@ TEST(loader_profileindex_out_of_range) {
   CHECK(!loadShow(bundle.data(), bundle.size(), loaded));
 }
 
+TEST(loader_mdef_roundtrip) {
+  // Create a minimal bundle with an mdef section
+  std::vector<uint8_t> bundle;
+  bundle.push_back('S');
+  bundle.push_back('H');
+  bundle.push_back('W');
+  bundle.push_back('1');
+  bundle.push_back(1);  // version
+  bundle.push_back(1);  // universeCount
+  bundle.push_back(0);  // profileCount (low byte)
+  bundle.push_back(0);  // profileCount (high byte)
+  bundle.push_back(0);  // fixtureCount
+  bundle.push_back(0);
+  bundle.push_back(0);  // matrixCount
+  bundle.push_back(0);
+  bundle.push_back(1);  // mdefCount = 1
+  bundle.push_back(0);
+  bundle.push_back(0);  // universe transport
+
+  // Add a simple .mdef blob
+  const char* mdefSrc = 
+    "CONTROLLER TestPad\n"
+    "MIDI_CHANNEL 1\n"
+    "PAD 53 92\n"
+    "LED NOTE 53 92 velocity\n"
+    "  COLOR off 0\n"
+    "  COLOR green 1\n"
+    "  COLOR red 3\n";
+  
+  uint16_t mdefLen = static_cast<uint16_t>(strlen(mdefSrc));
+  bundle.push_back(mdefLen & 0xFF);
+  bundle.push_back((mdefLen >> 8) & 0xFF);
+  for (size_t i = 0; i < mdefLen; i++) {
+    bundle.push_back(static_cast<uint8_t>(mdefSrc[i]));
+  }
+
+  LoadedShow loaded;
+  CHECK(loadShow(bundle.data(), bundle.size(), loaded));
+  CHECK(loaded.mdefs.size() == 1);
+  
+  // Parse the loaded mdef to verify it's valid
+  glow::mdef::ControllerDef def;
+  char err[128];
+  CHECK(glow::mdef::parseMdef(loaded.mdefs[0].data(), loaded.mdefs[0].size(), def, err, sizeof(err)));
+  CHECK(def.name == "TestPad");
+  CHECK(def.controls.size() == 1);
+  CHECK(def.controls[0].startId == 53);
+  CHECK(def.controls[0].endId == 92);
+}
+
+TEST(loader_invalid_mdef_fails) {
+  // Create a bundle with an invalid .mdef
+  std::vector<uint8_t> bundle;
+  bundle.push_back('S');
+  bundle.push_back('H');
+  bundle.push_back('W');
+  bundle.push_back('1');
+  bundle.push_back(1);  // version
+  bundle.push_back(1);  // universeCount
+  bundle.push_back(0);  // profileCount
+  bundle.push_back(0);
+  bundle.push_back(0);  // fixtureCount
+  bundle.push_back(0);
+  bundle.push_back(0);  // matrixCount
+  bundle.push_back(0);
+  bundle.push_back(1);  // mdefCount = 1
+  bundle.push_back(0);
+  bundle.push_back(0);  // universe transport
+
+  // Invalid .mdef blob (unknown token)
+  const char* badMdef = "INVALID_TOKEN xyz\n";
+  uint16_t mdefLen = static_cast<uint16_t>(strlen(badMdef));
+  bundle.push_back(mdefLen & 0xFF);
+  bundle.push_back((mdefLen >> 8) & 0xFF);
+  for (size_t i = 0; i < mdefLen; i++) {
+    bundle.push_back(static_cast<uint8_t>(badMdef[i]));
+  }
+
+  LoadedShow loaded;
+  CHECK(!loadShow(bundle.data(), bundle.size(), loaded));  // should fail on invalid mdef
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -508,6 +590,8 @@ int main() {
   RUN_TEST(loader_truncated_header);
   RUN_TEST(loader_truncated_fixture_table);
   RUN_TEST(loader_profileindex_out_of_range);
+  RUN_TEST(loader_mdef_roundtrip);
+  RUN_TEST(loader_invalid_mdef_fails);
 
   printf("\n=== Test Summary ===\n");
   printf("Passed: %d\n", testsPassed);
