@@ -1,93 +1,37 @@
-# Prerequisites
-*.d
-
-# Compiled Object files
-*.slo
-*.lo
+```
+# Compiled and build artifacts
 *.o
 *.obj
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Linker files
-*.ilk
-
-# Debugger Files
-*.pdb
-
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
-*.so.*
-
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
-
-# Executables
-*.exe
 *.out
-*.app
-test_aim
-
-# Build directories
 build/
-Build/
-build-*/
+dist/
 
-# CMake generated files
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-Makefile
-install_manifest.txt
-compile_commands.json
+# Dependencies
+node_modules/
+venv/
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
 
-# Temporary files & merge cruft
-*.tmp
-*.log
-*.bak
+# Editors
+.vscode/
+.idea/
 *.swp
-*.rej
-*.orig
+*.swo
 
-# vcpkg
-vcpkg_installed/
+# Logs and temp files
+*.log
+*.tmp
+*.temp
 
-# debug information files
-*.dwo
+# System files
+.DS_Store
+Thumbs.db
 
-# test output & cache
-Testing/
-.cache/
-
-# Test executables
-test_*
-!test_*.cpp
-!test_*.c
-!test_*.py
-
-# fdef_check: host CLI built from fdef_check.cpp, used by
-# web/shared/importers/test-importers.mjs as its round-trip oracle.
-fdef_check
-!fdef_check.cpp
-
-# WASM build artifacts (rebuilt in CI, not committed)
-web/provision-wasm/build/
-web/provision-wasm/provision-wasm.js
-web/provision-wasm/provision-wasm.wasm
-web/provisioner-static/wasm/
-
-# Firmware build artifacts (rebuilt in CI, not committed)
-firmware/build/
-firmware/main/data/show.shw1
+# Environment
+.env
+.env.local
+*.env.*
+```
