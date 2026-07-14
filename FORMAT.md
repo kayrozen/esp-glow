@@ -245,3 +245,155 @@ If any rule is violated, the parser returns `false` and does not modify the outp
 - The `semantic` byte on each v2 range record is reserved for a future "point this at the nearest red" colour-wheel-to-RGB mapping layer -- v3 scope, unused today.
 - The name field is optional and is never used by the apply functions; it is for debugging and tooling only. The same is true of range names for `applyRangeByIndex` (only `applyRangeByName` reads them); both are read by introspection (`rangeName`, Lua's `glow.ranges`).
 - Inverted flags and default values are stored per-capability to support fixtures with varying conventions.
+
+# MDF1 Controller Definition Format
+
+## Overview
+
+MDF1 is the MIDI twin of PFX1: a compact binary format describing MIDI
+*hardware* -- which pads/faders/encoders exist, at what note/CC number, and
+how each one's LED is driven. It deliberately encodes no cue/scene bindings
+("note 60 -> cue chorus"); that mapping is show-specific and belongs in
+Fennel (`glow.bind.*`, live-editable), the same split `.fdef`/`.show`
+already draws between fixture hardware and the show that drives it.
+
+Without an MDF1 profile, LED feedback is impossible -- you cannot light a
+pad if you don't know it exists, what note addresses it, or how its LED is
+driven. Bindings alone (`glow.bind.pad`/`glow.bind.fader`) need no format at
+all: they address a note/CC number directly, exactly like `parseMidi`
+already does (`live_control.h`).
+
+The on-device runtime type is `MidiControllerProfile` (`mdef.h`): fixed-size
+arrays, no heap, copied by value into `LoadedShow::controllers`
+(`show_bundle.h`) -- the same discipline as `FixtureProfile`. The text
+grammar (`.mdef`, see `provision.h`) and its encoder (`controller_encoder.h`'s
+`ControllerBuilder`) are host-tool-only and never linked into firmware.
+
+## Format Specification
+
+Little-endian throughout, like PFX1.
+
+### Header (13 bytes + name)
+
+| Offset | Size | Name         | Type    | Description |
+|--------|------|--------------|---------|-------------|
+| 0      | 4    | magic        | uint8[] | ASCII "MDF1" |
+| 4      | 1    | version      | uint8   | Format version: 1 |
+| 5      | 1    | flags        | uint8   | Reserved, must be 0 |
+| 6      | 1    | midiChannel  | uint8   | 0 = any (0..16); parseMidi already ignores channel |
+| 7      | 1    | nameLen      | uint8   | Length of controller name (0 allowed) |
+| 8      | 1    | padCount     | uint8   | 0..MDEF_MAX_PADS=32 |
+| 9      | 1    | faderCount   | uint8   | 0..MDEF_MAX_FADERS=16 |
+| 10     | 1    | encoderCount | uint8   | 0..MDEF_MAX_ENCODERS=16 |
+| 11     | 1    | ledCount     | uint8   | 0..MDEF_MAX_LED_RANGES=8 |
+| 12     | 1    | colorCount   | uint8   | Total COLOR entries across every LED range, 0..MDEF_MAX_COLORS=96 |
+| 13     | nameLen | name      | uint8[] | UTF-8 controller name, NOT null-terminated. Parsed over but never stored in `MidiControllerProfile` (debugging/tooling only, same convention as PFX1's fixture name) |
+
+### Pad Records (2 bytes each, padCount entries)
+
+| Byte | Type  | Name     | Description |
+|------|-------|----------|-------------|
+| 0    | uint8 | noteFrom | 0..127 |
+| 1    | uint8 | noteTo   | 0..127, inclusive, >= noteFrom. A single pad has noteFrom == noteTo |
+
+### Fader Records (4 bytes each, faderCount entries)
+
+| Byte | Type   | Name    | Description |
+|------|--------|---------|-------------|
+| 0    | uint8  | ccFrom  | 0..127 |
+| 1    | uint8  | ccTo    | 0..127, inclusive, >= ccFrom |
+| 2-3  | uint16 | nameOff | Offset into the trailing name blob, or 0xFFFF if unnamed |
+
+### Encoder Records (3 bytes each, encoderCount entries)
+
+| Byte | Type  | Name   | Description |
+|------|-------|--------|-------------|
+| 0    | uint8 | ccFrom | 0..127 |
+| 1    | uint8 | ccTo   | 0..127, inclusive, >= ccFrom |
+| 2    | uint8 | mode   | 0 = absolute, 1 = relative-2c (two's complement), 2 = relative-signmag (sign+magnitude) |
+
+Relative encoders send deltas, not positions, and the encoding is
+vendor-specific -- see `decodeEncoderDelta` (`mdef.h`/`mdef.cpp`). `absolute`
+is the safe default when unsure: it degrades to a plain fader instead of
+jumping wildly or running backwards.
+
+### LED Records (7 bytes each, ledCount entries)
+
+| Byte | Type   | Name        | Description |
+|------|--------|-------------|-------------|
+| 0    | uint8  | msgType     | 0 = Note (note-on), 1 = Cc (control change) |
+| 1    | uint8  | addrFrom    | Note or CC number, 0..127 |
+| 2    | uint8  | addrTo      | Note or CC number, 0..127, inclusive, >= addrFrom |
+| 3    | uint8  | semantic    | 0 = velocity (data byte selects a colour from the palette below), 1 = value (data byte is a raw level, e.g. an LED ring) |
+| 4-5  | uint16 | colorOffset | Index into the profile-wide colour table (below) where this range's palette starts |
+| 6    | uint8  | colorCount  | Number of colour entries in this range's palette |
+
+An LED record declares how a block of pads/faders (typically the same
+address range as a preceding PAD/FADER record, though this isn't enforced)
+lights up. `colorOffset`/`colorCount` slice into the global colour table in
+declaration order -- each LED range owns a contiguous, non-overlapping
+slice.
+
+### Colour Records (3 bytes each, colorCount entries, profile-wide)
+
+| Byte | Type   | Name    | Description |
+|------|--------|---------|-------------|
+| 0-1  | uint16 | nameOff | Offset into the trailing name blob; always present (COLOR always names its colour) |
+| 2    | uint8  | value   | MIDI data byte (0..127) that selects this colour when sent as the LED message's velocity/value byte |
+
+### Name Blob
+
+Immediately after the colour records: the rest of the blob is a UTF-8,
+NUL-separated name blob (fader names and colour names share it, in
+declaration order, undeduplicated -- same convention as PFX2's range name
+blob). Its length is not stored explicitly -- it is every remaining byte to
+the end of the buffer.
+
+**Total blob size:** `13 + nameLen + 2*padCount + 4*faderCount + 3*encoderCount + 7*ledCount + 3*colorCount + nameBlobLen` bytes.
+
+## Validation Rules
+
+`parseMidiController` enforces (same strict, never-reads-out-of-bounds
+security-boundary contract as `parseProfile`):
+
+1. Buffer at least 13 bytes; magic "MDF1"; version 1; flags 0; midiChannel <= 16.
+2. Each of padCount/faderCount/encoderCount/ledCount/colorCount within its MDEF_MAX_*.
+3. Buffer at least the declared header + table sizes.
+4. Every pad/fader/encoder/LED `addrFrom`/`ccFrom` <= its `addrTo`/`ccTo`, both <= 127.
+5. Encoder `mode` in {0,1,2}; LED `msgType` in {0,1}; LED `semantic` in {0,1}.
+6. LED `colorOffset`/`colorCount` fits within the profile-wide colour table.
+7. Every fader (if not 0xFFFF) and colour `nameOff` lands on a NUL-terminated string within the trailing name blob.
+
+## `.mdef` Text Grammar
+
+Compiled by `provision.cpp`'s `parseControllerDef`/`encodeController` (see
+`provision.h`), the same two-step "text -> builder struct -> binary blob"
+pipeline as `.fdef`/`ProfileBuilder`:
+
+```
+CONTROLLER Akai APC40 mkII
+MIDI_CHANNEL 1                  # 0 = any (default)
+PAD  53 92                      # a contiguous block of pads: note 53..92
+PAD  0                          # a single pad at note 0
+FADER CC 48 55                  # faders on CC 48..55
+FADER CC 7   master             # a named single fader
+ENCODER CC 16 23                # relative encoders default to absolute
+ENCODER CC 16 23 relative-2c    # or: relative-signmag | absolute
+LED NOTE 53 92 velocity         # pads 53..92: LED colour = note-on velocity
+  COLOR off    0
+  COLOR green  1
+  COLOR red    3
+LED CC 48 55 value              # fader LED rings driven by CC value 0..127
+```
+
+A `.show` file embeds one with `CONTROLLER <deffile>` (mirrors `FIXTURE
+<deffile> <universe> <base>`), folding the compiled MDF1 blob into the SHW1
+bundle's v2 controller table -- see the "SHW1 bundle format" section
+(`show_bundle.h`).
+
+## Out of Scope
+
+- Binding pads/faders/encoders to cues/scenes -- that's `glow.bind.*`
+  (Fennel, live-editable, no file format; see README_LIVE_CONTROL.md).
+- Bidirectional display feedback (text on a controller's own LCD).
+- MIDI 2.0 / MPE.

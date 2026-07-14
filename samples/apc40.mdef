@@ -1,0 +1,42 @@
+# samples/apc40.mdef — Akai APC40 mkII (a real, shipping USB/DIN-adaptable
+# clip launcher), demonstrating every .mdef construct: pads, a named and an
+# unnamed fader range, a relative encoder, and two LED ranges with distinct
+# colour palettes. See FORMAT.md's "MDF1 Controller Definition Format"
+# section for the full grammar.
+#
+# Values here describe the mkII's clip-launch grid and channel strip
+# layout; the note/CC numbers and colour-velocity mapping are Akai's own
+# (firmware-revision-dependent in the fine details -- treat the LED
+# palettes below as a representative subset, not an exhaustive reference).
+
+CONTROLLER Akai APC40 mkII
+MIDI_CHANNEL 1
+
+# Clip launch grid: 8 columns x 5 rows, notes 0..39 (row-major).
+PAD 0 39
+
+# Scene launch buttons, to the right of the grid.
+PAD 82 89
+
+# Crossfader (named) and the 8 channel faders (unnamed block).
+FADER CC 7   master
+FADER CC 48 55
+
+# Track pan knobs: relative encoders, Akai's two's-complement convention.
+ENCODER CC 16 23 relative-2c
+
+# Clip grid LEDs: colour = note-on velocity.
+LED NOTE 0 39 velocity
+  COLOR off         0
+  COLOR green       1
+  COLOR green-blink 2
+  COLOR red         3
+  COLOR red-blink   4
+  COLOR amber       5
+  COLOR amber-blink 6
+
+# Scene launch button LEDs: a smaller two-colour palette.
+LED NOTE 82 89 velocity
+  COLOR off   0
+  COLOR green 1
+  COLOR red   3

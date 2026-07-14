@@ -12,8 +12,10 @@
 // and std::string/std::vector<uint8_t>) so embind can auto-marshal them.
 //
 // `readFile` is a JS callback (path → text). The .show compiler uses it
-// to resolve `FIXTURE <deffile>` lines. The editor supplies a callback
-// that looks up .fdef files from its in-memory workspace.
+// to resolve `FIXTURE <deffile>` and `CONTROLLER <deffile>` lines. The
+// editor supplies a callback that looks up .fdef/.mdef files from its
+// in-memory workspace -- compileShow doesn't care which, so no glue code
+// change was needed to pick up CONTROLLER (see provision.h/mdef.h).
 
 #include "provision.h"
 #include "show_bundle.h"
@@ -166,6 +168,7 @@ struct ShowLoadResult {
   std::vector<int> transports;      // per-universe transport enum
   int fixtureCount;
   int matrixCount;
+  int controllerCount;  // v2 only: embedded .mdef controller definitions
   // Per-fixture summary (parallel arrays).
   std::vector<int> fixProfileIndex;
   std::vector<int> fixUniverse;
@@ -203,6 +206,7 @@ ShowLoadResult loadShowGlue(val bundleVal) {
   }
   r.fixtureCount = (int)show.fixtures.size();
   r.matrixCount = (int)show.matrices.size();
+  r.controllerCount = (int)show.controllers.size();
   for (const auto& f : show.fixtures) {
     r.fixProfileIndex.push_back(0);  // profileIndex isn't on PatchEntry; we
                                       // don't expose it (not needed for the
@@ -255,6 +259,7 @@ EMSCRIPTEN_BINDINGS(provision_wasm) {
     .field("transports", &ShowLoadResult::transports)
     .field("fixtureCount", &ShowLoadResult::fixtureCount)
     .field("matrixCount", &ShowLoadResult::matrixCount)
+    .field("controllerCount", &ShowLoadResult::controllerCount)
     .field("fixProfileIndex", &ShowLoadResult::fixProfileIndex)
     .field("fixUniverse", &ShowLoadResult::fixUniverse)
     .field("fixBase", &ShowLoadResult::fixBase)

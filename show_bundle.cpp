@@ -60,8 +60,10 @@ bool loadShow(const uint8_t* data, size_t len, LoadedShow& out) {
 
   BundleReader reader(data, len);
 
-  // Read header (4 bytes magic + 1 version + 1 universeCount + 2 profileCount + 2 fixtureCount + 2 matrixCount = 12 bytes)
-  if (!reader.ensureRemaining(12)) return false;
+  // Read the fixed 6-byte prefix (magic + version + universeCount); the
+  // per-field readU16 calls below self-bounds-check the rest, same as
+  // parseProfile's v1/v2 branch (fixture_profile.cpp).
+  if (!reader.ensureRemaining(6)) return false;
 
   uint8_t magic[4];
   if (!reader.readBytes(magic, 4)) return false;
@@ -69,18 +71,25 @@ bool loadShow(const uint8_t* data, size_t len, LoadedShow& out) {
     return false;
   }
 
-  uint8_t version;
+  // Zero-initialized: readU8 always sets `version` before returning true,
+  // but the ESP-IDF toolchain's GCC (12.2.0, -Og) can't see that across the
+  // reference-parameter call and flags line 86 as -Werror=maybe-uninitialized
+  // otherwise (a false positive -- the host build's GCC/-O0 doesn't hit it).
+  uint8_t version = 0;
   if (!reader.readU8(version)) return false;
-  if (version != 1) return false;
+  if (version != 1 && version != 2) return false;
 
   uint8_t universeCount;
   if (!reader.readU8(universeCount)) return false;
   if (universeCount > 8) return false;
 
-  uint16_t profileCount, fixtureCount, matrixCount;
+  uint16_t profileCount, fixtureCount, matrixCount, mdefCount = 0;
   if (!reader.readU16(profileCount)) return false;
   if (!reader.readU16(fixtureCount)) return false;
   if (!reader.readU16(matrixCount)) return false;
+  if (version == 2) {
+    if (!reader.readU16(mdefCount)) return false;
+  }
 
   out.universeCount = universeCount;
 
@@ -209,6 +218,26 @@ bool loadShow(const uint8_t* data, size_t len, LoadedShow& out) {
     m.startChannel = startChannel;
 
     out.matrices.push_back(m);
+  }
+
+  // Controller (mdef) table -- v2 only.
+  for (int i = 0; i < mdefCount; i++) {
+    uint16_t blobLen;
+    if (!reader.readU16(blobLen)) return false;
+
+    if (!reader.ensureRemaining(blobLen)) return false;
+
+    const uint8_t* blobStart = data + reader.getPos();
+    MidiControllerProfile controller;
+    if (!parseMidiController(blobStart, blobLen, controller)) {
+      return false;
+    }
+    out.controllers.push_back(controller);
+
+    uint8_t dummy;
+    for (int j = 0; j < blobLen; j++) {
+      if (!reader.readU8(dummy)) return false;
+    }
   }
 
   return true;

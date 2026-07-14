@@ -26,6 +26,13 @@ public:
   void bindButton(uint16_t controlId, ActionKind action, uint16_t targetId);
   void bindFader(uint16_t controlId, ActionKind action);
 
+  // Wipe every binding (glow.bind.clear) -- e.g. before a live-coded
+  // re-bind pass so stale bindings from a previous version of boot.fnl
+  // don't linger alongside the new ones. Does not touch master_: that's a
+  // fader *value*, not a binding, and clearing it would drop the operator's
+  // current grandmaster level for no reason.
+  void clear();
+
   void handle(const ControlEvent& ev, float t);
 
   float masterLevel() const;

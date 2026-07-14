@@ -15,12 +15,15 @@
 // eliminating the cross-core data race. See control_queue.h/beat_queue.h
 // for the rationale.
 //
-// DIN-MIDI over UART, standard 31250-8N1, RX only (no MIDI OUT/THRU on
-// this device). Running-status is NOT handled -- a real DIN-MIDI keyboard
-// that leans on it (repeated Note On without resending the status byte)
-// will drop messages here; adding that is a straightforward extension to
-// MidiByteReader::feed (track the last status byte across calls) if a
-// real controller needs it.
+// DIN-MIDI over UART, standard 31250-8N1. Running-status is NOT handled --
+// a real DIN-MIDI keyboard that leans on it (repeated Note On without
+// resending the status byte) will drop messages here; adding that is a
+// straightforward extension to MidiByteReader::feed (track the last status
+// byte across calls) if a real controller needs it.
+//
+// A5: MIDI OUT (TX) shares this UART port on a second GPIO -- see
+// midi_output_send3/DeviceMidiOutput below. THRU is still not implemented
+// (RX bytes are never echoed to TX).
 //
 
 #include "midi_input.h"
@@ -44,14 +47,17 @@ static IControlEventQueue* g_queue = nullptr;
 static glow::IBeatEventQueue* g_beatQueue = nullptr;
 static int g_uartNum = UART_NUM_2;
 static int g_rxGpio = -1;
+static int g_txGpio = -1;
+static volatile bool g_uartReady = false;  // true once uart_driver_install succeeds
 static MidiByteReader g_reader;
 
 void midi_input_init(IControlEventQueue& queue, glow::IBeatEventQueue* beatQueue,
-                     int uartNum, int rxGpio) {
+                     int uartNum, int rxGpio, int txGpio) {
   g_queue = &queue;
   g_beatQueue = beatQueue;
   g_uartNum = uartNum;
   g_rxGpio = rxGpio;
+  g_txGpio = txGpio;
 }
 
 void midi_input_handle_byte(uint8_t byte) {
@@ -97,21 +103,28 @@ void midi_uart_task(void* /*ctx*/) {
     vTaskDelete(nullptr);
     return;
   }
-  // TX/CTS unused: this device only ever receives MIDI (no OUT/THRU).
-  if (uart_set_pin(port, UART_PIN_NO_CHANGE, g_rxGpio,
+  // CTS unused; TX is UART_PIN_NO_CHANGE (disabled) unless A5's MIDI OUT
+  // was configured via midi_input_init's txGpio.
+  int txPin = (g_txGpio >= 0) ? g_txGpio : UART_PIN_NO_CHANGE;
+  if (uart_set_pin(port, txPin, g_rxGpio,
                    UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE) != ESP_OK) {
-    ESP_LOGE(TAG, "uart_set_pin(port=%d, rx=%d) failed", g_uartNum, g_rxGpio);
+    ESP_LOGE(TAG, "uart_set_pin(port=%d, rx=%d, tx=%d) failed", g_uartNum, g_rxGpio, g_txGpio);
     vTaskDelete(nullptr);
     return;
   }
+  // TX buffering: 0 = blocking writes on the caller's task (render task,
+  // via LedFeedback -- see midi_output_send3). Fine at LED feedback's rate
+  // (<=100 msg/sec, 3 bytes each, ~1ms at 31250 baud): never enough to
+  // meaningfully stall the render loop's frame budget.
   constexpr int kRxBufSize = 256;
   if (uart_driver_install(port, kRxBufSize, 0, 0, nullptr, 0) != ESP_OK) {
     ESP_LOGE(TAG, "uart_driver_install(port=%d) failed", g_uartNum);
     vTaskDelete(nullptr);
     return;
   }
+  g_uartReady = true;
 
-  ESP_LOGI(TAG, "MIDI UART %d ready (rx=%d, 31250 baud)", g_uartNum, g_rxGpio);
+  ESP_LOGI(TAG, "MIDI UART %d ready (rx=%d, tx=%d, 31250 baud)", g_uartNum, g_rxGpio, g_txGpio);
 
   uint8_t buf[32];
   while (true) {
@@ -120,6 +133,16 @@ void midi_uart_task(void* /*ctx*/) {
       midi_input_handle_byte(buf[i]);
     }
   }
+}
+
+void midi_output_send3(uint8_t status, uint8_t data1, uint8_t data2) {
+  if (g_txGpio < 0 || !g_uartReady) return;
+  uint8_t msg[3] = {status, data1, data2};
+  uart_write_bytes(static_cast<uart_port_t>(g_uartNum), reinterpret_cast<const char*>(msg), sizeof(msg));
+}
+
+void DeviceMidiOutput::send3(uint8_t status, uint8_t data1, uint8_t data2) {
+  midi_output_send3(status, data1, data2);
 }
 
 #endif

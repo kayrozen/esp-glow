@@ -41,6 +41,10 @@ void LiveControl::bindFader(uint16_t controlId, ActionKind action) {
   bindings_.push_back({ControlType::Fader, controlId, action, 0, false});
 }
 
+void LiveControl::clear() {
+  bindings_.clear();
+}
+
 LiveControl::Binding* LiveControl::find(ControlType type, uint16_t controlId) {
   for (auto& b : bindings_) {
     if (b.type == type && b.controlId == controlId) {

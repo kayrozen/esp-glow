@@ -1,0 +1,341 @@
+// test_mdef.cpp — MDF1 controller-definition binary format tests. The MIDI
+// twin of test_fixture_profile.cpp: parse/round-trip the binary format,
+// prove the security-boundary validation, and the two behaviors called out
+// explicitly in the design (A6): encoder mode is parsed, and an unknown
+// colour name is a no-op, not an error.
+
+#include "mdef.h"
+#include "controller_encoder.h"
+
+#include <cstdio>
+#include <cstring>
+
+static int g_failCount = 0;
+
+#define CHECK(cond)                                           \
+  do {                                                        \
+    if (!(cond)) {                                            \
+      printf("FAIL: %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+      g_failCount++;                                          \
+    }                                                          \
+  } while (0)
+
+#define TEST(name) printf("Test: %s\n", name)
+
+namespace {
+
+// A minimal APC40-mkII-shaped controller: 8 pads (53..60), one named fader,
+// one relative encoder, and an LED range with a small colour palette.
+ControllerBuilder makeController() {
+  ControllerBuilder b;
+  b.name = "Test Controller";
+  b.midiChannel = 1;
+  b.pads.push_back({53, 60});
+  b.faders.push_back({7, 7, "master"});
+  b.faders.push_back({48, 55, ""});
+  b.encoders.push_back({16, 16, EncoderMode::Relative2C});
+
+  ControllerLedSpec led;
+  led.msgType = LedMsgType::Note;
+  led.addrFrom = 53;
+  led.addrTo = 60;
+  led.semantic = LedSemantic::Velocity;
+  led.colors.push_back({"off", 0});
+  led.colors.push_back({"green", 1});
+  led.colors.push_back({"red", 3});
+  b.leds.push_back(led);
+
+  return b;
+}
+
+}  // namespace
+
+void test_roundtrip_basic_fields() {
+  TEST("Round-trip: pads/faders/encoders/LED ranges/colour palette");
+
+  ControllerBuilder b = makeController();
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  CHECK(err.empty());
+  CHECK(!blob.empty());
+  CHECK(blob[0] == 'M' && blob[1] == 'D' && blob[2] == 'F' && blob[3] == '1');
+  CHECK(blob[4] == 1);  // version
+
+  MidiControllerProfile p;
+  CHECK(parseMidiController(blob.data(), blob.size(), p));
+
+  CHECK(p.midiChannel == 1);
+  CHECK(p.padCount == 1);
+  CHECK(p.pads[0].noteFrom == 53);
+  CHECK(p.pads[0].noteTo == 60);
+
+  CHECK(p.faderCount == 2);
+  CHECK(p.faders[0].ccFrom == 7);
+  CHECK(p.faders[0].ccTo == 7);
+  CHECK(p.faders[0].nameOff != 0xFFFF);
+  CHECK(std::strcmp(reinterpret_cast<const char*>(&p.nameBlob[p.faders[0].nameOff]), "master") == 0);
+  CHECK(p.faders[1].ccFrom == 48);
+  CHECK(p.faders[1].ccTo == 55);
+  CHECK(p.faders[1].nameOff == 0xFFFF);  // unnamed
+
+  CHECK(p.encoderCount == 1);
+  CHECK(p.encoders[0].ccFrom == 16);
+  CHECK(p.encoders[0].mode == EncoderMode::Relative2C);
+
+  CHECK(p.ledCount == 1);
+  CHECK(p.leds[0].msgType == LedMsgType::Note);
+  CHECK(p.leds[0].addrFrom == 53);
+  CHECK(p.leds[0].addrTo == 60);
+  CHECK(p.leds[0].semantic == LedSemantic::Velocity);
+  CHECK(p.leds[0].colorCount == 3);
+  CHECK(p.colorCount == 3);
+}
+
+void test_led_range_lookup_by_note() {
+  TEST("findLedRangeForNote finds the declared range; misses elsewhere");
+
+  ControllerBuilder b = makeController();
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  MidiControllerProfile p;
+  CHECK(parseMidiController(blob.data(), blob.size(), p));
+
+  const MdefLedRange* r = findLedRangeForNote(p, 55);
+  CHECK(r != nullptr);
+  CHECK(r->addrFrom == 53 && r->addrTo == 60);
+
+  CHECK(findLedRangeForNote(p, 61) == nullptr);   // just past the range
+  CHECK(findLedRangeForNote(p, 52) == nullptr);   // just before
+  CHECK(findLedRangeForCc(p, 55) == nullptr);      // wrong message type
+}
+
+void test_color_lookup_by_name() {
+  TEST("ledColorValueByName resolves declared colours; unknown name -> false, no-op");
+
+  ControllerBuilder b = makeController();
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  MidiControllerProfile p;
+  CHECK(parseMidiController(blob.data(), blob.size(), p));
+
+  const MdefLedRange* r = findLedRangeForNote(p, 53);
+  CHECK(r != nullptr);
+
+  uint8_t value = 255;
+  CHECK(ledColorValueByName(p, *r, "off", value));
+  CHECK(value == 0);
+  CHECK(ledColorValueByName(p, *r, "green", value));
+  CHECK(value == 1);
+  CHECK(ledColorValueByName(p, *r, "red", value));
+  CHECK(value == 3);
+
+  // Unknown colour name: false, and the out-param is left untouched (still
+  // holds "red"'s value 3 from the call above) -- exactly the "no-op, not
+  // an error" contract A1/A6 call for.
+  CHECK(!ledColorValueByName(p, *r, "purple", value));
+  CHECK(value == 3);
+}
+
+void test_single_pad() {
+  TEST("PAD with no explicit range (single pad): noteFrom == noteTo");
+
+  ControllerBuilder b;
+  b.name = "Single Pad";
+  b.pads.push_back({0, 0});
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  CHECK(err.empty());
+
+  MidiControllerProfile p;
+  CHECK(parseMidiController(blob.data(), blob.size(), p));
+  CHECK(p.padCount == 1);
+  CHECK(p.pads[0].noteFrom == 0);
+  CHECK(p.pads[0].noteTo == 0);
+}
+
+void test_encoder_modes_parsed() {
+  TEST("All three encoder modes round-trip distinctly");
+
+  ControllerBuilder b;
+  b.name = "Encoders";
+  b.encoders.push_back({0, 0, EncoderMode::Absolute});
+  b.encoders.push_back({1, 1, EncoderMode::Relative2C});
+  b.encoders.push_back({2, 2, EncoderMode::RelativeSignMag});
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  CHECK(err.empty());
+
+  MidiControllerProfile p;
+  CHECK(parseMidiController(blob.data(), blob.size(), p));
+  CHECK(p.encoderCount == 3);
+  CHECK(p.encoders[0].mode == EncoderMode::Absolute);
+  CHECK(p.encoders[1].mode == EncoderMode::Relative2C);
+  CHECK(p.encoders[2].mode == EncoderMode::RelativeSignMag);
+}
+
+void test_decode_encoder_delta() {
+  TEST("decodeEncoderDelta: two's-complement and sign-magnitude conventions");
+
+  // Absolute: never a delta.
+  CHECK(decodeEncoderDelta(EncoderMode::Absolute, 1) == 0);
+  CHECK(decodeEncoderDelta(EncoderMode::Absolute, 127) == 0);
+
+  // Two's complement (7-bit): 1..63 positive, 64..127 negative (value-128).
+  CHECK(decodeEncoderDelta(EncoderMode::Relative2C, 1) == 1);
+  CHECK(decodeEncoderDelta(EncoderMode::Relative2C, 63) == 63);
+  CHECK(decodeEncoderDelta(EncoderMode::Relative2C, 127) == -1);
+  CHECK(decodeEncoderDelta(EncoderMode::Relative2C, 65) == -63);
+  CHECK(decodeEncoderDelta(EncoderMode::Relative2C, 64) == -64);
+  CHECK(decodeEncoderDelta(EncoderMode::Relative2C, 0) == 0);
+
+  // Sign-magnitude: bit6 is the sign, low 6 bits the magnitude.
+  CHECK(decodeEncoderDelta(EncoderMode::RelativeSignMag, 5) == 5);
+  CHECK(decodeEncoderDelta(EncoderMode::RelativeSignMag, 0x45) == -5);  // 0x40 | 5
+  CHECK(decodeEncoderDelta(EncoderMode::RelativeSignMag, 0) == 0);
+}
+
+void test_bad_magic() {
+  TEST("Reject bad magic");
+
+  ControllerBuilder b = makeController();
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  blob[0] = 'X';
+
+  MidiControllerProfile p;
+  CHECK(!parseMidiController(blob.data(), blob.size(), p));
+}
+
+void test_bad_version() {
+  TEST("Reject unsupported version");
+
+  ControllerBuilder b = makeController();
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  blob[4] = 2;
+
+  MidiControllerProfile p;
+  CHECK(!parseMidiController(blob.data(), blob.size(), p));
+}
+
+void test_bad_flags() {
+  TEST("Reject flags != 0");
+
+  ControllerBuilder b = makeController();
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  blob[5] = 1;
+
+  MidiControllerProfile p;
+  CHECK(!parseMidiController(blob.data(), blob.size(), p));
+}
+
+void test_truncated_buffer() {
+  TEST("Reject truncated buffer");
+
+  ControllerBuilder b = makeController();
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  blob.resize(blob.size() - 3);
+
+  MidiControllerProfile p;
+  CHECK(!parseMidiController(blob.data(), blob.size(), p));
+}
+
+void test_header_too_short() {
+  TEST("Reject buffer shorter than the 13-byte header");
+
+  uint8_t buf[10] = {'M', 'D', 'F', '1', 1, 0, 0, 0, 0, 0};
+  MidiControllerProfile p;
+  CHECK(!parseMidiController(buf, sizeof(buf), p));
+}
+
+void test_pad_count_overflow() {
+  TEST("Reject padCount > MDEF_MAX_PADS");
+
+  std::vector<uint8_t> blob = {'M', 'D', 'F', '1', 1, 0, 0, 0,
+                               static_cast<uint8_t>(MDEF_MAX_PADS + 1), 0, 0, 0, 0};
+  MidiControllerProfile p;
+  CHECK(!parseMidiController(blob.data(), blob.size(), p));
+}
+
+void test_bad_midi_channel() {
+  TEST("Reject midiChannel > 16");
+
+  std::vector<uint8_t> blob = {'M', 'D', 'F', '1', 1, 0, 17, 0, 0, 0, 0, 0, 0};
+  MidiControllerProfile p;
+  CHECK(!parseMidiController(blob.data(), blob.size(), p));
+}
+
+void test_pad_from_after_to() {
+  TEST("Reject a pad record with noteFrom > noteTo");
+
+  ControllerBuilder b;
+  b.name = "Bad";
+  b.pads.push_back({60, 53});  // from > to
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  CHECK(err.empty());  // the encoder itself doesn't validate ordering
+
+  MidiControllerProfile p;
+  CHECK(!parseMidiController(blob.data(), blob.size(), p));
+}
+
+void test_led_bad_colorOffset() {
+  TEST("Reject an LED record whose colorOffset/colorCount overruns the colour table");
+
+  ControllerBuilder b = makeController();
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+
+  // Header: magic(4) version(1) flags(1) midiChannel(1) nameLen(1) padCount(1)
+  // faderCount(1) encoderCount(1) ledCount(1) colorCount(1) = 13 bytes, then
+  // name, then pads(2*1), faders(4*2), encoders(3*1) before the LED table.
+  size_t ledTableOffset = 13 + b.name.size() + 2 * 1 + 4 * 2 + 3 * 1;
+  // LED record layout: msgType,addrFrom,addrTo,semantic,colorOffset(u16),colorCount
+  blob[ledTableOffset + 6] = 0xFF;  // colorCount way beyond the real table (3)
+
+  MidiControllerProfile p;
+  CHECK(!parseMidiController(blob.data(), blob.size(), p));
+}
+
+void test_encoder_builder_limits() {
+  TEST("ControllerBuilder::encode fails cleanly over MDEF_MAX_* limits");
+
+  ControllerBuilder b;
+  b.name = "Too Many Pads";
+  for (int i = 0; i <= MDEF_MAX_PADS; ++i) {
+    b.pads.push_back({static_cast<uint8_t>(i % 128), static_cast<uint8_t>(i % 128)});
+  }
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  CHECK(blob.empty());
+  CHECK(!err.empty());
+}
+
+int main() {
+  test_roundtrip_basic_fields();
+  test_led_range_lookup_by_note();
+  test_color_lookup_by_name();
+  test_single_pad();
+  test_encoder_modes_parsed();
+  test_decode_encoder_delta();
+  test_bad_magic();
+  test_bad_version();
+  test_bad_flags();
+  test_truncated_buffer();
+  test_header_too_short();
+  test_pad_count_overflow();
+  test_bad_midi_channel();
+  test_pad_from_after_to();
+  test_led_bad_colorOffset();
+  test_encoder_builder_limits();
+
+  if (g_failCount == 0) {
+    printf("\nAll tests passed!\n");
+    return 0;
+  } else {
+    printf("\n%d test(s) failed.\n", g_failCount);
+    return 1;
+  }
+}

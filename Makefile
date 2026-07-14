@@ -36,7 +36,7 @@ LUA_C_OBJECTS = $(LUA_C_SOURCES:.c=.o)
 GLOW_LUA_SOURCES = lua_vm.cpp glow_lua_api.cpp lua_effect.cpp glow_fennel.cpp eval_queue.cpp \
                    vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp show.cpp \
                    oscillator.cpp color.cpp effects.cpp show_control.cpp pixel_matrix.cpp \
-                   pixel_patterns.cpp beat_clock.cpp
+                   pixel_patterns.cpp beat_clock.cpp live_control.cpp led_feedback.cpp mdef.cpp
 
 # --- test_aim: aim/vec_math geometry tests ---
 AIM_SOURCES = vec_math.cpp aim.cpp test_aim.cpp
@@ -75,7 +75,8 @@ PIXEL_MATRIX_TARGET  = test_pixel_matrix
 
 # --- test_provision: provisioning compiler/loader tests ---
 PROVISION_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp \
-                    color.cpp pixel_matrix.cpp provision.cpp show_bundle.cpp test_provision.cpp
+                    color.cpp pixel_matrix.cpp mdef.cpp controller_encoder.cpp \
+                    provision.cpp show_bundle.cpp test_provision.cpp
 PROVISION_OBJECTS = $(PROVISION_SOURCES:.cpp=.o)
 PROVISION_TARGET  = test_provision
 
@@ -86,7 +87,8 @@ PROVISION_TARGET  = test_provision
 # as PROVISION_TARGET (parseFixtureDef/encodeProfile/parseProfile), minus
 # the test file, plus fdef_check.cpp.
 FDEF_CHECK_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp \
-                     color.cpp pixel_matrix.cpp provision.cpp show_bundle.cpp fdef_check.cpp
+                     color.cpp pixel_matrix.cpp mdef.cpp controller_encoder.cpp \
+                     provision.cpp show_bundle.cpp fdef_check.cpp
 FDEF_CHECK_OBJECTS = $(FDEF_CHECK_SOURCES:.cpp=.o)
 FDEF_CHECK_TARGET  = fdef_check
 
@@ -95,6 +97,21 @@ LIVE_CONTROL_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.
                        show_control.cpp live_control.cpp test_live_control.cpp
 LIVE_CONTROL_OBJECTS = $(LIVE_CONTROL_SOURCES:.cpp=.o)
 LIVE_CONTROL_TARGET  = test_live_control
+
+# --- test_mdef: MDF1 controller-definition binary format tests (the MIDI
+# twin of test_fixture_profile) ---
+MDEF_SOURCES = mdef.cpp controller_encoder.cpp test_mdef.cpp
+MDEF_OBJECTS = $(MDEF_SOURCES:.cpp=.o)
+MDEF_TARGET  = test_mdef
+
+# --- test_led_feedback: LED feedback change-detection + rate-limiting
+# (A5/A6) -- links a real ShowController so glow.led.auto's cue-tracking is
+# exercised against the real weight/active-state machinery, not a fake ---
+LED_FEEDBACK_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp show.cpp \
+                       show_control.cpp mdef.cpp controller_encoder.cpp led_feedback.cpp \
+                       test_led_feedback.cpp
+LED_FEEDBACK_OBJECTS = $(LED_FEEDBACK_SOURCES:.cpp=.o)
+LED_FEEDBACK_TARGET  = test_led_feedback
 
 # --- test_web_protocol: web console JSON protocol testable core tests ---
 WEB_PROTOCOL_SOURCES = web_protocol.cpp test_web_protocol.cpp
@@ -198,6 +215,12 @@ $(FDEF_CHECK_TARGET): $(FDEF_CHECK_OBJECTS)
 $(LIVE_CONTROL_TARGET): $(LIVE_CONTROL_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(LIVE_CONTROL_OBJECTS) -o $(LIVE_CONTROL_TARGET) -lm
 
+$(MDEF_TARGET): $(MDEF_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(MDEF_OBJECTS) -o $(MDEF_TARGET) -lm
+
+$(LED_FEEDBACK_TARGET): $(LED_FEEDBACK_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(LED_FEEDBACK_OBJECTS) -o $(LED_FEEDBACK_TARGET) -lm
+
 $(WEB_PROTOCOL_TARGET): $(WEB_PROTOCOL_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(WEB_PROTOCOL_OBJECTS) -o $(WEB_PROTOCOL_TARGET) -lm
 
@@ -246,7 +269,7 @@ $(PACING_TARGET): $(PACING_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(PACING_OBJECTS) -o $(PACING_TARGET) -lm
 
 # --- test_apply_loaded_show: F3 patch-routing glue (host-tested) ---
-APPLY_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp show.cpp show_bundle.cpp \
+APPLY_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp mdef.cpp show.cpp show_bundle.cpp \
                 pixel_matrix.cpp apply_loaded_show.cpp test_apply_loaded_show.cpp
 APPLY_OBJECTS = $(APPLY_SOURCES:.cpp=.o)
 APPLY_TARGET  = test_apply_loaded_show
@@ -306,7 +329,7 @@ SAFE_BLACKOUT_TARGET  = test_safe_blackout
 $(SAFE_BLACKOUT_TARGET): $(SAFE_BLACKOUT_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(SAFE_BLACKOUT_OBJECTS) -o $(SAFE_BLACKOUT_TARGET) -lm
 
-test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET) $(LIVE_CONTROL_TARGET) $(WEB_PROTOCOL_TARGET) $(CONTROL_QUEUE_TARGET) $(PACING_TARGET) $(APPLY_TARGET) $(LUA_VM_TARGET) $(LUA_EFFECT_TARGET) $(GLOW_LUA_API_TARGET) $(GLOW_FENNEL_TARGET) $(SCRIPTS_STORAGE_TARGET) $(FX_ERROR_PIPELINE_TARGET) $(OSC_PARSER_TARGET) $(LITTLEFS_IMAGE_TARGET) $(BEAT_CLOCK_TARGET) $(BEAT_QUEUE_TARGET) $(MIDI_REALTIME_TARGET) $(DJLINK_PARSER_TARGET) $(DJLINK_MASTER_TARGET) $(SAFE_BLACKOUT_TARGET)
+test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET) $(LIVE_CONTROL_TARGET) $(MDEF_TARGET) $(LED_FEEDBACK_TARGET) $(WEB_PROTOCOL_TARGET) $(CONTROL_QUEUE_TARGET) $(PACING_TARGET) $(APPLY_TARGET) $(LUA_VM_TARGET) $(LUA_EFFECT_TARGET) $(GLOW_LUA_API_TARGET) $(GLOW_FENNEL_TARGET) $(SCRIPTS_STORAGE_TARGET) $(FX_ERROR_PIPELINE_TARGET) $(OSC_PARSER_TARGET) $(LITTLEFS_IMAGE_TARGET) $(BEAT_CLOCK_TARGET) $(BEAT_QUEUE_TARGET) $(MIDI_REALTIME_TARGET) $(DJLINK_PARSER_TARGET) $(DJLINK_MASTER_TARGET) $(SAFE_BLACKOUT_TARGET)
 	./$(AIM_TARGET)
 	./$(FP_TARGET)
 	./$(SHOW_TARGET)
@@ -315,6 +338,8 @@ test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL
 	./$(PIXEL_MATRIX_TARGET)
 	./$(PROVISION_TARGET)
 	./$(LIVE_CONTROL_TARGET)
+	./$(MDEF_TARGET)
+	./$(LED_FEEDBACK_TARGET)
 	./$(WEB_PROTOCOL_TARGET)
 	./$(CONTROL_QUEUE_TARGET)
 	./$(PACING_TARGET)
@@ -366,6 +391,8 @@ clean:
 	      $(EFFECTS_OBJECTS) $(EFFECTS_TARGET) $(SHOW_CONTROL_OBJECTS) $(SHOW_CONTROL_TARGET) \
 	      $(PIXEL_MATRIX_OBJECTS) $(PIXEL_MATRIX_TARGET) $(PROVISION_OBJECTS) $(PROVISION_TARGET) \
 	      $(LIVE_CONTROL_OBJECTS) $(LIVE_CONTROL_TARGET) \
+	      $(MDEF_OBJECTS) $(MDEF_TARGET) \
+	      $(LED_FEEDBACK_OBJECTS) $(LED_FEEDBACK_TARGET) \
 	      $(WEB_PROTOCOL_OBJECTS) $(WEB_PROTOCOL_TARGET) \
 	      $(CONTROL_QUEUE_TARGET) \
 	      $(PACING_OBJECTS) $(PACING_TARGET) \
