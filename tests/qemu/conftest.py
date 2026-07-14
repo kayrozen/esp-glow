@@ -211,6 +211,16 @@ class QemuReader(LineReader):
             # esp32s3_fixup_ram_size); 8M matches a typical ESP32-S3-WROOM
             # board and firmware/sdkconfig.defaults' CONFIG_SPIRAM_TYPE_AUTO.
             "-m", f"{self.psram_mb}M",
+            # esp32s3_machine_init_psram() never sets the "ssi_psram" QOM
+            # type's is_octal property (defaults false -- quad mode), but
+            # firmware/sdkconfig.defaults' CONFIG_SPIRAM_MODE_OCT=y means
+            # the firmware's octal_psram driver only speaks the octal wire
+            # protocol; against a quad-mode model that mismatch reads back
+            # as an all-zero ID ("PSRAM chip not found") even with -m set.
+            # -global overrides the device property generically, without
+            # needing esp32s3.c to set it itself -- confirmed against
+            # hw/misc/ssi_psram.c's DEFINE_PROP_BOOL("is_octal", ...).
+            "-global", "driver=ssi_psram,property=is_octal,value=true",
         ]
         logger.info("$ %s", " ".join(cmd))
         self.proc = subprocess.Popen(
