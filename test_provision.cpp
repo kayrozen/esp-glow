@@ -5,6 +5,8 @@
 #include <cstring>
 #include <map>
 #include <cmath>
+#include <fstream>
+#include <sstream>
 
 static int testsPassed = 0;
 static int testsFailed = 0;
@@ -195,8 +197,9 @@ TEST(show_pos_non_numeric_coordinate) {
     CAP Pan 0 1
   )";
   std::string showText = R"(
-    UNIVERSE 0 DMX
-    FIXTURE head.fdef 0 0
+    SHOW 2
+    UNIVERSE 1 DMX
+    FIXTURE head.fdef 1 1
     POS 1 not-a-number 3
   )";
   auto readFile = [&](const std::string& name) {
@@ -211,8 +214,9 @@ TEST(show_pos_non_numeric_coordinate) {
 
 TEST(show_matrix_non_numeric_param) {
   std::string showText = R"(
-    UNIVERSE 0 DMX
-    MATRIX 0 abc 16 8 SERP H RGB
+    SHOW 2
+    UNIVERSE 1 DMX
+    MATRIX 1 abc 16 8 SERP H RGB
   )";
   auto readFile = [](const std::string&) { return std::string(); };
 
@@ -404,15 +408,16 @@ TEST(show_compile_and_load_roundtrip) {
   )";
 
   std::string showText = R"(
-    UNIVERSE 0 DMX
-    UNIVERSE 1 ARTNET
-    FIXTURE torrent.fdef 0 1
+    SHOW 2
+    UNIVERSE 1 DMX
+    UNIVERSE 2 ARTNET
+    FIXTURE torrent.fdef 1 2
     POS 1 2 3
     ROT 0 0 0
     CENTER 0.5 0.5
     INVERT 0 0
-    FIXTURE par.fdef 0 20
-    MATRIX 1 0 16 16 SERP H GRB
+    FIXTURE par.fdef 1 21
+    MATRIX 2 1 16 16 SERP H GRB
   )";
 
   auto readFile = [&](const std::string& name) {
@@ -480,9 +485,10 @@ TEST(show_profile_deduplication) {
   )";
 
   std::string showText = R"(
-    UNIVERSE 0 DMX
-    FIXTURE par.fdef 0 0
-    FIXTURE par.fdef 0 10
+    SHOW 2
+    UNIVERSE 1 DMX
+    FIXTURE par.fdef 1 1
+    FIXTURE par.fdef 1 11
   )";
 
   auto readFile = [&](const std::string& name) {
@@ -512,8 +518,9 @@ TEST(show_pos_without_head_error) {
   )";
 
   std::string showText = R"(
-    UNIVERSE 0 DMX
-    FIXTURE par.fdef 0 0
+    SHOW 2
+    UNIVERSE 1 DMX
+    FIXTURE par.fdef 1 1
     POS 1 2 3
   )";
 
@@ -659,8 +666,9 @@ TEST(show_compile_and_load_roundtrip_with_controller) {
   )";
 
   std::string showText = R"(
-    UNIVERSE 0 DMX
-    FIXTURE par.fdef 0 0
+    SHOW 2
+    UNIVERSE 1 DMX
+    FIXTURE par.fdef 1 1
     CONTROLLER apc.mdef
   )";
 
@@ -700,8 +708,9 @@ TEST(show_compile_no_controller_stays_v1) {
     CAP Dimmer 0
   )";
   std::string showText = R"(
-    UNIVERSE 0 DMX
-    FIXTURE par.fdef 0 0
+    SHOW 2
+    UNIVERSE 1 DMX
+    FIXTURE par.fdef 1 1
   )";
   auto readFile = [&](const std::string& name) {
     auto it = fileMap.find(name);
@@ -720,7 +729,8 @@ TEST(show_compile_no_controller_stays_v1) {
 
 TEST(show_controller_missing_deffile_error) {
   std::string showText = R"(
-    UNIVERSE 0 DMX
+    SHOW 2
+    UNIVERSE 1 DMX
     CONTROLLER missing.mdef
   )";
   auto readFile = [&](const std::string&) { return std::string(); };
@@ -728,6 +738,314 @@ TEST(show_controller_missing_deffile_error) {
   CompileResult result = compileShow(showText, readFile);
   CHECK(!result.ok);
   CHECK(!result.err.empty());
+}
+
+// ============================================================================
+// SHOW 2: 1-indexed addressing + migration + validation
+// ============================================================================
+
+// The conversion, proven: a 1-indexed address/universe in the text becomes
+// the internal 0-indexed base/universe (PatchEntry.base = address - 1,
+// universe index = universe - 1).
+TEST(show_v2_address_and_universe_convert_to_0_indexed) {
+  std::map<std::string, std::string> fileMap;
+  fileMap["par.fdef"] = R"(
+    FIXTURE Par
+    FOOTPRINT 5
+    CAP Dimmer 0
+  )";
+  std::string showText = R"(
+    SHOW 2
+    UNIVERSE 1 DMX
+    FIXTURE par.fdef 1 17
+  )";
+  auto readFile = [&](const std::string& name) {
+    auto it = fileMap.find(name);
+    return it != fileMap.end() ? it->second : std::string();
+  };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(result.ok);
+
+  LoadedShow loaded;
+  CHECK(loadShow(result.bundle.data(), result.bundle.size(), loaded));
+  CHECK(loaded.fixtures.size() == 1);
+  CHECK(loaded.fixtures[0].universe == 0);
+  CHECK(loaded.fixtures[0].base == 16);
+}
+
+// A .show with no 'SHOW 2' header must fail loudly -- no silent
+// reinterpretation of what used to be a valid 0-indexed file.
+TEST(show_missing_header_error_names_migration) {
+  std::string showText = R"(
+    UNIVERSE 0 DMX
+    FIXTURE par.fdef 0 0
+  )";
+  auto readFile = [](const std::string&) { return std::string(); };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(!result.ok);
+  CHECK(result.err.find("SHOW 2") != std::string::npos);
+  CHECK(result.err.find("1-indexed") != std::string::npos);
+}
+
+// A .show that's entirely blank/comments (never reaches a content line)
+// still needs the header.
+TEST(show_empty_file_missing_header_error) {
+  std::string showText = "# just a comment\n\n";
+  auto readFile = [](const std::string&) { return std::string(); };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(!result.ok);
+  CHECK(result.err.find("SHOW 2") != std::string::npos);
+}
+
+// An unsupported SHOW version is also a hard error (not silently ignored).
+TEST(show_unsupported_version_error) {
+  std::string showText = R"(
+    SHOW 3
+    UNIVERSE 1 DMX
+  )";
+  auto readFile = [](const std::string&) { return std::string(); };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(!result.ok);
+  CHECK(!result.err.empty());
+}
+
+TEST(show_universe_zero_error) {
+  std::string showText = R"(
+    SHOW 2
+    UNIVERSE 0 DMX
+  )";
+  auto readFile = [](const std::string&) { return std::string(); };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(!result.ok);
+  CHECK(result.err.find("1-indexed") != std::string::npos);
+}
+
+TEST(show_address_zero_error) {
+  std::map<std::string, std::string> fileMap;
+  fileMap["par.fdef"] = R"(
+    FIXTURE Par
+    FOOTPRINT 5
+    CAP Dimmer 0
+  )";
+  std::string showText = R"(
+    SHOW 2
+    UNIVERSE 1 DMX
+    FIXTURE par.fdef 1 0
+  )";
+  auto readFile = [&](const std::string& name) {
+    auto it = fileMap.find(name);
+    return it != fileMap.end() ? it->second : std::string();
+  };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(!result.ok);
+  CHECK(result.err.find("1..512") != std::string::npos);
+}
+
+TEST(show_address_513_error) {
+  std::map<std::string, std::string> fileMap;
+  fileMap["par.fdef"] = R"(
+    FIXTURE Par
+    FOOTPRINT 5
+    CAP Dimmer 0
+  )";
+  std::string showText = R"(
+    SHOW 2
+    UNIVERSE 1 DMX
+    FIXTURE par.fdef 1 513
+  )";
+  auto readFile = [&](const std::string& name) {
+    auto it = fileMap.find(name);
+    return it != fileMap.end() ? it->second : std::string();
+  };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(!result.ok);
+  CHECK(result.err.find("1..512") != std::string::npos);
+}
+
+// The classic "off the end of the universe" mistake: a fixture whose
+// address + footprint runs past channel 512.
+TEST(show_footprint_runs_past_universe_end_error) {
+  std::map<std::string, std::string> fileMap;
+  fileMap["torrent.fdef"] = R"(
+    FIXTURE Torrent
+    FOOTPRINT 16
+    CAP Dimmer 0
+  )";
+  std::string showText = R"(
+    SHOW 2
+    UNIVERSE 1 DMX
+    FIXTURE torrent.fdef 1 500
+  )";
+  auto readFile = [&](const std::string& name) {
+    auto it = fileMap.find(name);
+    return it != fileMap.end() ? it->second : std::string();
+  };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(!result.ok);
+  CHECK(result.err.find("runs past the end") != std::string::npos);
+}
+
+// ============================================================================
+// SHOW 2: address collision (overlap) detection
+// ============================================================================
+
+TEST(show_two_fixture_overlap_error) {
+  std::map<std::string, std::string> fileMap;
+  fileMap["torrent.fdef"] = R"(
+    FIXTURE Torrent
+    FOOTPRINT 16
+    CAP Dimmer 0
+  )";
+  fileMap["par.fdef"] = R"(
+    FIXTURE RGBWAUV PAR
+    FOOTPRINT 8
+    CAP Dimmer 0
+  )";
+  std::string showText = R"(
+    SHOW 2
+    UNIVERSE 1 DMX
+    FIXTURE torrent.fdef 1 17
+    FIXTURE par.fdef 1 30
+  )";
+  auto readFile = [&](const std::string& name) {
+    auto it = fileMap.find(name);
+    return it != fileMap.end() ? it->second : std::string();
+  };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(!result.ok);
+  CHECK(result.err.find("address collision in universe 1") != std::string::npos);
+  CHECK(result.err.find("Torrent") != std::string::npos);
+  CHECK(result.err.find("RGBWAUV PAR") != std::string::npos);
+  CHECK(result.err.find("17..32") != std::string::npos);  // torrent's full range
+  CHECK(result.err.find("30..37") != std::string::npos);  // par's full range
+  CHECK(result.err.find("30..32") != std::string::npos);  // the overlap itself
+}
+
+// A botched patch usually has several collisions -- every pair must be
+// reported, not just the first.
+TEST(show_three_fixture_overlap_all_reported) {
+  std::map<std::string, std::string> fileMap;
+  fileMap["f.fdef"] = R"(
+    FIXTURE Gen
+    FOOTPRINT 10
+    CAP Dimmer 0
+  )";
+  std::string showText = R"(
+    SHOW 2
+    UNIVERSE 1 DMX
+    FIXTURE f.fdef 1 1
+    FIXTURE f.fdef 1 5
+    FIXTURE f.fdef 1 9
+  )";
+  auto readFile = [&](const std::string& name) {
+    auto it = fileMap.find(name);
+    return it != fileMap.end() ? it->second : std::string();
+  };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(!result.ok);
+
+  size_t count = 0;
+  size_t pos = 0;
+  while ((pos = result.err.find("address collision in universe 1", pos)) != std::string::npos) {
+    count++;
+    pos++;
+  }
+  CHECK(count == 3);  // (1,5) (1,9) (5,9): every pairwise overlap reported
+}
+
+// Matrices occupy channels too (w*h*3), and must be checked against
+// fixtures for overlap, not just other fixtures.
+TEST(show_matrix_overlaps_fixture_error) {
+  std::map<std::string, std::string> fileMap;
+  fileMap["par.fdef"] = R"(
+    FIXTURE Par
+    FOOTPRINT 5
+    CAP Dimmer 0
+  )";
+  std::string showText = R"(
+    SHOW 2
+    UNIVERSE 1 DMX
+    FIXTURE par.fdef 1 1
+    MATRIX 1 3 2 2 SERP H RGB
+  )";
+  auto readFile = [&](const std::string& name) {
+    auto it = fileMap.find(name);
+    return it != fileMap.end() ? it->second : std::string();
+  };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(!result.ok);
+  CHECK(result.err.find("address collision in universe 1") != std::string::npos);
+  CHECK(result.err.find("Par") != std::string::npos);
+  CHECK(result.err.find("Matrix") != std::string::npos);
+}
+
+// ============================================================================
+// Golden test: the migrated samples/demo.show compiles to the exact same
+// SHW1 bytes it produced before the 1-indexing migration -- proves the text
+// semantics moved and the bytes didn't. kDemoShowGoldenBytes was captured
+// from the pre-migration provision compiler run against the pre-migration
+// (0-indexed, no SHOW header) samples/demo.show.
+// ============================================================================
+
+static const uint8_t kDemoShowGoldenBytes[] = {
+  83, 72, 87, 49, 2, 4, 2, 0, 4, 0, 1, 0, 1, 0, 0, 1, 1, 1, 39, 0, 80, 70, 88, 49, 1, 0, 4, 4, 10,
+  68, 105, 109, 109, 101, 114, 32, 82, 71, 66, 0, 0, 255, 0, 0, 1, 1, 255, 0, 0, 2, 2, 255, 0, 0,
+  3, 3, 255, 0, 0, 55, 0, 80, 70, 88, 49, 1, 0, 9, 7, 11, 77, 111, 118, 105, 110, 103, 32, 72,
+  101, 97, 100, 0, 0, 255, 0, 0, 10, 1, 2, 0, 0, 11, 3, 4, 0, 0, 1, 5, 255, 0, 0, 2, 6, 255, 0, 0,
+  3, 7, 255, 0, 0, 12, 8, 255, 8, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 68, 0, 0, 135, 67, 0, 0, 0, 63, 0, 0, 0, 63, 0, 0, 0, 0,
+  0, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7,
+  68, 0, 0, 135, 67, 0, 0, 0, 63, 0, 0, 0, 63, 0, 0, 1, 0, 0, 21, 0, 1, 0, 0, 0, 64, 0, 0, 128,
+  63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 68, 0, 0, 135, 67, 0, 0, 0, 63, 0,
+  0, 0, 63, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 7, 68, 0, 0, 135, 67, 0, 0, 0, 63, 0, 0, 0, 63, 0, 0, 16, 0, 8, 0, 1, 0, 0, 2, 0,
+  0, 108, 1, 77, 68, 70, 49, 1, 0, 0, 15, 6, 5, 2, 4, 28, 65, 107, 97, 105, 32, 65, 80, 67, 52,
+  48, 32, 109, 107, 73, 73, 0, 39, 48, 52, 58, 66, 80, 81, 82, 86, 87, 103, 7, 7, 0, 0, 14, 14, 6,
+  0, 15, 15, 13, 0, 16, 23, 255, 255, 48, 55, 255, 255, 13, 13, 1, 47, 47, 1, 0, 0, 39, 0, 0, 0,
+  17, 0, 82, 86, 0, 17, 0, 5, 0, 52, 52, 0, 22, 0, 3, 0, 66, 66, 0, 25, 0, 3, 24, 0, 0, 28, 0, 1,
+  37, 0, 2, 42, 0, 3, 48, 0, 5, 52, 0, 9, 59, 0, 13, 66, 0, 17, 71, 0, 21, 77, 0, 29, 84, 0, 33,
+  89, 0, 37, 98, 0, 41, 103, 0, 45, 110, 0, 49, 117, 0, 53, 125, 0, 57, 130, 0, 0, 134, 0, 3, 140,
+  0, 5, 144, 0, 21, 150, 0, 41, 155, 0, 0, 159, 0, 1, 162, 0, 2, 168, 0, 0, 172, 0, 1, 179, 0, 2,
+  116, 114, 97, 99, 107, 0, 109, 97, 115, 116, 101, 114, 0, 99, 114, 111, 115, 115, 102, 97, 100,
+  101, 114, 0, 111, 102, 102, 0, 103, 114, 101, 121, 45, 100, 105, 109, 0, 103, 114, 101, 121, 0,
+  119, 104, 105, 116, 101, 0, 114, 101, 100, 0, 111, 114, 97, 110, 103, 101, 0, 121, 101, 108,
+  108, 111, 119, 0, 108, 105, 109, 101, 0, 103, 114, 101, 101, 110, 0, 115, 112, 114, 105, 110,
+  103, 0, 97, 113, 117, 97, 0, 115, 107, 121, 45, 98, 108, 117, 101, 0, 98, 108, 117, 101, 0, 105,
+  110, 100, 105, 103, 111, 0, 118, 105, 111, 108, 101, 116, 0, 109, 97, 103, 101, 110, 116, 97, 0,
+  112, 105, 110, 107, 0, 111, 102, 102, 0, 119, 104, 105, 116, 101, 0, 114, 101, 100, 0, 103, 114,
+  101, 101, 110, 0, 98, 108, 117, 101, 0, 111, 102, 102, 0, 111, 110, 0, 98, 108, 105, 110, 107,
+  0, 111, 102, 102, 0, 121, 101, 108, 108, 111, 119, 0, 111, 114, 97, 110, 103, 101, 0,
+};
+
+static std::string readFileFromDiskForTest(const std::string& path) {
+  std::ifstream file(path);
+  if (!file.is_open()) return std::string();
+  std::stringstream buffer;
+  buffer << file.rdbuf();
+  return buffer.str();
+}
+
+TEST(show_demo_golden_bytes_unchanged_by_1_indexing_migration) {
+  std::string showText = readFileFromDiskForTest("samples/demo.show");
+  CHECK(!showText.empty());  // run from the repo root (see samples/demo.show's own comment)
+
+  CompileResult result = compileShow(showText, readFileFromDiskForTest);
+  CHECK(result.ok);
+
+  size_t goldenLen = sizeof(kDemoShowGoldenBytes) / sizeof(kDemoShowGoldenBytes[0]);
+  CHECK(result.bundle.size() == goldenLen);
+  CHECK(std::memcmp(result.bundle.data(), kDemoShowGoldenBytes, goldenLen) == 0);
 }
 
 // ============================================================================
@@ -834,6 +1152,18 @@ int main() {
   RUN_TEST(show_compile_and_load_roundtrip_with_controller);
   RUN_TEST(show_compile_no_controller_stays_v1);
   RUN_TEST(show_controller_missing_deffile_error);
+  RUN_TEST(show_v2_address_and_universe_convert_to_0_indexed);
+  RUN_TEST(show_missing_header_error_names_migration);
+  RUN_TEST(show_empty_file_missing_header_error);
+  RUN_TEST(show_unsupported_version_error);
+  RUN_TEST(show_universe_zero_error);
+  RUN_TEST(show_address_zero_error);
+  RUN_TEST(show_address_513_error);
+  RUN_TEST(show_footprint_runs_past_universe_end_error);
+  RUN_TEST(show_two_fixture_overlap_error);
+  RUN_TEST(show_three_fixture_overlap_all_reported);
+  RUN_TEST(show_matrix_overlaps_fixture_error);
+  RUN_TEST(show_demo_golden_bytes_unchanged_by_1_indexing_migration);
   RUN_TEST(loader_bad_magic);
   RUN_TEST(loader_truncated_header);
   RUN_TEST(loader_truncated_fixture_table);

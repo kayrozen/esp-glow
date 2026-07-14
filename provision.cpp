@@ -512,6 +512,50 @@ struct MatrixInstance {
   uint16_t startChannel = 0;
 };
 
+// A span of DMX channels occupied by one fixture or matrix, in human-facing
+// 1-indexed addresses -- used only for the post-parse overlap/gap checks
+// below, never written to the SHW1 bundle.
+struct OccupiedRange {
+  uint8_t universe;  // 0-indexed internal universe
+  int fromAddr;       // 1-indexed, inclusive
+  int toAddr;          // 1-indexed, inclusive
+  std::string name;
+};
+
+static std::string missingShowHeaderErr() {
+  return "this .show has no 'SHOW 2' header. Addressing changed in v2: "
+         "universes and DMX addresses are now 1-indexed (write the address "
+         "printed on the fixture). Add 'SHOW 2' as the first line and add 1 "
+         "to every universe and channel number.";
+}
+
+// Converts a 1-indexed .show universe number to the internal 0-indexed
+// index, validating range 1..8. `context` names the calling directive
+// (e.g. "UNIVERSE", "FIXTURE") for the error message.
+static bool convertUniverse(int univOneIndexed, const char* context, uint8_t& out, std::string& err) {
+  if (univOneIndexed < 1) {
+    err = std::string(context) + ": universes are 1-indexed (write 1 for the first universe, not 0)";
+    return false;
+  }
+  if (univOneIndexed > 8) {
+    err = std::string(context) + ": universe out of range (1..8)";
+    return false;
+  }
+  out = static_cast<uint8_t>(univOneIndexed - 1);
+  return true;
+}
+
+// Converts a 1-indexed DMX address (a FIXTURE base or MATRIX start channel)
+// to the internal 0-indexed channel, validating range 1..512.
+static bool convertAddress(int addrOneIndexed, const char* context, uint16_t& out, std::string& err) {
+  if (addrOneIndexed < 1 || addrOneIndexed > 512) {
+    err = std::string(context) + ": DMX addresses are 1..512";
+    return false;
+  }
+  out = static_cast<uint16_t>(addrOneIndexed - 1);
+  return true;
+}
+
 static ColorOrder colorOrderFromString(const std::string& s) {
   if (s == "RGB") return ColorOrder::RGB;
   if (s == "GRB") return ColorOrder::GRB;
@@ -537,6 +581,8 @@ CompileResult compileShow(const std::string& showText,
 
   uint8_t maxUniverse = 0;
   FixtureInstance* lastFixture = nullptr;
+  bool sawHeader = false;
+  std::vector<OccupiedRange> occupied;
 
   // Parse .show
   std::istringstream iss(showText);
@@ -551,6 +597,22 @@ CompileResult compileShow(const std::string& showText,
 
     const std::string& cmd = tokens[0];
 
+    // SHOW 2 must be the first non-comment, non-blank line. No v1 fallback:
+    // a pre-migration .show that just happens to parse (no SHOW line) would
+    // otherwise silently mean every address shifted by one channel.
+    if (!sawHeader) {
+      if (cmd != "SHOW") {
+        result.err = missingShowHeaderErr();
+        return result;
+      }
+      if (tokens.size() < 2 || tokens[1] != "2") {
+        result.err = "SHOW: unsupported version (this compiler only supports 'SHOW 2')";
+        return result;
+      }
+      sawHeader = true;
+      continue;
+    }
+
     if (cmd == "UNIVERSE") {
       if (tokens.size() < 3) {
         result.err = "UNIVERSE: missing index or transport";
@@ -561,7 +623,6 @@ CompileResult compileShow(const std::string& showText,
         result.err = "UNIVERSE: invalid index";
         return result;
       }
-      uint8_t idx = static_cast<uint8_t>(idxInt);
 
       UniverseTransport transport;
       const std::string& tName = tokens[2];
@@ -576,8 +637,8 @@ CompileResult compileShow(const std::string& showText,
         return result;
       }
 
-      if (idx >= 8) {
-        result.err = "UNIVERSE: index out of range (0..7)";
+      uint8_t idx;
+      if (!convertUniverse(idxInt, "UNIVERSE", idx, result.err)) {
         return result;
       }
 
@@ -598,11 +659,13 @@ CompileResult compileShow(const std::string& showText,
         result.err = "FIXTURE: invalid universe or base";
         return result;
       }
-      uint8_t univ = static_cast<uint8_t>(univInt);
-      uint16_t baseAddr = static_cast<uint16_t>(baseInt);
 
-      if (univ >= 8) {
-        result.err = "FIXTURE: universe out of range (0..7)";
+      uint8_t univ;
+      if (!convertUniverse(univInt, "FIXTURE", univ, result.err)) {
+        return result;
+      }
+      uint16_t baseAddr;
+      if (!convertAddress(baseInt, "FIXTURE", baseAddr, result.err)) {
         return result;
       }
       if (maxUniverse < univ) {
@@ -623,6 +686,16 @@ CompileResult compileShow(const std::string& showText,
         defCache[defFile] = def;
       }
 
+      const FixtureDef& def = defCache[defFile];
+      int footprintEnd = baseInt + static_cast<int>(def.footprint) - 1;
+      if (footprintEnd > 512) {
+        result.err = "FIXTURE: fixture at address " + std::to_string(baseInt) +
+                      " with a " + std::to_string(static_cast<int>(def.footprint)) +
+                      "-channel footprint runs past the end of universe " +
+                      std::to_string(univInt);
+        return result;
+      }
+
       FixtureInstance fi;
       fi.defFile = defFile;
       fi.universe = univ;
@@ -630,6 +703,8 @@ CompileResult compileShow(const std::string& showText,
 
       fixtures.push_back(fi);
       lastFixture = &fixtures.back();
+
+      occupied.push_back({univ, baseInt, footprintEnd, def.name.empty() ? defFile : def.name});
 
     } else if (cmd == "POS") {
       if (!lastFixture) {
@@ -738,8 +813,13 @@ CompileResult compileShow(const std::string& showText,
         result.err = "MATRIX: invalid numeric parameters";
         return result;
       }
-      mi.startUniverse = static_cast<uint8_t>(startUniverseInt);
-      mi.startChannel = static_cast<uint16_t>(startChannelInt);
+
+      if (!convertUniverse(startUniverseInt, "MATRIX", mi.startUniverse, result.err)) {
+        return result;
+      }
+      if (!convertAddress(startChannelInt, "MATRIX", mi.startChannel, result.err)) {
+        return result;
+      }
       mi.width = static_cast<uint16_t>(widthInt);
       mi.height = static_cast<uint16_t>(heightInt);
 
@@ -747,15 +827,35 @@ CompileResult compileShow(const std::string& showText,
       mi.vertical = (tokens[6] == "V");
       mi.orderStr = tokens[7];
 
-      if (mi.startUniverse >= 8) {
-        result.err = "MATRIX: startUniverse out of range";
-        return result;
-      }
       if (maxUniverse < mi.startUniverse) {
         maxUniverse = mi.startUniverse;
       }
 
       matrices.push_back(mi);
+
+      // Matrices are allowed to span multiple universes -- PixelMatrix
+      // (pixel_matrix.cpp) packs w*h*3 channels starting at
+      // startUniverse:startChannel and rolls over into subsequent
+      // universes once a universe's 512 channels fill up. Split the
+      // occupied range across every universe it touches (in 1-indexed,
+      // per-universe channel numbers) so overlap detection below sees the
+      // real footprint in each one, instead of wrongly flagging a large
+      // matrix as "running past the end".
+      {
+        long long totalChannels = static_cast<long long>(mi.width) * static_cast<long long>(mi.height) * 3;
+        std::string name = std::to_string(mi.width) + "x" + std::to_string(mi.height) + " Matrix";
+        long long globalStart = static_cast<long long>(mi.startUniverse) * 512 + (startChannelInt - 1);
+        long long globalEnd = globalStart + totalChannels - 1;
+        for (long long g = globalStart; g <= globalEnd;) {
+          long long u = g / 512;
+          long long universeEnd = u * 512 + 511;
+          long long spanEnd = std::min(globalEnd, universeEnd);
+          if (u > 255) break;  // out of representable universe range; give up extending
+          occupied.push_back({static_cast<uint8_t>(u), static_cast<int>(g % 512) + 1,
+                               static_cast<int>(spanEnd % 512) + 1, name});
+          g = spanEnd + 1;
+        }
+      }
 
     } else if (cmd == "CONTROLLER") {
       if (tokens.size() < 2) {
@@ -786,6 +886,71 @@ CompileResult compileShow(const std::string& showText,
     } else if (!cmd.empty()) {
       result.err = "Unknown command: " + cmd;
       return result;
+    }
+  }
+
+  if (!sawHeader) {
+    // A file that was entirely blank/comments never hit the header check
+    // inside the loop -- still needs one.
+    result.err = missingShowHeaderErr();
+    return result;
+  }
+
+  // Overlap detection: group every fixture's and matrix's occupied-channel
+  // range by universe and report every colliding pair, not just the first
+  // -- a botched patch usually has several. This is the single most common
+  // real-world patching mistake, and it doesn't error at runtime; it just
+  // makes two fixtures fight over channels.
+  {
+    std::map<uint8_t, std::vector<size_t>> byUniverse;
+    for (size_t i = 0; i < occupied.size(); i++) {
+      byUniverse[occupied[i].universe].push_back(i);
+    }
+
+    std::vector<std::string> collisions;
+    for (const auto& entry : byUniverse) {
+      const auto& idxs = entry.second;
+      for (size_t a = 0; a < idxs.size(); a++) {
+        for (size_t b = a + 1; b < idxs.size(); b++) {
+          const OccupiedRange& ra = occupied[idxs[a]];
+          const OccupiedRange& rb = occupied[idxs[b]];
+          if (ra.fromAddr <= rb.toAddr && rb.fromAddr <= ra.toAddr) {
+            int overlapFrom = std::max(ra.fromAddr, rb.fromAddr);
+            int overlapTo = std::min(ra.toAddr, rb.toAddr);
+            collisions.push_back(
+                "address collision in universe " + std::to_string(entry.first + 1) + ":\n" +
+                "  '" + ra.name + "' at " + std::to_string(ra.fromAddr) + " occupies channels " +
+                std::to_string(ra.fromAddr) + ".." + std::to_string(ra.toAddr) + "\n" +
+                "  '" + rb.name + "' at " + std::to_string(rb.fromAddr) + " occupies channels " +
+                std::to_string(rb.fromAddr) + ".." + std::to_string(rb.toAddr) + "\n" +
+                "  \xe2\x86\x92 they overlap on channels " + std::to_string(overlapFrom) + ".." +
+                std::to_string(overlapTo));
+          }
+        }
+      }
+    }
+
+    if (!collisions.empty()) {
+      std::string joined;
+      for (size_t i = 0; i < collisions.size(); i++) {
+        if (i > 0) joined += "\n\n";
+        joined += collisions[i];
+      }
+      result.err = joined;
+      return result;
+    }
+
+    // Gap warning (informational, not an error): unused trailing channels
+    // in a universe that's actually patched.
+    for (const auto& entry : byUniverse) {
+      int maxEnd = 0;
+      for (size_t idx : entry.second) {
+        maxEnd = std::max(maxEnd, occupied[idx].toAddr);
+      }
+      if (maxEnd > 0 && maxEnd < 512) {
+        result.warnings.push_back("universe " + std::to_string(entry.first + 1) + ": channels " +
+                                   std::to_string(maxEnd + 1) + "..512 unused");
+      }
     }
   }
 

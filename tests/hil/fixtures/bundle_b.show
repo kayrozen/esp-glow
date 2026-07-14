@@ -2,12 +2,13 @@
 #
 # See bundle_a.show's header comment; this is its counterpart with
 # different (and non-zero) counts on both axes.
+SHOW 2
 
-UNIVERSE 0 DMX
-UNIVERSE 1 ARTNET
+UNIVERSE 1 DMX
+UNIVERSE 2 ARTNET
 
-FIXTURE samples/dimmer.fdef 0 0
-FIXTURE samples/dimmer.fdef 0 10
-FIXTURE samples/dimmer.fdef 0 20
+FIXTURE samples/dimmer.fdef 1 1
+FIXTURE samples/dimmer.fdef 1 11
+FIXTURE samples/dimmer.fdef 1 21
 
-MATRIX 1 0 4 4 SERP H RGB
+MATRIX 2 1 4 4 SERP H RGB
