@@ -88,13 +88,14 @@ build_test() {
     -s EXIT_RUNTIME=1 \
     -s ALLOW_MEMORY_GROWTH=1 \
     -s ASSERTIONS=2 \
-    -s DEMANGLE_SUPPORT=1 \
     -g2
-    # ASSERTIONS=2/DEMANGLE_SUPPORT/-g2: this is the test binary, never
+    # ASSERTIONS=2/-g2: this is the test binary, never
     # shipped to the editor (that's build_editor, below, which stays lean).
     # An abort here should say *why* -- e.g. "stack overflow" or an
     # exception's real (demangled) type -- with a symbolized stack pointing
     # at the offending function, instead of a bare Aborted() via __abort_js.
+    # (Symbol demangling is built into Emscripten now -- the old
+    # -sDEMANGLE_SUPPORT flag was removed and is a hard error if passed.)
     # Worth keeping on permanently: the cost is only paid when running the
     # test suite under Node, and a silent abort here has already cost more
     # debugging time than this flag will ever add to CI.
