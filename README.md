@@ -232,13 +232,14 @@ CAP ShutterStrobe 6
   RANGE 64 95 strobe       # continuous sub-range
 ```
 ```
-# patch — .show
-UNIVERSE 0 DMX
-UNIVERSE 1 ARTNET
-FIXTURE samples/head.fdef 0 21
+# patch — .show (SHOW 2: universes and DMX addresses are 1-indexed)
+SHOW 2
+UNIVERSE 1 DMX
+UNIVERSE 2 ARTNET
+FIXTURE samples/head.fdef 1 22
 POS 2.0 1.0 0.0            # metres — this is what enables aim-at-a-point
 ROT 0 0 0
-MATRIX 1 0 16 8 SERP H RGB
+MATRIX 2 1 16 8 SERP H RGB
 ```
 A `CAP` with no `SLOT`/`RANGE` lines stays linear — every v1 profile still works.
 

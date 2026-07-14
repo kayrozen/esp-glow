@@ -387,9 +387,22 @@ LED CC 48 55 value              # fader LED rings driven by CC value 0..127
 ```
 
 A `.show` file embeds one with `CONTROLLER <deffile>` (mirrors `FIXTURE
-<deffile> <universe> <base>`), folding the compiled MDF1 blob into the SHW1
+<deffile> <universe> <address>`), folding the compiled MDF1 blob into the SHW1
 bundle's v2 controller table -- see the "SHW1 bundle format" section
 (`show_bundle.h`).
+
+**A note on addressing conventions, since this is where the two most
+confusable ones meet:** `.show` text (format version `SHOW 2`) is fully
+1-indexed and human-facing -- `UNIVERSE 1 ARTNET` and `FIXTURE ... 1 17`
+mean "the first universe" and "the address printed on the fixture's
+display." Internally (`PatchEntry`, `MatrixMap`, the `SHW1` bytes) every
+universe and channel is 0-indexed, and that 0-indexed universe number is
+also exactly what gets sent as the **Art-Net wire universe** (Art-Net's own
+`SubUni`/`Net` addressing is 0-based) -- so `UNIVERSE 1 ARTNET` -> internal
+index `0` -> wire universe `0`, `UNIVERSE 2 ARTNET` -> internal index `1` ->
+wire universe `1`, and so on. See README_PROVISION.md's "`.show` Grammar"
+section (Format Version / Migration, and the Art-Net wire mapping) for the
+full writeup and the compiler's validation/overlap-detection rules.
 
 ## Out of Scope
 

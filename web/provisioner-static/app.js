@@ -100,20 +100,24 @@ const DEFAULT_WORKSPACE = {
     name: "my-show.show",
     text: `# esp-glow show definition
 # Lines starting with # are comments. Tokens are whitespace-separated.
+#
+# SHOW 2: universes and DMX addresses are 1-indexed -- write the number
+# printed on the fixture/console, not a memory offset.
+SHOW 2
 
-UNIVERSE 0 DMX
-UNIVERSE 1 ARTNET
+UNIVERSE 1 DMX
+UNIVERSE 2 ARTNET
 
-# Moving head on universe 0, base channel 1
-FIXTURE torrent.fdef 0 1
+# Moving head on universe 1, address 2
+FIXTURE torrent.fdef 1 2
 POS 1.0 2.0 3.0
 ROT 0 0 0
 
-# Par fixture on universe 0, base channel 20
-FIXTURE par.fdef 0 20
+# Par fixture on universe 1, address 21
+FIXTURE par.fdef 1 21
 
-# 16x16 LED matrix on universe 1, starting at channel 0
-MATRIX 1 0 16 16 SERP H GRB
+# 16x16 LED matrix on universe 2, starting at address 1
+MATRIX 2 1 16 16 SERP H GRB
 
 # MIDI controller: embeds the APC40 mkII .mdef below into the bundle so the
 # device can drive its pad/scene LEDs. Bindings (which pad triggers which cue)
@@ -1123,19 +1127,19 @@ function renderPreview() {
     root.appendChild(section("Bundle", [el("div", {}, `${d.bundleBytes} bytes SHW1`)]));
     root.appendChild(
       section(`Universes (${s.universeCount})`, s.transports.map((t, i) =>
-        row(`[${i}]`, transportName(t)),
+        row(`U${i + 1}`, transportName(t)),
       )),
     );
     root.appendChild(
       section(`Fixtures (${s.fixtureCount})`, s.fixtures.length === 0
         ? [el("div", { class: "preview-empty" }, "None")]
-        : s.fixtures.map((f, i) => row(`[${i}]`, `u${f.universe} ch${f.base}${f.isHead ? " (head)" : ""}`)),
+        : s.fixtures.map((f, i) => row(`[${i}]`, `u${f.universe + 1} ch${f.base + 1}${f.isHead ? " (head)" : ""}`)),
       ),
     );
     root.appendChild(
       section(`Matrices (${s.matrixCount})`, s.matrices.length === 0
         ? [el("div", { class: "preview-empty" }, "None")]
-        : s.matrices.map((m, i) => row(`[${i}]`, `${m.width}×${m.height} @ u${m.startUniverse} ch${m.startChannel}`)),
+        : s.matrices.map((m, i) => row(`[${i}]`, `${m.width}×${m.height} @ u${m.startUniverse + 1} ch${m.startChannel + 1}`)),
       ),
     );
     return root;

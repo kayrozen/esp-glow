@@ -51,15 +51,24 @@ CAP ShutterStrobe 10 - 8 inv
 
 Describes the universe/transport setup, fixture placements (patch), and pixel matrix layouts.
 
+**Format version 2 (current): fully 1-indexed and human-facing.** Every universe number and
+DMX address you write is the number printed on the fixture's own display or the console —
+never a memory offset. A `.show` must declare this explicitly with a `SHOW 2` header as its
+first non-comment line; see "Format Version / Migration" below.
+
 ```
-UNIVERSE <idx> <DMX|ARTNET|SACN>   # Sets transport for universe idx (0..7).
-FIXTURE  <deffile> <universe> <base> # Patch an instance of a fixture type.
+SHOW 2                              # REQUIRED first non-comment line.
+UNIVERSE <idx> <DMX|ARTNET|SACN>   # Sets transport for universe idx (1..8, 1-indexed).
+FIXTURE  <deffile> <universe> <address> # Patch an instance of a fixture type.
+                                    # <universe> 1-indexed (as above). <address> is the
+                                    # 1-indexed DMX address (1..512) printed on the fixture.
 POS      <x> <y> <z>               # head only: world position (meters, float).
 ROT      <yaw> <pitch> <roll>      # head only: degrees. Euler angles for fixture orientation.
 CENTER   <panNorm> <tiltNorm>      # head only, optional (default 0.5 0.5). Pan/tilt DMX centers.
 INVERT   <0|1> <0|1>               # head only, optional (default 0 0). Pan/tilt invert flags.
-MATRIX   <startU> <startCh> <w> <h> <SERP|PROG> <H|V> <ORDER>
-         # Pixel matrix: starts at universe startU, channel startCh.
+MATRIX   <startU> <startAddr> <w> <h> <SERP|PROG> <H|V> <ORDER>
+         # Pixel matrix: starts at universe startU, DMX address startAddr (both 1-indexed,
+         # same convention as UNIVERSE/FIXTURE above).
          # w × h pixels. SERP = serpentine scan, PROG = progressive.
          # H = horizontal layout, V = vertical.
          # ORDER in {RGB, GRB, BRG, RBG, GBR, BGR}.
@@ -68,31 +77,84 @@ MATRIX   <startU> <startCh> <w> <h> <SERP|PROG> <H|V> <ORDER>
 ### Show Semantics
 
 - **UNIVERSE**: Optional per universe; if omitted, defaults to `Unused`.
-- **FIXTURE**: Loads `<deffile>` (resolved via filesystem callback), instances it at `<universe>:<base>`.
+- **FIXTURE**: Loads `<deffile>` (resolved via filesystem callback), instances it at
+  `<universe>:<address>`. The compiler converts `<universe>` and `<address>` to the internal
+  0-indexed representation (`universe-1`, `address-1`) exactly once, here — `PatchEntry.base`
+  and everything downstream stays 0-indexed.
 - **POS/ROT/CENTER/INVERT**: Modify the most recent `FIXTURE` line. Error if the fixture is not a head.
-- **universeCount** = (max universe index referenced) + 1 ≤ 8.
+- **universeCount** = (max internal universe index referenced) + 1 ≤ 8.
+- **Validation**: universe `< 1` or `> 8` errors ("universes are 1-indexed" / "out of range");
+  address `< 1` or `> 512` errors ("DMX addresses are 1..512"); a *fixture* whose
+  `address + footprint - 1 > 512` errors ("runs past the end of universe N") — a fixture never
+  spans universes. A `MATRIX`'s `w × h × 3` channels are allowed to run past 512 and roll over
+  into the next universe(s) (`startUniverse + 1`, `+2`, ...), matching what `PixelMatrix`
+  (`pixel_matrix.cpp`) actually does on-device; there's no "past the end" error for matrices.
+- **Overlap detection**: after parsing, the compiler builds each universe's occupied-channel
+  set from every fixture's `(address, footprint)` and every matrix's `(address, w×h×3)` —
+  splitting a matrix's range across each universe it spans — and reports **every** colliding
+  pair, naming both fixtures/matrices and the exact overlapping channel range. This is a
+  compile-time check for the most common real-world patching mistake — two things fighting
+  over the same channels — and does not change the binary output.
+- **Gap warning**: if a patched universe has unused trailing channels (e.g. only channels
+  1..120 of 512 are occupied), the compiler returns a non-fatal warning
+  (`CompileResult::warnings`), not an error.
+
+### Universes — the Art-Net Wire Mapping
+
+`.show` universe numbers are 1-based (`U1`, `U2`, `U3`, ... — what a lighting person says out
+loud). The compiler converts to a 0-based **internal** universe index (`UNIVERSE 1` → index 0,
+`UNIVERSE 2` → index 1, ...), and that 0-based index is what's stored in the `SHW1` bundle and
+used everywhere on-device (`PatchEntry.universe`, `MatrixMap.startUniverse`).
+
+**Art-Net universes are 0-based on the wire** (Art-Net's own `SubUni`/`Net` addressing starts
+at 0), which happens to line up with the internal index without another offset:
+`UNIVERSE 1 ARTNET` → internal index `0` → `ArtNetSink::send(universeIndex=0, ...)` → wire
+universe `0` (the *first* Art-Net universe, sometimes written `0.0` or `Net 0 / SubUni 0`).
+`UNIVERSE 2 ARTNET` → internal index `1` → wire universe `1`. In general: **wire universe =
+`.show` universe number − 1**, the same arithmetic as a DMX address, just applied to the whole
+universe instead of a channel within it. DMX and sACN universes don't have this wire-level
+0-basing concern (DMX is a physical port, not a numbered universe on a shared wire), so this
+mapping only matters for `ARTNET` transport universes.
+
+### Format Version / Migration
+
+`.show` text is versioned via the required `SHOW 2` header line. There is **no v1 fallback**:
+a pre-v2 `.show` (0-indexed, no header) is a hard parse error rather than being silently
+reinterpreted, because flipping the addressing semantics without a version marker would shift
+every address by one channel with no error — a rig that mostly works with one fixture subtly
+wrong. If you have an old `.show`:
+
+1. Add `SHOW 2` as the first non-comment line.
+2. Add 1 to every `UNIVERSE` index and every `FIXTURE`/`MATRIX` address.
 
 ### Example `.show`
 
 ```
-UNIVERSE 0 DMX
-UNIVERSE 1 ARTNET
+SHOW 2
+
+UNIVERSE 1 DMX
+UNIVERSE 2 ARTNET
 
 # Torrent moving head at (1, 2, 3) in world space, pan/tilt at identity.
-FIXTURE torrent.fdef 0 1
+FIXTURE torrent.fdef 1 2
 POS 1 2 3
 ROT 0 0 0
 
 # Par fixture, plain dimmer + RGB
-FIXTURE par.fdef 0 20
+FIXTURE par.fdef 1 21
 
-# 16×16 LED matrix on universe 1, starting at channel 0
-MATRIX 1 0 16 16 SERP H GRB
+# 16×16 LED matrix on universe 2, starting at address 1
+MATRIX 2 1 16 16 SERP H GRB
 ```
 
 ## `SHW1` Binary Bundle Format
 
 Little-endian encoding. Assumes all platforms (x86-64 host and ESP32-S3 Xtensa device) are little-endian. Floating-point numbers are IEEE-754 32-bit (native byte order). Document any assumption changes.
+
+Note: this `version` byte (1, or 2 once a `CONTROLLER` is compiled in) is the **binary bundle**
+format version, unrelated to the `.show` text's `SHOW 2` header above — the text format moved
+to 1-indexed addressing without touching this byte at all; a `SHOW 2` source file with no
+`CONTROLLER` still compiles to `version = 1` bytes, byte-identical to a pre-migration bundle.
 
 ### Layout
 
@@ -233,7 +295,9 @@ bool capFromName(const std::string& name, Capability& out);
 // Encode a FixtureDef to a PFX1 blob
 std::vector<uint8_t> encodeProfile(const FixtureDef& def);
 
-// Compile a .show to a SHW1 bundle
+// Compile a .show to a SHW1 bundle. CompileResult.warnings carries non-fatal
+// notices (e.g. unused trailing channels in a patched universe); always
+// empty when !ok.
 CompileResult compileShow(const std::string& showText,
                           const std::function<std::string(const std::string&)>& readFile);
 ```
@@ -277,3 +341,10 @@ Tests cover:
 - Profile deduplication.
 - Error cases (POS on non-head, etc.).
 - Loader strictness (bad magic, truncation, OOB checks).
+- `SHOW 2` 1-indexed addressing: the address/universe conversion (`address 17` → `base 16`),
+  a missing-header file failing with the migration message, out-of-range universes/addresses,
+  and a footprint that runs past the end of a universe.
+- Address collision detection: two overlapping fixtures, three-way overlaps (all reported, not
+  just the first), and a matrix overlapping a fixture.
+- Golden test: `samples/demo.show` compiles to a byte-identical `SHW1` bundle before and after
+  the 1-indexing migration — proves the text semantics moved without moving the bytes.

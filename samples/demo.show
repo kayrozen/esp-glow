@@ -1,32 +1,36 @@
 # samples/demo.show — a small demo patch for F3 bring-up.
 #
-# Two DMX universes (0 = DMX, 1 = Art-Net) plus a 16x8 RGB matrix on
-# Art-Net universes 2..3. Compile with:
+# Two DMX universes (1 = DMX, 2 = Art-Net) plus a 16x8 RGB matrix starting on
+# Art-Net universe 3. Compile with:
 #   ./provision samples/demo.show firmware/main/data/show.shw1
 #
 # (The provision compiler resolves fixture .fdef files by basename from the
 # current working directory; run from the repo root so samples/*.fdef resolve.)
+#
+# SHOW 2: universes and DMX addresses are 1-indexed -- write the number
+# printed on the fixture/console, not a memory offset. See README_PROVISION.md.
+SHOW 2
 
-UNIVERSE 0 DMX
-UNIVERSE 1 ARTNET
+UNIVERSE 1 DMX
 UNIVERSE 2 ARTNET
 UNIVERSE 3 ARTNET
+UNIVERSE 4 ARTNET
 
-# Two dimmer fixtures on DMX universe 0.
-FIXTURE samples/dimmer.fdef 0 1
-FIXTURE samples/dimmer.fdef 0 11
+# Two dimmer fixtures on DMX universe 1.
+FIXTURE samples/dimmer.fdef 1 2
+FIXTURE samples/dimmer.fdef 1 12
 
-# One moving head on DMX universe 0, base 21.
-FIXTURE samples/head.fdef 0 21
+# One moving head on DMX universe 1, address 22.
+FIXTURE samples/head.fdef 1 22
 POS 2.0 1.0 0.0
 ROT 0 0 0
 CENTER 0.5 0.5
 
-# One dimmer fixture on Art-Net universe 1 (for a remote Art-Net node).
-FIXTURE samples/dimmer.fdef 1 1
+# One dimmer fixture on Art-Net universe 2 (for a remote Art-Net node).
+FIXTURE samples/dimmer.fdef 2 2
 
-# A 16x8 RGB matrix on Art-Net universes 2..3, serpentine horizontal, RGB order.
-MATRIX 2 0 16 8 SERP H RGB
+# A 16x8 RGB matrix starting on Art-Net universe 3, serpentine horizontal, RGB order.
+MATRIX 3 1 16 8 SERP H RGB
 
 # An Akai APC40 mkII for MIDI control + LED feedback (see FORMAT.md's MDF1
 # section, glow.bind.*/glow.led.* in README_LIVE_CONTROL.md).
