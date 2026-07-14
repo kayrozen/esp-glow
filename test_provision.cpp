@@ -108,6 +108,119 @@ TEST(parse_fdef_bad_footprint) {
   CHECK(!err.empty());
 }
 
+// Regression test: a genuinely non-numeric token (a typo, or an importer's
+// malformed QLC+/GDTF translation) -- not just a numerically valid but
+// out-of-range value like parse_fdef_bad_footprint's 256 above. This is
+// exactly the case that used to reach std::stoi's exception path: fine
+// with exceptions enabled (host), but an uncatchable abort under
+// Emscripten's default (no -fexceptions) WASM build, since a compiler
+// whose entire job is turning user typos into clean error messages cannot
+// depend on exceptions anywhere text gets parsed. Also exercises PANRANGE
+// (float) and CAP's three integer fields for the same reason.
+TEST(parse_fdef_footprint_non_numeric) {
+  std::string fdefText = R"(
+    FIXTURE Test
+    FOOTPRINT abc
+    CAP Dimmer 0
+  )";
+
+  FixtureDef def;
+  std::string err;
+  CHECK(!parseFixtureDef(fdefText, def, err));
+  CHECK(!err.empty());
+}
+
+TEST(parse_fdef_panrange_non_numeric) {
+  std::string fdefText = R"(
+    FIXTURE Test
+    FOOTPRINT 16
+    HEAD
+    PANRANGE not-a-number
+    CAP Dimmer 0
+  )";
+
+  FixtureDef def;
+  std::string err;
+  CHECK(!parseFixtureDef(fdefText, def, err));
+  CHECK(!err.empty());
+}
+
+TEST(parse_fdef_cap_coarse_non_numeric) {
+  std::string fdefText = R"(
+    FIXTURE Test
+    FOOTPRINT 16
+    CAP Dimmer xyz
+  )";
+
+  FixtureDef def;
+  std::string err;
+  CHECK(!parseFixtureDef(fdefText, def, err));
+  CHECK(!err.empty());
+}
+
+TEST(parse_fdef_cap_fine_non_numeric) {
+  std::string fdefText = R"(
+    FIXTURE Test
+    FOOTPRINT 16
+    CAP Pan 5 notanumber
+  )";
+
+  FixtureDef def;
+  std::string err;
+  CHECK(!parseFixtureDef(fdefText, def, err));
+  CHECK(!err.empty());
+}
+
+TEST(parse_fdef_cap_default_non_numeric) {
+  std::string fdefText = R"(
+    FIXTURE Test
+    FOOTPRINT 16
+    CAP ShutterStrobe 10 - notanumber
+  )";
+
+  FixtureDef def;
+  std::string err;
+  CHECK(!parseFixtureDef(fdefText, def, err));
+  CHECK(!err.empty());
+}
+
+// Same class of bug, in .show's compileShow -- POS/ROT/CENTER/INVERT/MATRIX
+// all parse user-typed numeric fields the same way FOOTPRINT/CAP did.
+TEST(show_pos_non_numeric_coordinate) {
+  std::map<std::string, std::string> fileMap;
+  fileMap["head.fdef"] = R"(
+    FIXTURE Head
+    FOOTPRINT 8
+    HEAD
+    CAP Pan 0 1
+  )";
+  std::string showText = R"(
+    UNIVERSE 0 DMX
+    FIXTURE head.fdef 0 0
+    POS 1 not-a-number 3
+  )";
+  auto readFile = [&](const std::string& name) {
+    auto it = fileMap.find(name);
+    return it != fileMap.end() ? it->second : std::string();
+  };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(!result.ok);
+  CHECK(!result.err.empty());
+}
+
+TEST(show_matrix_non_numeric_param) {
+  std::string showText = R"(
+    UNIVERSE 0 DMX
+    MATRIX 0 abc 16 8 SERP H RGB
+  )";
+  auto readFile = [](const std::string&) { return std::string(); };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(!result.ok);
+  CHECK(!result.err.empty());
+}
+
 TEST(capFromName_v2_valid) {
   Capability cap;
   CHECK(capFromName("ColorWheel", cap) && cap == Capability::ColorWheel);
@@ -701,11 +814,18 @@ int main() {
   RUN_TEST(encode_profile_with_ranges);
   RUN_TEST(parse_fdef_missing_footprint);
   RUN_TEST(parse_fdef_bad_footprint);
+  RUN_TEST(parse_fdef_footprint_non_numeric);
+  RUN_TEST(parse_fdef_panrange_non_numeric);
+  RUN_TEST(parse_fdef_cap_coarse_non_numeric);
+  RUN_TEST(parse_fdef_cap_fine_non_numeric);
+  RUN_TEST(parse_fdef_cap_default_non_numeric);
   RUN_TEST(parse_fdef_unknown_cap);
   RUN_TEST(encode_profile);
   RUN_TEST(show_compile_and_load_roundtrip);
   RUN_TEST(show_profile_deduplication);
   RUN_TEST(show_pos_without_head_error);
+  RUN_TEST(show_pos_non_numeric_coordinate);
+  RUN_TEST(show_matrix_non_numeric_param);
   RUN_TEST(parse_mdef_basic);
   RUN_TEST(parse_mdef_encoder_default_mode_absolute);
   RUN_TEST(parse_mdef_color_before_led_error);
