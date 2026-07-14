@@ -38,6 +38,8 @@ on:
       - "provision.h"
       - "fixture_profile.*"
       - "profile_encoder.*"
+      - "mdef.*"
+      - "controller_encoder.*"
       - "show_bundle.*"
       - "vec_math.*"
       - ".github/workflows/provisioner.yml"
