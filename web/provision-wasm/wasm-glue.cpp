@@ -127,6 +127,60 @@ std::vector<uint8_t> encodeProfileGlue(
   return encodeProfile(def);
 }
 
+// --- parseMidiController (.mdef) ----------------------------------------
+//
+// Parity with parseFixtureDef: parse a .mdef, and (on success) run it
+// through encodeController so the editor gets the same live ok/err
+// feedback and the encoded MDF1 size it shows for .fdef/.show. Counts are
+// the number of *records* (ranges), matching MDF1's padCount/faderCount/etc.
+
+struct MdefParseResult {
+  bool ok;
+  std::string err;
+  std::string name;
+  int midiChannel;
+  int padCount;
+  int faderCount;
+  int encoderCount;
+  int ledCount;
+  int colorCount;
+  int blobBytes;   // encoded MDF1 blob size (0 if encode failed)
+};
+
+MdefParseResult parseControllerDefGlue(const std::string& text) {
+  MdefParseResult r{};
+  ControllerBuilder def;
+  std::string err;
+  if (!parseControllerDef(text, def, err)) {
+    r.ok = false;
+    r.err = err;
+    return r;
+  }
+  // A valid parse can still overrun an MDEF_MAX_* limit at encode time;
+  // surface that here so the editor never reports a .mdef as OK that the
+  // .show compiler would then reject.
+  std::string encErr;
+  auto blob = encodeController(def, encErr);
+  if (!encErr.empty()) {
+    r.ok = false;
+    r.err = encErr;
+    return r;
+  }
+  r.ok = true;
+  r.err.clear();
+  r.name = def.name;
+  r.midiChannel = def.midiChannel;
+  r.padCount = (int)def.pads.size();
+  r.faderCount = (int)def.faders.size();
+  r.encoderCount = (int)def.encoders.size();
+  r.ledCount = (int)def.leds.size();
+  int colors = 0;
+  for (const auto& led : def.leds) colors += (int)led.colors.size();
+  r.colorCount = colors;
+  r.blobBytes = (int)blob.size();
+  return r;
+}
+
 // --- compileShow --------------------------------------------------------
 //
 // readFile is a JS function (path → string). We wrap it in std::function
@@ -244,6 +298,20 @@ EMSCRIPTEN_BINDINGS(provision_wasm) {
 
   function("parseFixtureDef", &parseFixtureDefGlue);
   function("encodeProfile", &encodeProfileGlue);
+
+  value_object<MdefParseResult>("MdefParseResult")
+    .field("ok", &MdefParseResult::ok)
+    .field("err", &MdefParseResult::err)
+    .field("name", &MdefParseResult::name)
+    .field("midiChannel", &MdefParseResult::midiChannel)
+    .field("padCount", &MdefParseResult::padCount)
+    .field("faderCount", &MdefParseResult::faderCount)
+    .field("encoderCount", &MdefParseResult::encoderCount)
+    .field("ledCount", &MdefParseResult::ledCount)
+    .field("colorCount", &MdefParseResult::colorCount)
+    .field("blobBytes", &MdefParseResult::blobBytes)
+    ;
+  function("parseController", &parseControllerDefGlue);
 
   value_object<CompileResultGlue>("CompileResult")
     .field("ok", &CompileResultGlue::ok)

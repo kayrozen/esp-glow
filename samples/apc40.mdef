@@ -1,42 +1,88 @@
-# samples/apc40.mdef — Akai APC40 mkII (a real, shipping USB/DIN-adaptable
-# clip launcher), demonstrating every .mdef construct: pads, a named and an
-# unnamed fader range, a relative encoder, and two LED ranges with distinct
-# colour palettes. See FORMAT.md's "MDF1 Controller Definition Format"
-# section for the full grammar.
+# samples/apc40.mdef -- Akai APC40 mkII (USB MIDI clip launcher / performance
+# controller). Transcribed from Akai's official "APC40 Mk2 Communications
+# Protocol" v1.2 (January 19, 2015), Generic Mode (Mode 0). See FORMAT.md's
+# "MDF1 Controller Definition Format" section for the full grammar.
 #
-# Values here describe the mkII's clip-launch grid and channel strip
-# layout; the note/CC numbers and colour-velocity mapping are Akai's own
-# (firmware-revision-dependent in the fine details -- treat the LED
-# palettes below as a representative subset, not an exhaustive reference).
+# MDF1 is single-channel: the mkII multiplexes the track number onto the MIDI
+# channel (the clip grid uses the channel to pick an RGB blink/pulse variant;
+# faders and knobs use channel 0..7 for tracks 1..8 and 8 for master). MDF1's
+# parseMidi ignores the channel, so every control below is addressed purely by
+# its note/CC number and the per-track duplicates collapse to one entry. The
+# note/CC numbers and the RGB colour-velocity palette are Akai's own.
 
 CONTROLLER Akai APC40 mkII
-MIDI_CHANNEL 1
+MIDI_CHANNEL 0
 
-# Clip launch grid: 8 columns x 5 rows, notes 0..39 (row-major).
+# --- Pads (Note-on buttons) -------------------------------------------
+# 8x5 RGB clip-launch grid: CLIP LAUNCH 1..40 = notes 0x00..0x27 (0..39),
+# row-major.
 PAD 0 39
+# Per-track button column: RECORD ARM, SOLO, ACTIVATOR, TRACK SELECT,
+# CLIP STOP -- notes 0x30..0x34 (48..52), one per track via the channel.
+PAD 48 52
+# Device / bank / view buttons + CROSSFADER A/B: DEVICE LEFT/RIGHT,
+# BANK LEFT/RIGHT, DEVICE ON-OFF, DEVICE LOCK, CLIP-DEVICE VIEW,
+# DETAIL VIEW, CROSSFADER A/B -- 0x3A..0x42 (58..66).
+PAD 58 66
+# MASTER select + STOP ALL CLIPS -- 0x50..0x51 (80..81).
+PAD 80 81
+# SCENE LAUNCH 1..5 (RGB) -- 0x52..0x56 (82..86).
+PAD 82 86
+# Track-control, transport and navigation block: PAN, SENDS, USER,
+# METRONOME, PLAY, STOP, RECORD, UP, DOWN, RIGHT, LEFT, SHIFT, TAP TEMPO,
+# NUDGE-, NUDGE+, SESSION RECORD, BANK LOCK -- 0x57..0x67 (87..103).
+PAD 87 103
 
-# Scene launch buttons, to the right of the grid.
-PAD 82 89
+# --- Faders / absolute knobs (CC) -------------------------------------
+FADER CC 7   track      # 9 track faders (0x07, track = MIDI channel)
+FADER CC 14  master     # master fader (0x0E)
+FADER CC 15  crossfader # crossfader (0x0F)
+FADER CC 16 23          # 8 DEVICE CONTROL knobs (0x10..0x17), absolute
+FADER CC 48 55          # 8 TRACK CONTROL knobs (0x30..0x37), absolute
 
-# Crossfader (named) and the 8 channel faders (unnamed block).
-FADER CC 7   master
-FADER CC 48 55
+# --- Relative encoders (CC) -------------------------------------------
+# TEMPO (0x0D) and CUE LEVEL (0x2F) report two's-complement deltas:
+# 0x01..0x3F = +1..+63, 0x40..0x7F = -64..-1.
+ENCODER CC 13 relative-2c   # tempo knob
+ENCODER CC 47 relative-2c   # cue level
 
-# Track pan knobs: relative encoders, Akai's two's-complement convention.
-ENCODER CC 16 23 relative-2c
-
-# Clip grid LEDs: colour = note-on velocity.
+# --- LED feedback -----------------------------------------------------
+# RGB clip grid: note-on velocity selects a colour from the mkII's 128-entry
+# palette (a representative subset here). Blink/pulse variants are chosen by
+# the note's MIDI channel (channel 0 = solid primary colour), not by velocity,
+# so they aren't encoded in this single-channel profile.
 LED NOTE 0 39 velocity
-  COLOR off         0
-  COLOR green       1
-  COLOR green-blink 2
-  COLOR red         3
-  COLOR red-blink   4
-  COLOR amber       5
-  COLOR amber-blink 6
-
-# Scene launch button LEDs: a smaller two-colour palette.
-LED NOTE 82 89 velocity
+  COLOR off       0
+  COLOR grey-dim  1
+  COLOR grey      2
+  COLOR white     3
+  COLOR red       5
+  COLOR orange    9
+  COLOR yellow    13
+  COLOR lime      17
+  COLOR green     21
+  COLOR spring    29
+  COLOR aqua      33
+  COLOR sky-blue  37
+  COLOR blue      41
+  COLOR indigo    45
+  COLOR violet    49
+  COLOR magenta   53
+  COLOR pink      57
+# SCENE LAUNCH buttons share the RGB palette (subset).
+LED NOTE 82 86 velocity
   COLOR off   0
-  COLOR green 1
-  COLOR red   3
+  COLOR white 3
+  COLOR red   5
+  COLOR green 21
+  COLOR blue  41
+# CLIP STOP LEDs: off / on / tempo-synced blink (0x34).
+LED NOTE 52 52 velocity
+  COLOR off   0
+  COLOR on    1
+  COLOR blink 2
+# CROSSFADER A/B LED: off / yellow / orange (0x42).
+LED NOTE 66 66 velocity
+  COLOR off    0
+  COLOR yellow 1
+  COLOR orange 2

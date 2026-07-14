@@ -1,0 +1,70 @@
+# samples/apc40-original.mdef -- Akai APC40 (the original 2009 model, not the
+# mkII). Transcribed from Akai's "Generic Communication Protocol for Akai
+# APC40 Controller" Rev 1 (May 1, 2009), Generic Mode (Mode 0). See FORMAT.md's
+# "MDF1 Controller Definition Format" section for the full grammar.
+#
+# The original APC40 differs from the mkII: its clip grid is addressed as five
+# CLIP LAUNCH note rows (0x35..0x39), the track being selected by the MIDI
+# channel, and its clip LEDs use a fixed green/red/yellow palette (with blink
+# variants) rather than the mkII's 128-colour RGB scheme. MDF1 is
+# single-channel and parseMidi ignores the channel, so the per-track duplicates
+# collapse to one entry per note/CC below.
+
+CONTROLLER Akai APC40
+MIDI_CHANNEL 0
+
+# --- Pads (Note-on buttons) -------------------------------------------
+# Per-track button rows: RECORD ARM, SOLO, ACTIVATOR, TRACK SELECTION,
+# CLIP STOP -- notes 0x30..0x34 (48..52), one per track via the channel.
+PAD 48 52
+# CLIP LAUNCH rows 1..5 -- notes 0x35..0x39 (53..57); 8 tracks each, the
+# track chosen by the MIDI channel. The green/red/yellow LEDs below drive
+# these.
+PAD 53 57
+# Device / view / record-mode buttons: CLIP-TRACK, DEVICE ON-OFF, left,
+# right, DETAIL VIEW, REC QUANT, MIDI OVERDUB, METRONOME -- 0x3A..0x41
+# (58..65).
+PAD 58 65
+# MASTER select + STOP ALL CLIPS -- 0x50..0x51 (80..81).
+PAD 80 81
+# SCENE LAUNCH 1..5 -- 0x52..0x56 (82..86).
+PAD 82 86
+# PAN + SEND A/B/C selectors -- 0x57..0x5A (87..90).
+PAD 87 90
+# Transport + navigation: PLAY, STOP, RECORD, UP, DOWN, RIGHT, LEFT,
+# SHIFT, TAP TEMPO, NUDGE+, NUDGE- -- 0x5B..0x65 (91..101).
+PAD 91 101
+
+# --- Faders / absolute knobs (CC) -------------------------------------
+FADER CC 7   track      # 8 track level faders (0x07, track = MIDI channel)
+FADER CC 14  master     # master level (0x0E)
+FADER CC 15  crossfader # crossfader (0x0F)
+FADER CC 16 23          # 8 DEVICE CONTROL knobs (0x10..0x17), absolute
+FADER CC 48 55          # 8 TRACK CONTROL knobs (0x30..0x37), absolute
+
+# --- Relative encoders (CC) -------------------------------------------
+# CUE LEVEL (0x2F) reports two's-complement deltas: 0x01..0x3F = +1..+63,
+# 0x40..0x7F = -64..-1.
+ENCODER CC 47 relative-2c   # cue level
+
+# --- LED feedback -----------------------------------------------------
+# Clip-launch grid LEDs (0x35..0x39): fixed green/red/yellow palette with
+# blink variants, selected by note-on velocity.
+LED NOTE 53 57 velocity
+  COLOR off          0
+  COLOR green        1
+  COLOR green-blink  2
+  COLOR red          3
+  COLOR red-blink    4
+  COLOR yellow       5
+  COLOR yellow-blink 6
+# CLIP STOP LEDs: off / on / blink (0x34).
+LED NOTE 52 52 velocity
+  COLOR off   0
+  COLOR on    1
+  COLOR blink 2
+# SCENE LAUNCH LEDs: off / on / blink (0x52..0x56).
+LED NOTE 82 86 velocity
+  COLOR off   0
+  COLOR on    1
+  COLOR blink 2
