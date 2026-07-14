@@ -33,6 +33,11 @@ Environment variables:
     GLOW_QEMU_BIN        Path to the qemu-system-xtensa binary. Default
                           "qemu-system-xtensa" (resolved via PATH).
     GLOW_QEMU_MACHINE    QEMU `-machine` name. Default "esp32s3".
+    GLOW_QEMU_PSRAM_MB   QEMU `-m` size in MB -- this is what attaches a
+                          virtual PSRAM chip at all (see QemuReader.start's
+                          comment); one of 2/4/8/16/32 (this QEMU fork's
+                          esp32s3.c rounds up to the nearest supported
+                          size). Default 8.
 
 Requires `idf.py` + `esptool.py` on PATH (i.e. an ESP-IDF environment
 already sourced -- `. $IDF_PATH/export.sh`) unless GLOW_SKIP_BUILD is set,
@@ -180,11 +185,12 @@ class QemuReader(LineReader):
     tests/shared/line_reader.py.
     """
 
-    def __init__(self, qemu_bin: str, machine: str, flash_image: Path):
+    def __init__(self, qemu_bin: str, machine: str, flash_image: Path, psram_mb: int = 8):
         super().__init__()
         self.qemu_bin = qemu_bin
         self.machine = machine
         self.flash_image = flash_image
+        self.psram_mb = psram_mb
         self.proc: Optional[subprocess.Popen] = None
 
     def start(self) -> None:
@@ -194,6 +200,17 @@ class QemuReader(LineReader):
             "-no-reboot",
             "-machine", self.machine,
             "-drive", f"file={self.flash_image},if=mtd,format=raw",
+            # esp32s3.c's esp32s3_machine_init_psram() only attaches a
+            # virtual PSRAM chip to SPI1/CS1 when machine->ram_size > 0
+            # (mc->default_ram_size is 0 -- no -m means no PSRAM device on
+            # the bus at all, not a smaller one). CONFIG_SPIRAM=y +
+            # CONFIG_BOOTLOADER_APP_ROLLBACK... -- app_main aborts in
+            # cpu_start if PSRAM init fails, so this is required, not
+            # optional, for this firmware to boot at all under QEMU. Valid
+            # sizes this machine accepts: 2/4/8/16/32 MB (see
+            # esp32s3_fixup_ram_size); 8M matches a typical ESP32-S3-WROOM
+            # board and firmware/sdkconfig.defaults' CONFIG_SPIRAM_TYPE_AUTO.
+            "-m", f"{self.psram_mb}M",
         ]
         logger.info("$ %s", " ".join(cmd))
         self.proc = subprocess.Popen(
@@ -281,13 +298,14 @@ def qemu_boot(qemu_flash_image: Path) -> Iterator[QemuReader]:
     """
     qemu_bin = os.getenv("GLOW_QEMU_BIN", "qemu-system-xtensa")
     machine = os.getenv("GLOW_QEMU_MACHINE", "esp32s3")
+    psram_mb = int(os.getenv("GLOW_QEMU_PSRAM_MB", "8"))
     if not shutil.which(qemu_bin):
         pytest.fail(
             f"{qemu_bin!r} not found on PATH. Install Espressif's QEMU fork "
             f"(esp32s3 machine support) or set GLOW_QEMU_BIN -- see README.md."
         )
 
-    reader = QemuReader(qemu_bin, machine, qemu_flash_image)
+    reader = QemuReader(qemu_bin, machine, qemu_flash_image, psram_mb)
     reader.start()
     try:
         yield reader
