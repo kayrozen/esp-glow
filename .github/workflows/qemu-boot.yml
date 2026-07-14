@@ -69,6 +69,51 @@ jobs:
           QEMU_BIN="$(find /opt/qemu-xtensa -name qemu-system-xtensa -type f | head -1)"
           ldd "$QEMU_BIN" | grep "not found" && exit 1 || true
 
+      # TEMPORARY diagnostic: boot hangs somewhere after "GLOW-TEST: dmx
+      # begin=ok" (Art-Net/bundle/scripts/stats telemetry all time out).
+      # wifi_start_sta() runs immediately after DMX in app_main() and is
+      # the leading suspect (QEMU's esp32s3 machine has no WiFi/802.11
+      # model, only a wired "open_eth" NIC -- see hw/xtensa/esp32s3.c), but
+      # this project has a history of confident wrong diagnoses, so: attach
+      # gdb to the actually-running QEMU process and get a real backtrace
+      # instead of acting on that guess. Remove this step once the real
+      # cause is confirmed and fixed.
+      - name: Diagnose the boot hang with gdb
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          GDB_BIN="$(find /opt/esp/tools -type f -name '*-elf-gdb' | head -1)"
+          echo "Using gdb: $GDB_BIN"
+          ELF="firmware/build-qemu-selftest/esp-glow.elf"
+          FLASH="firmware/build-qemu-selftest/qemu_flash.bin"
+
+          qemu-system-xtensa -nographic -no-reboot -machine esp32s3 \
+            -drive file="$FLASH",if=mtd,format=raw -m 8M \
+            -global driver=ssi_psram,property=is_octal,value=true \
+            -gdb tcp::1234 > /tmp/qemu_serial.log 2>&1 &
+          QEMU_PID=$!
+
+          # Give it time to pass DMX init and reach (what we believe is)
+          # the hang -- test timeouts showed no forward progress for 20-30s,
+          # so 15s here should land solidly inside the stall, not before it.
+          sleep 15
+
+          "$GDB_BIN" -batch -nx \
+            -ex "set pagination off" \
+            -ex "target remote :1234" \
+            -ex "echo \n=== info threads ===\n" \
+            -ex "info threads" \
+            -ex "echo \n=== thread apply all bt full ===\n" \
+            -ex "thread apply all bt full" \
+            -ex "echo \n=== thread apply all info registers ===\n" \
+            -ex "thread apply all info registers" \
+            "$ELF" 2>&1 || echo "gdb attach/backtrace failed (see above)"
+
+          kill "$QEMU_PID" 2>/dev/null || true
+          wait "$QEMU_PID" 2>/dev/null || true
+          echo "=== QEMU serial output captured before/during the hang ==="
+          cat /tmp/qemu_serial.log
+
       - name: Run QEMU boot tests
         shell: bash
         run: |
