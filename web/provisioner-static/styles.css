@@ -595,6 +595,28 @@ html, body {
 .import-warnings-title { color: var(--info-2); font-weight: 600; margin-bottom: 4px; }
 .import-warning { color: var(--text-dim); font-size: 11px; padding: 2px 0; }
 
+/* Data loss, not a mapping judgment call -- deliberately louder than
+   .import-warnings above (red border, solid icon) so a trimmed fixture
+   can't be missed on the way to "Add to fixture library". */
+.import-budget-alert {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--err);
+  border-radius: 4px;
+  background: rgba(244, 135, 113, 0.12);
+  color: var(--err);
+}
+.import-budget-alert .icon { flex-shrink: 0; margin-top: 2px; }
+.import-budget-alert-title { font-weight: 600; margin-bottom: 4px; }
+.import-budget-alert-detail { color: var(--text-bright); font-size: 11px; padding: 1px 0; }
+
+.import-range-row.import-range-will-drop {
+  opacity: 0.6;
+  text-decoration: line-through;
+  text-decoration-color: var(--err);
+}
+
 .import-channel-table {
   display: flex;
   flex-direction: column;

@@ -206,8 +206,18 @@ const state = {
     parsed: null,          // format-specific parsed fixture
     modes: [],             // [{name, footprint}]
     modeName: null,
-    model: null,           // current (possibly hand-edited) intermediate model
+    model: null,           // current (possibly hand-edited) intermediate model -- FULL mapping, never trimmed (the channel table always shows everything the source defines)
     warnings: [],
+    // fitRangeBudget() result for what's ACTUALLY about to be saved (see
+    // regenerateImportFdefText). Empty on every real fixture this importer
+    // has been tested against at PFX2's current MAX_RANGES=192/
+    // MAX_RANGE_NAME_BLOB=2048 budget -- this is a last-resort safety net
+    // for a pathological one, and it must never trim silently: rendered as
+    // its own unmissable banner (renderImportModal), separate from the
+    // softer informational `warnings` above, plus a per-range strike-
+    // through in the channel table so the user sees exactly which named
+    // slots wouldn't make it into the saved .fdef.
+    budgetDropped: [],
     fdefName: "",
     fdefText: "",
     fdefDirty: false,      // true once the user hand-edits the preview textarea
@@ -998,7 +1008,7 @@ function openImportModal() {
     ...state.import,
     open: true, stage: "input", loading: false, error: null, urlText: "",
     format: null, fixtureLabel: "", parsed: null, modes: [], modeName: null,
-    model: null, warnings: [], fdefName: "", fdefText: "", fdefDirty: false,
+    model: null, warnings: [], budgetDropped: [], fdefName: "", fdefText: "", fdefDirty: false,
   };
   render();
 }
@@ -1099,11 +1109,21 @@ function suggestFdefName(fixtureName) {
 // hand-edited-in-the-table) model. A no-op once the user has typed
 // directly into the preview textarea (fdefDirty) -- their raw edits win
 // until they explicitly ask to regenerate.
+//
+// The table (im.model) always shows the FULL mapping; what's emitted here
+// is run through fitRangeBudget first, because that's what actually gets
+// saved and compiled. On every real fixture this is a no-op (PFX2's
+// budget is sized for real fixtures now -- see fixture_profile.h), but if
+// it ever does trim, im.budgetDropped must be populated so the "table"
+// stage's warning banner and the per-range strikethrough can show exactly
+// what got cut -- never a silent loss.
 function regenerateImportFdefText() {
   const im = state.import;
   if (!im.model) return;
   try {
-    im.fdefText = emitFdef(im.model);
+    const { model: fitted, dropped } = fitRangeBudget(im.model);
+    im.budgetDropped = dropped;
+    im.fdefText = emitFdef(fitted);
     im.error = null;
   } catch (e) {
     im.error = e && e.message ? e.message : String(e);
@@ -1220,6 +1240,34 @@ function renderImportModal() {
     );
     if (im.error) body.push(errorBlock("Import failed", im.error, ""));
   } else if (im.stage === "table") {
+    if (im.budgetDropped.length) {
+      // Unmissable, on its own, above the softer informational warnings --
+      // this is data loss (named states that won't make it into the
+      // saved .fdef), not a mapping judgment call. Should be vanishingly
+      // rare at PFX2's current budget; if it fires, the user must not
+      // find out only after flashing a fixture with half its gobos.
+      const totalDropped = im.budgetDropped.reduce((n, d) => n + d.count, 0);
+      body.push(
+        el(
+          "div",
+          { class: "import-budget-alert" },
+          icon("err"),
+          el(
+            "div",
+            {},
+            el(
+              "div",
+              { class: "import-budget-alert-title" },
+              `${totalDropped} named state${totalDropped === 1 ? "" : "s"} won't be saved -- the fixture profile's slot budget is full`,
+            ),
+            ...im.budgetDropped.map((d) =>
+              el("div", { class: "import-budget-alert-detail" },
+                `"${d.cap}" (offset ${d.coarse}): ${d.count} of its trailing ranges dropped, marked with strikethrough below`),
+            ),
+          ),
+        ),
+      );
+    }
     if (im.warnings.length) {
       body.push(
         el(
@@ -1230,7 +1278,7 @@ function renderImportModal() {
         ),
       );
     }
-    body.push(renderImportChannelTable(im.model));
+    body.push(renderImportChannelTable(im.model, im.budgetDropped));
     body.push(
       el(
         "div",
@@ -1291,13 +1339,19 @@ function renderImportModal() {
   );
 }
 
-function renderImportChannelTable(model) {
+function renderImportChannelTable(model, budgetDropped = []) {
+  // fitRangeBudget trims from the END of a channel's own range list (see
+  // model.js) -- mirror that here so the marked rows are the exact ones
+  // that will actually be cut, not just "some N of them".
+  const droppedCountByOffset = new Map(budgetDropped.map((d) => [d.coarse, d.count]));
   const rows = model.caps.map((c) => {
     const offsetLabel = c.fine != null ? `${c.coarse}/${c.fine}` : `${c.coarse}`;
+    const droppedCount = droppedCountByOffset.get(c.coarse) || 0;
+    const firstDroppedIdx = droppedCount > 0 ? c.ranges.length - droppedCount : Infinity;
     const rangeRows = c.ranges.map((r, i) =>
       el(
         "div",
-        { class: "import-range-row" },
+        { class: `import-range-row ${i >= firstDroppedIdx ? "import-range-will-drop" : ""}` },
         el("span", { class: "import-range-span" }, `${r.from}–${r.to}`),
         el(
           "select",
@@ -1327,6 +1381,7 @@ function renderImportChannelTable(model) {
           ...IMPORT_CAP_NAMES.map((name) => el("option", { value: name, selected: c.cap === name }, name)),
         ),
         c.unmapped && el("span", { class: "import-unmapped-badge" }, "unmapped"),
+        droppedCount > 0 && el("span", { class: "import-unmapped-badge" }, `${droppedCount} won't be saved`),
       ),
       rangeRows.length > 0 && el("div", { class: "import-range-list" }, ...rangeRows),
     );
