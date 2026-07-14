@@ -30,13 +30,18 @@ jobs:
       # A CONFIG_GLOW_SELFTEST=y build, same layered sdkconfig
       # tests/hil/conftest.py flashes to real hardware -- NOT the plain
       # release build the "Firmware build" workflow produces, which never
-      # prints the GLOW-TEST: telemetry this suite asserts on.
+      # prints the GLOW-TEST: telemetry this suite asserts on. Also layers
+      # sdkconfig.qemu.defaults' CONFIG_GLOW_SKIP_WIFI=y: this QEMU fork has
+      # no WiFi/802.11 hardware model, and without this flag app_main()
+      # hangs in esp_wifi_init()'s RF calibration step before DMX/Lua/the
+      # render task ever come up (see sdkconfig.qemu.defaults' comment and
+      # tests/qemu/README.md).
       - name: Build selftest firmware (CONFIG_GLOW_SELFTEST=y)
         shell: bash
         run: |
           . "$IDF_PATH/export.sh"
           idf.py -C firmware -B firmware/build-qemu-selftest \
-            -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.selftest.defaults" \
+            -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.selftest.defaults;sdkconfig.qemu.defaults" \
             build
 
       # Prebuilt Espressif QEMU (xtensa, ESP32-S3 machine support). This
@@ -68,51 +73,6 @@ jobs:
             libsdl2-2.0-0 libglib2.0-0 libpixman-1-0 libslirp0 libgcrypt20
           QEMU_BIN="$(find /opt/qemu-xtensa -name qemu-system-xtensa -type f | head -1)"
           ldd "$QEMU_BIN" | grep "not found" && exit 1 || true
-
-      # TEMPORARY diagnostic: boot hangs somewhere after "GLOW-TEST: dmx
-      # begin=ok" (Art-Net/bundle/scripts/stats telemetry all time out).
-      # wifi_start_sta() runs immediately after DMX in app_main() and is
-      # the leading suspect (QEMU's esp32s3 machine has no WiFi/802.11
-      # model, only a wired "open_eth" NIC -- see hw/xtensa/esp32s3.c), but
-      # this project has a history of confident wrong diagnoses, so: attach
-      # gdb to the actually-running QEMU process and get a real backtrace
-      # instead of acting on that guess. Remove this step once the real
-      # cause is confirmed and fixed.
-      - name: Diagnose the boot hang with gdb
-        shell: bash
-        run: |
-          . "$IDF_PATH/export.sh"
-          GDB_BIN="$(find /opt/esp/tools -type f -name '*-elf-gdb' | head -1)"
-          echo "Using gdb: $GDB_BIN"
-          ELF="firmware/build-qemu-selftest/esp-glow.elf"
-          FLASH="firmware/build-qemu-selftest/qemu_flash.bin"
-
-          qemu-system-xtensa -nographic -no-reboot -machine esp32s3 \
-            -drive file="$FLASH",if=mtd,format=raw -m 8M \
-            -global driver=ssi_psram,property=is_octal,value=true \
-            -gdb tcp::1234 > /tmp/qemu_serial.log 2>&1 &
-          QEMU_PID=$!
-
-          # Give it time to pass DMX init and reach (what we believe is)
-          # the hang -- test timeouts showed no forward progress for 20-30s,
-          # so 15s here should land solidly inside the stall, not before it.
-          sleep 15
-
-          "$GDB_BIN" -batch -nx \
-            -ex "set pagination off" \
-            -ex "target remote :1234" \
-            -ex "echo \n=== info threads ===\n" \
-            -ex "info threads" \
-            -ex "echo \n=== thread apply all bt full ===\n" \
-            -ex "thread apply all bt full" \
-            -ex "echo \n=== thread apply all info registers ===\n" \
-            -ex "thread apply all info registers" \
-            "$ELF" 2>&1 || echo "gdb attach/backtrace failed (see above)"
-
-          kill "$QEMU_PID" 2>/dev/null || true
-          wait "$QEMU_PID" 2>/dev/null || true
-          echo "=== QEMU serial output captured before/during the hang ==="
-          cat /tmp/qemu_serial.log
 
       - name: Run QEMU boot tests
         shell: bash

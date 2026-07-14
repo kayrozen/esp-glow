@@ -89,12 +89,15 @@ def run_cmd(cmd: list, cwd: Optional[Path] = None, timeout: Optional[float] = No
 
 def build_selftest_firmware(firmware_dir: Path, build_dir: Path) -> None:
     """
-    Build the firmware (CONFIG_GLOW_SELFTEST=y, the exact same layered
-    sdkconfig the HIL suite flashes to real hardware -- see its
-    conftest.py's build_and_flash_firmware) into `build_dir`. QEMU needs no
-    port and no flash step: it boots straight off the merged image built
-    from these outputs (see build_qemu_flash_image below), so there is
-    nothing here a real board's absence should block.
+    Build the firmware (CONFIG_GLOW_SELFTEST=y, the same layered sdkconfig
+    the HIL suite flashes to real hardware -- see its conftest.py's
+    build_and_flash_firmware -- plus sdkconfig.qemu.defaults' CONFIG_
+    GLOW_SKIP_WIFI=y, required because this QEMU fork has no WiFi/802.11
+    hardware model; see sdkconfig.qemu.defaults' own header comment) into
+    `build_dir`. QEMU needs no port and no flash step: it boots straight
+    off the merged image built from these outputs (see
+    build_qemu_flash_image below), so there is nothing here a real board's
+    absence should block.
     """
     if not shutil.which("idf.py"):
         raise RuntimeError(
@@ -104,7 +107,7 @@ def build_selftest_firmware(firmware_dir: Path, build_dir: Path) -> None:
             "selftest build."
         )
 
-    defaults = ["sdkconfig.defaults", "sdkconfig.selftest.defaults"]
+    defaults = ["sdkconfig.defaults", "sdkconfig.selftest.defaults", "sdkconfig.qemu.defaults"]
     cmd = [
         "idf.py",
         "-C", str(firmware_dir),

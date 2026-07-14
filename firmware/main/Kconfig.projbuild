@@ -75,6 +75,32 @@ config GLOW_OSC_UDP_PORT
         UDP port the device listens on for incoming OSC control messages
         (cue/scene/fader). 9000 matches common OSC client defaults.
 
+config GLOW_SKIP_WIFI
+    bool "Skip WiFi bring-up entirely"
+    default n
+    help
+        Never calls wifi_start_sta(): no STA connect attempt, no SoftAP
+        fallback, no netif/lwIP bring-up. DMX output, the render task, and
+        the Lua/Fennel VM (boot.fnl, live-coded cues) all come up and run
+        completely independent of this -- see main.cpp's app_main() header
+        comment on why WiFi is brought up last, not first. Art-Net output,
+        the web console, OSC, and Pro DJ Link input are all network
+        features and are skipped along with it (MIDI DIN stays up --
+        that's a UART, not network).
+
+        Two real uses, not just one: QEMU has no WiFi/802.11 hardware
+        model at all (see tests/qemu/README.md) -- esp_wifi_init()'s RF
+        calibration step hangs waiting on radio status bits that emulated
+        silicon never sets, so this is required for the QEMU boot suite to
+        get past it. It's equally real for a physical rig: a purely local
+        DMX/Fennel setup with no network at all, or a venue where you
+        simply don't want the STA/AP surface running.
+
+        A rig with this off (the default) already tolerates a missing or
+        dropped AP without blacking out (F5's reconnect-with-backoff) --
+        this option is for never bringing WiFi up in the first place, not
+        for handling it going away.
+
 config GLOW_SELFTEST
     bool "Enable HIL selftest mode (GLOW-TEST: telemetry + serial queries)"
     default n

@@ -813,26 +813,16 @@ extern "C" void app_main(void) {
   printf("GLOW-TEST: dmx begin=ok\n");
 #endif
 
-  // --- F2/F5: WiFi (STA), with a SoftAP fallback after repeated failed
-  // reconnects so the console stays reachable even when the venue's WiFi
-  // is gone (see wifi_manager.h's HIL flag on AP+DMX coexistence). ---
-  WifiStaConfig wc = {};
-  wc.ssid = CONFIG_GLOW_WIFI_SSID;
-  wc.password = CONFIG_GLOW_WIFI_PASS;
-  wc.ap_fallback = true;
-  wifi_start_sta(&wc);
-
-  // --- F2: Art-Net sink ---
+  // --- F2: Art-Net sink -- constructed now (not begun). WiFi/netif bring-up
+  // moves to the very end of this function (see the "network bring-up"
+  // block below), but DeviceSinkFactory::sinkFor() still needs a non-null
+  // g_artnet right now, before setup_show_from_bundle patches any
+  // ArtNet-transport universe below -- g_artnet->send() is a safe no-op
+  // until begin() actually opens the UDP socket (sock_ stays -1 until
+  // then; see artnet_sink.cpp), so constructing early costs nothing. ---
   uint32_t bridge = CONFIG_GLOW_ARTNET_BRIDGE_IP;
   if (bridge == 0) bridge = 0xFFFFFFFFu;
   g_artnet = new ArtNetSink(bridge, 6454);
-  if (!g_artnet->begin()) {
-    ESP_LOGE(TAG, "Art-Net socket failed; matrix output disabled.");
-  } else {
-#ifdef CONFIG_GLOW_SELFTEST
-    printf("GLOW-TEST: artnet tx=ok\n");
-#endif
-  }
 
   // --- F5: always keep at least one DMX universe configured and
   // streaming, independent of whether a show bundle loads -- "safe
@@ -922,9 +912,47 @@ extern "C" void app_main(void) {
                           nullptr, 5, nullptr, 0);
 #endif
 
-  // --- F4/F5: web console (WS httpd + console static files + /ota) + MIDI
-  // + OSC --- any g_liveControl bindings would need to already be in place
-  // before any of these start -- "configured once, before tasks start, and
+  // --- Network bring-up (WiFi, Art-Net, web console, OSC, DJ Link) is
+  // deliberately LAST, not first: DMX output, the render task, and the
+  // Lua/Fennel VM (boot.fnl, live-coded cues) are all fully up before
+  // anything here is even attempted, so a rig with no network at all --
+  // dead AP, no WiFi at the venue, CONFIG_GLOW_SKIP_WIFI set outright --
+  // still plays its show instead of never getting past app_main(). This
+  // is the same guarantee F5's reconnect-with-backoff already gives for a
+  // network that drops AFTER boot (wifi_manager.cpp) -- extended to cover
+  // a network that was never there to begin with, or hardware/emulation
+  // that can't bring WiFi up at all (see CONFIG_GLOW_SKIP_WIFI's Kconfig
+  // help: QEMU has no WiFi/802.11 model, so esp_wifi_init()'s RF
+  // calibration step hangs forever against it -- tests/qemu/README.md).
+  // wifi_start_sta() itself does not block on association (see
+  // wifi_manager.cpp) -- moving it here means even esp_wifi_init()/
+  // esp_wifi_start() themselves hanging or failing can no longer take the
+  // rig's actual light output down with them, which is the point. ---
+#ifndef CONFIG_GLOW_SKIP_WIFI
+  // --- F2/F5: WiFi (STA), with a SoftAP fallback after repeated failed
+  // reconnects so the console stays reachable even when the venue's WiFi
+  // is gone (see wifi_manager.h's HIL flag on AP+DMX coexistence). ---
+  WifiStaConfig wc = {};
+  wc.ssid = CONFIG_GLOW_WIFI_SSID;
+  wc.password = CONFIG_GLOW_WIFI_PASS;
+  wc.ap_fallback = true;
+  wifi_start_sta(&wc);
+
+  // --- F2: Art-Net sink begin() -- opens the UDP socket now that
+  // netif/lwIP is up (wifi_start_sta() brings that up regardless of
+  // whether STA ever associates). g_artnet itself was already constructed
+  // earlier so bundle patching above could route ArtNet universes to it. ---
+  if (!g_artnet->begin()) {
+    ESP_LOGE(TAG, "Art-Net socket failed; matrix output disabled.");
+  } else {
+#ifdef CONFIG_GLOW_SELFTEST
+    printf("GLOW-TEST: artnet tx=ok\n");
+#endif
+  }
+
+  // --- F4/F5: web console (WS httpd + console static files + /ota) + OSC
+  // -- any g_liveControl bindings would need to already be in place before
+  // either of these start -- "configured once, before tasks start, and
   // never mutated" is what makes transport-side binding reads race-free
   // (none are bound yet -- see g_wsCues' comment).
   web_input_init(*g_controlQueue, *g_evalQueue,
@@ -932,11 +960,6 @@ extern "C" void app_main(void) {
                  /*scenes=*/nullptr, /*nScenes=*/0,
                  /*hasMaster=*/true);
   web_server_task(nullptr);  // starts httpd; not a FreeRTOS task itself (see web_input.h)
-
-  midi_input_init(*g_controlQueue, g_beatQueue, CONFIG_GLOW_MIDI_UART_NUM, CONFIG_GLOW_MIDI_RX_GPIO,
-                  CONFIG_GLOW_MIDI_TX_GPIO);
-  xTaskCreatePinnedToCore(midi_uart_task, "midi", 4096 / sizeof(StackType_t),
-                          nullptr, 5, nullptr, 0);
 
   osc_input_init(*g_controlQueue, g_oscMap, static_cast<uint16_t>(CONFIG_GLOW_OSC_UDP_PORT));
   xTaskCreatePinnedToCore(osc_server_task, "osc", 4096 / sizeof(StackType_t),
@@ -950,6 +973,18 @@ extern "C" void app_main(void) {
   xTaskCreatePinnedToCore(djlink_beat_task, "djlink_beat", 4096 / sizeof(StackType_t),
                           nullptr, 5, nullptr, 0);
   xTaskCreatePinnedToCore(djlink_status_task, "djlink_status", 4096 / sizeof(StackType_t),
+                          nullptr, 5, nullptr, 0);
+#else
+  ESP_LOGW(TAG, "CONFIG_GLOW_SKIP_WIFI: WiFi/Art-Net/web console/OSC/DJ Link all skipped -- "
+                "DMX output and Lua/Fennel cues run standalone.");
+#endif  // CONFIG_GLOW_SKIP_WIFI
+
+  // MIDI DIN is a UART, not a network transport -- always up, independent
+  // of CONFIG_GLOW_SKIP_WIFI. Needs the same g_liveControl-bindings-already-
+  // in-place guarantee as the transports above (see their comment).
+  midi_input_init(*g_controlQueue, g_beatQueue, CONFIG_GLOW_MIDI_UART_NUM, CONFIG_GLOW_MIDI_RX_GPIO,
+                  CONFIG_GLOW_MIDI_TX_GPIO);
+  xTaskCreatePinnedToCore(midi_uart_task, "midi", 4096 / sizeof(StackType_t),
                           nullptr, 5, nullptr, 0);
 
   const char* showStatus;

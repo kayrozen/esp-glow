@@ -41,10 +41,20 @@ Be honest about the limits, not just the wins:
   claim.
 - **PSRAM timing, USB host, MIDI UART, DJ Link** -- anything requiring a
   peripheral this QEMU fork doesn't model.
-- **Networking (WiFi/Art-Net/the WebSocket console).** ESP32-S3 networking
-  emulation in this QEMU fork is limited to nonexistent at the time of
-  writing; this suite does not attempt to reach the device over the
-  network. `artnet tx=ok` may or may not appear -- it is not asserted here.
+- **WiFi/Art-Net/the WebSocket console.** This QEMU fork's esp32s3 machine
+  has no WiFi/802.11 hardware model at all (only a wired "open_eth" NIC,
+  per its `hw/xtensa/esp32s3.c`) -- `esp_wifi_init()`'s RF calibration step
+  hangs forever waiting on radio status bits emulated silicon never sets.
+  The build this suite runs sets `CONFIG_GLOW_SKIP_WIFI=y`
+  (`sdkconfig.qemu.defaults`), which skips WiFi/Art-Net/the web
+  console/OSC/DJ Link entirely at boot -- a real, permanent firmware
+  option (see `firmware/main/Kconfig.projbuild`), not a QEMU-only patch:
+  it's equally useful for a physical rig with no network at all. This is
+  also why network bring-up in `app_main()` happens *after* DMX/the render
+  task/the Lua VM, not before -- the WiFi-hang this suite first uncovered
+  would otherwise have blocked a real board's whole boot too, the moment
+  its WiFi hardware or AP ever failed to come up. `artnet tx=ok` never
+  appears in this suite's build and is not asserted here.
 
 A green run means the software starts. It does not mean the rig works.
 
@@ -110,9 +120,10 @@ GLOW_SKIP_BUILD=1 pytest     # iterate on the harness without rebuilding
 ## How it works
 
 1. `idf.py build` with `sdkconfig.defaults` + `sdkconfig.selftest.defaults`
-   layered (`CONFIG_GLOW_SELFTEST=y`) -- the exact same layered config
-   `tests/hil/` flashes to real hardware, so the two suites exercise the
-   same build, not a QEMU-specific one.
+   (`CONFIG_GLOW_SELFTEST=y`, the same layered config `tests/hil/` flashes
+   to real hardware) + `sdkconfig.qemu.defaults` (`CONFIG_GLOW_SKIP_WIFI=y`,
+   required only because this QEMU fork has no WiFi hardware model -- see
+   "What this suite does NOT catch" above) layered on top.
 2. `conftest.py`'s `build_qemu_flash_image()` reads the build's
    `flasher_args.json` and merges bootloader + partition table + app +
    the `show` partition's SHW1 bundle into one flat, flash-size-padded
