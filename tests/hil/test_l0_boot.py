@@ -68,6 +68,19 @@ class TestBootPOST:
 
     def test_no_crash_in_boot_window(self, device_reset, serial_reader):
         device_reset(wait_for_boot=False)
+        # The ROM bootloader's own reset-reason line ("rst:0x1 (POWERON),
+        # boot:0x4 (SPI_FLASH_BOOT)") precedes every boot, including a
+        # totally normal one, and legitimately contains the "rst:" crash
+        # marker (see conftest.py's CRASH_MARKERS -- it's there to catch an
+        # *unexpected* reboot appearing mid-window, e.g. test_l7_soak.py's
+        # use after its own initial device_reset() has already consumed
+        # this same line). Consume it here too before starting the strict
+        # window, so this test asserts "no crash once boot starts", not "no
+        # reset-reason line exists anywhere" (which would fail on every
+        # single boot, crash or not).
+        banner = serial_reader.read_until("esp-glow firmware", timeout_s=10)
+        assert banner is not None, "Boot banner not found in first 10s"
+
         start = time.time()
         while time.time() - start < 10:
             line = serial_reader.readline(timeout_s=0.5)

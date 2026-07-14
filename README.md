@@ -257,7 +257,15 @@ infinite-loop hook, the memory cap, a **zero-allocation check**), the PLL beat c
 rejection, monotonicity), the binary formats (fuzzed against malformed input), and the
 importers.
 
-**Hardware-in-the-loop** (`tests/hil/`) covers what the host cannot: DMX timing, Art-Net on
+**QEMU boot test** (`tests/qemu/`) boots the real flash image — bootloader, partition table,
+app, the `SHW1` bundle — under Espressif's QEMU fork, no board required, and asserts the
+`GLOW-TEST:` boot telemetry (same wire format `tests/hil/` reads off real serial). It catches
+init order, the show-bundle load, the LittleFS `scripts` mount, and the Lua/Fennel VM coming
+up — everything up to the first render tick — but not DMX timing, real-time GC pacing, or
+anything needing a peripheral QEMU doesn't model. Runs in CI on every PR
+(`.github/workflows/qemu-boot.yml`).
+
+**Hardware-in-the-loop** (`tests/hil/`) covers what QEMU cannot: DMX timing, Art-Net on
 the wire, WS/OSC/MIDI round-trips, the Fennel REPL end to end, every scripting failure mode,
 OTA/rollback, and a **10-minute soak**. Two things stay human: whether a head physically aims
 right, and whether the colours look right.
@@ -273,12 +281,17 @@ show load, WebSocket + MIDI + OSC transports, OTA with rollback, watchdog, safe 
 musical time (PLL beat clock, MIDI clock, DJ-Link, tap tempo) · the web console with the
 Fennel REPL · the browser provisioner, fixture importers, and USB flasher · the HIL suite.
 
-**Not done: it has never run on hardware.** That is the next and only real step.
+**Not done: it has never run on real hardware.** `tests/qemu/` now proves the firmware boots
+in emulation — init order, the show-bundle load, the Lua/Fennel VM coming up, a clean first
+render tick — but a green QEMU boot means the software starts, not that the rig works. DMX
+timing, real GC pacing under load, and PSRAM/USB/MIDI are outside what QEMU models. Getting it
+on an actual board is still the next and only real step.
 
 The bring-up ladder (see `BENCH_RUNBOOK.md`): boot → DMX out (**the milestone — a real
 fixture responding to the engine**) → WiFi/Art-Net → web console → live-coding → HIL → the
-**soak**. The soak is the one unvalidated risk in the whole stack: whether the Lua GC, paced
-in the frame slack, ever drops a DMX frame under load. No host test can answer that.
+**soak**. QEMU clears the boot rung before any board arrives. The soak stays the one
+unvalidated risk QEMU can't touch: whether the Lua GC, paced in the frame slack, ever drops a
+DMX frame under load. No host test — and no emulator — can answer that.
 
 **Later:** semantic colour mapping (`:red` → nearest wheel slot *or* RGB — profile v3, the
 format byte is already reserved) · gamma correction and audio-reactive matrix patterns ·
@@ -293,6 +306,7 @@ matrices inside the cue/blend engine · Ableton Link.
 test_*.cpp               host unit tests            (make test)
 samples/                 example .fdef / .mdef / .show
 scripts/                 vendor_fennel.sh, vendor_lua.sh, build_sample_bundle.sh
+tests/qemu/              QEMU boot test (no board required, runs in CI)
 tests/hil/               hardware-in-the-loop suite
 firmware/                ESP-IDF application
   main/                  main.cpp, render_task, wifi/storage/ota managers

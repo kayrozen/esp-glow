@@ -29,8 +29,8 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -43,6 +43,13 @@ logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HIL_DIR = Path(__file__).resolve().parent
 
+# TelemetryLine/line_is_crash/CRASH_MARKERS are shared with tests/qemu/ (same
+# wire format, different transport) -- see tests/shared/telemetry.py's
+# module docstring.
+sys.path.insert(0, str(REPO_ROOT / "tests"))
+from shared.telemetry import CRASH_MARKERS, TelemetryLine, line_is_crash  # noqa: E402
+from shared.line_reader import LineReader  # noqa: E402
+
 # The "show" raw data partition's flash offset + size (see
 # firmware/partitions.csv). Not derived at runtime -- kept in sync with
 # partitions.csv by hand, same as firmware/main/CMakeLists.txt's own
@@ -51,81 +58,20 @@ HIL_DIR = Path(__file__).resolve().parent
 SHOW_PARTITION_OFFSET = 0x620000
 SHOW_PARTITION_SIZE = 0x100000
 
-CRASH_MARKERS = ("panic", "abort", "guru meditation", "rst:", "backtrace:")
 
-
-def line_is_crash(line: str) -> Optional[str]:
-    """Returns the matched crash marker if `line` looks like a firmware crash, else None."""
-    low = line.lower()
-    for marker in CRASH_MARKERS:
-        if marker in low:
-            return marker
-    return None
-
-
-@dataclass
-class TelemetryLine:
+class SerialReader(LineReader):
     """
-    A parsed `GLOW-TEST: <event> key=value...` line.
-
-    `event` is the first token after the prefix ("boot", "dmx", "artnet",
-    "bundle", "scripts", "stats", "fx_disabled", "dmx0", "state", "lua").
-    Everything after "err=" (if present) is taken verbatim to end-of-line as
-    the "err" value -- Lua error messages contain spaces and can't be
-    whitespace-tokenized like the other key=value pairs.
+    Manages serial port communication with the device. Implements
+    LineReader's `_read_chunk` over pyserial; everything else
+    (readline/read_until/read_telemetry/assert_no_crash/...) is inherited
+    unchanged from tests/shared/line_reader.py -- see its module docstring.
     """
-
-    raw: str
-    event: str
-    key_values: dict = field(default_factory=dict)
-
-    @classmethod
-    def parse(cls, line: str) -> Optional["TelemetryLine"]:
-        idx = line.find("GLOW-TEST:")
-        if idx == -1:
-            return None
-        content = line[idx + len("GLOW-TEST:"):].strip()
-        if not content:
-            return None
-
-        parts = content.split(None, 1)
-        event = parts[0]
-        rest = parts[1] if len(parts) > 1 else ""
-
-        kv: dict = {}
-        err_marker = "err="
-        err_idx = rest.find(err_marker)
-        if err_idx != -1:
-            kv["err"] = rest[err_idx + len(err_marker):]
-            rest = rest[:err_idx]
-
-        for tok in rest.split():
-            if "=" in tok:
-                k, v = tok.split("=", 1)
-                kv[k] = v
-
-        return cls(raw=line, event=event, key_values=kv)
-
-    def int_field(self, key: str) -> int:
-        return int(self.key_values[key])
-
-    def list_field(self, key: str) -> list:
-        """Parse a comma-separated field (e.g. dmx0's "bytes", state's "cues"). Empty/"none" -> []."""
-        v = self.key_values.get(key, "")
-        if v in ("", "none"):
-            return []
-        return v.split(",")
-
-
-class SerialReader:
-    """Manages serial port communication with the device."""
 
     def __init__(self, port: str, baudrate: int = 115200):
+        super().__init__()
         self.port = port
         self.baudrate = baudrate
         self.ser: Optional[serial.Serial] = None
-        self.buffer = ""
-        self.logs: list = []
 
     def open(self) -> None:
         try:
@@ -139,74 +85,10 @@ class SerialReader:
             self.ser.close()
             logger.info("Closed serial port %s", self.port)
 
-    def readline(self, timeout_s: float = 5.0) -> Optional[str]:
-        """Read one line from serial with timeout. Returns the line (no trailing newline) or None."""
+    def _read_chunk(self, timeout_s: float) -> bytes:
         if not self.ser:
             raise RuntimeError("Serial port not open")
-
-        start = time.time()
-        while time.time() - start < timeout_s:
-            if "\n" in self.buffer:
-                line, self.buffer = self.buffer.split("\n", 1)
-                line = line.rstrip("\r")
-                self.logs.append(line)
-                return line
-            try:
-                chunk = self.ser.read(1024)
-                if chunk:
-                    self.buffer += chunk.decode("utf-8", errors="replace")
-            except Exception as e:  # pragma: no cover - hardware I/O error path
-                logger.error("Serial read error: %s", e)
-        return None
-
-    def readline_retry_once(self, timeout_s: float = 5.0) -> Optional[str]:
-        """
-        One retry for a flaky (not a real failure) missed line -- see the
-        HIL agent guardrails: retry a flaky read once, then report. Do not
-        retry indefinitely.
-        """
-        line = self.readline(timeout_s)
-        if line is not None:
-            return line
-        return self.readline(timeout_s)
-
-    def read_until(self, pattern: str, timeout_s: float = 5.0) -> Optional[str]:
-        """Read lines until one contains `pattern` (plain substring match). Returns the line or None."""
-        start = time.time()
-        while time.time() - start < timeout_s:
-            remaining = timeout_s - (time.time() - start)
-            line = self.readline(timeout_s=min(0.5, max(remaining, 0.01)))
-            if line is None:
-                continue
-            if pattern in line:
-                return line
-        return None
-
-    def read_telemetry(self, event: Optional[str] = None, timeout_s: float = 5.0) -> Optional[TelemetryLine]:
-        """Read the next GLOW-TEST: line, optionally filtered to a specific `event`."""
-        start = time.time()
-        while time.time() - start < timeout_s:
-            remaining = timeout_s - (time.time() - start)
-            line = self.readline(timeout_s=min(0.5, max(remaining, 0.01)))
-            if line is None:
-                continue
-            telem = TelemetryLine.parse(line)
-            if telem is None:
-                continue
-            if event is not None and telem.event != event:
-                continue
-            return telem
-        return None
-
-    def read_for_duration(self, duration_s: float) -> list:
-        """Read all lines for the given duration."""
-        start = time.time()
-        lines = []
-        while time.time() - start < duration_s:
-            line = self.readline(timeout_s=0.1)
-            if line:
-                lines.append(line)
-        return lines
+        return self.ser.read(1024)
 
     def query(self, cmd: str, timeout_s: float = 3.0) -> Optional[TelemetryLine]:
         """
@@ -219,20 +101,6 @@ class SerialReader:
         expect_event = cmd.lstrip("?")
         self.ser.write((cmd + "\n").encode("ascii"))
         return self.read_telemetry(event=expect_event, timeout_s=timeout_s)
-
-    def assert_no_crash(self, duration_s: float) -> None:
-        """Read for `duration_s`, failing loudly (not skipping) on any crash marker."""
-        start = time.time()
-        while time.time() - start < duration_s:
-            line = self.readline(timeout_s=min(0.5, duration_s))
-            if line is None:
-                continue
-            marker = line_is_crash(line)
-            if marker:
-                raise AssertionError(f"Crash marker '{marker}' seen on serial: {line!r}")
-
-    def flush_logs(self) -> str:
-        return "\n".join(self.logs)
 
 
 def run_cmd(cmd: list, cwd: Optional[Path] = None, timeout: Optional[float] = None) -> subprocess.CompletedProcess:

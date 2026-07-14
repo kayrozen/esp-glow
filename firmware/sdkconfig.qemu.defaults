@@ -1,0 +1,14 @@
+# sdkconfig.qemu.defaults — layered on top of sdkconfig.defaults (and,
+# for the tests/qemu/ suite, sdkconfig.selftest.defaults too) for QEMU
+# builds only. See conftest.py's build_selftest_firmware, which passes all
+# three via -D SDKCONFIG_DEFAULTS.
+#
+# CONFIG_GLOW_SKIP_WIFI is a general-purpose option (see
+# firmware/main/Kconfig.projbuild's help text -- it's also useful on real
+# hardware for a purely local DMX/Fennel rig with no network at all), not
+# QEMU-specific by itself. It is required here because this QEMU fork has
+# no WiFi/802.11 hardware model: esp_wifi_init()'s RF calibration step
+# hangs forever waiting on radio status bits emulated silicon never sets,
+# which otherwise stalls app_main() before DMX/Lua/the render task ever
+# come up. See tests/qemu/README.md.
+CONFIG_GLOW_SKIP_WIFI=y

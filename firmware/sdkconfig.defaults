@@ -93,3 +93,18 @@ CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
 # Keep WiFi/lwIP on core 0 so DMX timing on core 1 is never starved.
 CONFIG_ESP_WIFI_TASK_CORE_AFFINITY_0=y
 CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0=y
+
+# --- Main task stack ---
+# ESP-IDF's default (3584 bytes) assumes app_main() spawns other tasks and
+# returns/idles -- ours never returns (app_main ends in an infinite loop)
+# and does real synchronous work on this stack for the life of the device:
+# driver bring-up, show-bundle parsing (FixtureProfile is 3710 bytes and
+# travels by value through Show::patchCommon -- one patch() call alone is
+# most of the default budget), and Lua/Fennel VM init (setup_lua, a
+# recursive-descent compiler compiling itself plus boot.fnl). First
+# actually exercised by tests/qemu/ (nothing has run on hardware before
+# this project's QEMU bring-up) -- it overflowed immediately. 16 KB is a
+# generous starting point, not a measured minimum; see main.cpp's
+# GLOW-TEST: stack telemetry (CONFIG_GLOW_SELFTEST) for the real
+# high-water mark to size this against.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
