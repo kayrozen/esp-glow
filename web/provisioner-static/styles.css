@@ -547,4 +547,174 @@ html, body {
   flex-direction: column;
   gap: 2px;
 }
+
+/* --- fixture importer modal (QLC+ / OFL / GDTF) ------------------------ */
+
+.modal-wide {
+  width: 820px;
+  max-width: calc(100vw - 32px);
+}
+
+.btn-small { padding: 3px 8px; font-size: 11px; }
+
+.import-dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 28px 16px;
+  border: 1px dashed var(--border-soft);
+  border-radius: 6px;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.import-url-row {
+  display: flex;
+  gap: 8px;
+}
+.import-url-row input[type="text"] { flex: 1; }
+
+.import-status { display: flex; align-items: center; gap: 6px; color: var(--text-dim); }
+
+.import-fixture-label { color: var(--text-bright); font-weight: 600; }
+
+.import-mode-select {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--text);
+}
+
+.import-warnings {
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  padding: 8px 10px;
+  background: var(--bg-elev-2);
+}
+.import-warnings-title { color: var(--info-2); font-weight: 600; margin-bottom: 4px; }
+.import-warning { color: var(--text-dim); font-size: 11px; padding: 2px 0; }
+
+/* Data loss, not a mapping judgment call -- deliberately louder than
+   .import-warnings above (red border, solid icon) so a trimmed fixture
+   can't be missed on the way to "Add to fixture library". */
+.import-budget-alert {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--err);
+  border-radius: 4px;
+  background: rgba(244, 135, 113, 0.12);
+  color: var(--err);
+}
+.import-budget-alert .icon { flex-shrink: 0; margin-top: 2px; }
+.import-budget-alert-title { font-weight: 600; margin-bottom: 4px; }
+.import-budget-alert-detail { color: var(--text-bright); font-size: 11px; padding: 1px 0; }
+
+.import-range-row.import-range-will-drop {
+  opacity: 0.6;
+  text-decoration: line-through;
+  text-decoration-color: var(--err);
+}
+
+.import-channel-table {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  padding: 6px;
+}
+
+.import-channel-row {
+  border-bottom: 1px solid var(--border);
+  padding: 6px 4px;
+}
+.import-channel-row:last-child { border-bottom: none; }
+.import-channel-row.import-unmapped { background: rgba(244, 135, 113, 0.08); }
+
+.import-channel-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.import-channel-offset {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+  min-width: 44px;
+}
+.import-channel-source { flex: 1; color: var(--text-bright); }
+.import-unmapped-badge {
+  color: var(--err);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border: 1px solid var(--err);
+  border-radius: 3px;
+  padding: 1px 5px;
+}
+
+.import-range-list {
+  margin: 6px 0 0 52px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.import-range-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+.import-range-span {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  min-width: 72px;
+}
+.import-range-name { flex: 1; }
+
+.import-fdef-preview { display: flex; flex-direction: column; gap: 4px; }
+.import-fdef-preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-dim);
+}
+.import-fdef-textarea {
+  width: 100%;
+  height: 160px;
+  resize: vertical;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  padding: 8px;
+  font: inherit;
+  font-size: 11px;
+  white-space: pre;
+}
+
+.import-save-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+}
+.import-save-row input[type="text"] { flex: 1; }
+
+.import-channel-table select,
+.import-mode-select select,
+.import-save-row input[type="text"],
+.import-range-name,
+.import-url-row input[type="text"] {
+  background: var(--bg-elev-2);
+  color: var(--text-bright);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 11px;
+}
 .lint-hint { color: var(--warn, #e2b93d); font-size: 11px; }

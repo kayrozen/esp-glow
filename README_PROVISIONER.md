@@ -23,11 +23,19 @@ web/
   provisioner-static/              # the deployable static site
     index.html
     app.js                         # vanilla ESM editor
+    import.js                      # fixture importer panel: format dispatch + UI glue
     styles.css                     # IDE-dark theme
     static-server.js               # optional Node dev server
     wasm/                          # generated, gitignored, built in CI
       provision-wasm.js
       provision-wasm.wasm
+  shared/
+    importers/                     # QLC+/OFL/GDTF -> .fdef (see README_PROVISION.md)
+      xml-lite.js, zip-lite.js     # dependency-free XML/ZIP parsing
+      model.js                     # intermediate model + emitFdef()
+      qlcplus.js, ofl.js, gdtf.js  # per-format parsing + Capability/range mapping
+      test-importers.mjs           # `node web/shared/importers/test-importers.mjs`
+      testdata/                    # real manufacturer fixture files (see NOTICE.md)
 ```
 
 The C++ source (`provision.cpp`, `fixture_profile.*`, `profile_encoder.*`,
@@ -59,6 +67,40 @@ port compiles the same files with the same `-Wall -Wextra -Werror` flags.
 - **Copy-to-clipboard** for any file's text.
 - **Drag-drop import**: drop `.fdef` / `.show` files onto the window.
 - **IDE-dark theme** (VS Code-like, `#1e1e1e` background).
+- **Fixture importer**: drop a manufacturer's QLC+ `.qxf`, GDTF `.gdtf`, or
+  Open Fixture Library `.json` file (or paste a GitHub URL to one) — see
+  "Fixture importer" below.
+
+## Fixture importer (QLC+ / OFL / GDTF)
+
+Click the import icon next to "Files" (or drop a `.qxf`/`.gdtf`/`.json`
+file anywhere on the window) to bring in a real fixture definition instead
+of hand-authoring a `.fdef` from a PDF manual:
+
+1. **Drop a file, or paste a URL** to one on GitHub (QLC+'s and OFL's
+   fixture libraries are both public GitHub repos — a `github.com/.../blob/...`
+   URL is rewritten to `raw.githubusercontent.com` automatically). Format
+   is auto-detected from the extension/content.
+2. **Pick a mode** ("8ch basic", "16-bit", ...). Mandatory, no default —
+   every real fixture ships several, and patching the wrong one mispatches
+   every channel after it.
+3. **Review the channel table**: source channel name → mapped Capability
+   (a dropdown — fix a wrong guess right there), with its `SLOT`/`RANGE`
+   breakdown listed underneath (name, DMX span, discrete/continuous —
+   also editable). Unmapped channels are highlighted; the importer never
+   drops one silently, even when it can't tell what it does.
+4. **Preview the generated `.fdef`** as text, editable, live-updated from
+   the table (or vice versa — typing directly in the preview "detaches"
+   it from further table edits until you click "Regenerate from table").
+5. **Add to fixture library** under a name you choose. It's now a normal
+   `.fdef` file in the sidebar — compile, patch, flash like any other.
+
+The mapping logic (QLC+ `Preset`/`Group` heuristics, OFL's structured
+capability `type`s, GDTF's `DMXChannel`/`ChannelFunction`/`ChannelSet`
+nesting) and the real fixture files it's tested against live in
+`web/shared/importers/` — see `README_PROVISION.md` for details and
+`web/shared/importers/testdata/NOTICE.md` for where each test fixture
+came from.
 
 ## Local iteration
 

@@ -1,11 +1,18 @@
-.PHONY: test clean
+.PHONY: test clean test-importers
 
 # Compiler flags: C++17, warnings, sanitizer
 # -Ithird_party/lua: the vendored Lua 5.4.6 headers (lua_glow_include.h),
 # needed by the Lua/Fennel layer (lua_vm.cpp, glow_lua_api.cpp,
 # lua_effect.cpp, glow_fennel.cpp) and their tests. Harmless for every
 # other target -- just an extra include search path.
-CXXFLAGS = -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -g -Ithird_party/lua
+# -MMD -MP: emit a per-object .d file listing the headers it includes, so
+# make's implicit rule below picks up header changes (e.g. fixture_profile.h)
+# as a reason to recompile -- without this, a .o whose .cpp didn't change but
+# whose #included header did looks "up to date" to make and is silently
+# reused, which can link a stale object (built against an old struct layout)
+# next to freshly-built ones sharing the same type -- an ODR violation that
+# manifests as heap corruption at runtime, not a compile error.
+CXXFLAGS = -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -g -Ithird_party/lua -MMD -MP
 
 # Vendored Lua 5.4.6 (third_party/lua/, LUA_32BITS=1 -- see
 # scripts/vendor_lua.sh). Curated to exactly the libraries the sandbox
@@ -13,7 +20,7 @@ CXXFLAGS = -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -g -Ith
 # package/utf8/coroutine/ltests/onelua/lua.c compiled in at all, so an
 # accidental attempt to open one of those would be a link error, not a
 # silent sandbox regression.
-LUA_CFLAGS = -std=c99 -Wall -Wextra -Werror -O2 -Ithird_party/lua
+LUA_CFLAGS = -std=c99 -Wall -Wextra -Werror -O2 -Ithird_party/lua -MMD -MP
 LUA_C_SOURCES = third_party/lua/lapi.c third_party/lua/lcode.c third_party/lua/lctype.c \
                 third_party/lua/ldebug.c third_party/lua/ldo.c third_party/lua/ldump.c \
                 third_party/lua/lfunc.c third_party/lua/lgc.c third_party/lua/llex.c \
@@ -71,6 +78,17 @@ PROVISION_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp
                     color.cpp pixel_matrix.cpp provision.cpp show_bundle.cpp test_provision.cpp
 PROVISION_OBJECTS = $(PROVISION_SOURCES:.cpp=.o)
 PROVISION_TARGET  = test_provision
+
+# --- fdef_check: host CLI round-trip oracle for the browser importers
+# (web/shared/importers/) -- not a test binary itself; not part of `test`.
+# See web/shared/importers/test-importers.mjs, which spawns this on
+# imported .fdef text and asserts on the JSON it prints. Same C++ sources
+# as PROVISION_TARGET (parseFixtureDef/encodeProfile/parseProfile), minus
+# the test file, plus fdef_check.cpp.
+FDEF_CHECK_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp \
+                     color.cpp pixel_matrix.cpp provision.cpp show_bundle.cpp fdef_check.cpp
+FDEF_CHECK_OBJECTS = $(FDEF_CHECK_SOURCES:.cpp=.o)
+FDEF_CHECK_TARGET  = fdef_check
 
 # --- test_live_control: live control layer (MIDI/OSC/web → cues) tests ---
 LIVE_CONTROL_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp show.cpp \
@@ -173,6 +191,9 @@ $(PIXEL_MATRIX_TARGET): $(PIXEL_MATRIX_OBJECTS)
 
 $(PROVISION_TARGET): $(PROVISION_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(PROVISION_OBJECTS) -o $(PROVISION_TARGET) -lm
+
+$(FDEF_CHECK_TARGET): $(FDEF_CHECK_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(FDEF_CHECK_OBJECTS) -o $(FDEF_CHECK_TARGET) -lm
 
 $(LIVE_CONTROL_TARGET): $(LIVE_CONTROL_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(LIVE_CONTROL_OBJECTS) -o $(LIVE_CONTROL_TARGET) -lm
@@ -313,7 +334,33 @@ test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL
 	./$(DJLINK_MASTER_TARGET)
 	./$(SAFE_BLACKOUT_TARGET)
 
+# Browser fixture importers (web/shared/importers/): pure-JS parsing/mapping
+# tests, plus a round-trip through fdef_check (this is a separate target
+# from `test` -- it needs `node` on PATH, which the C++ host-tests CI job
+# doesn't guarantee; see .github/workflows/provisioner.yml instead, which
+# already runs Node for the WASM smoke tests).
+test-importers: $(FDEF_CHECK_TARGET)
+	node web/shared/importers/test-importers.mjs
+
 # Clean build artifacts
+# NOTE: every *_OBJECTS/*_TARGET pair defined above must be listed here.
+# A target left out of `clean` keeps its stale .o files across a `make
+# clean && make test` cycle; since many targets share source files (e.g.
+# show.cpp) via the same %.o: %.cpp pattern rule, a stale .o compiled
+# against an old header layout can get linked next to freshly-rebuilt
+# objects that share a type with it -- an ODR violation (mismatched
+# struct size/layout across translation units) that shows up as heap
+# corruption at runtime, not a link or compile error. This bit us for
+# real: APPLY_OBJECTS/APPLY_TARGET and PACING_OBJECTS/PACING_TARGET were
+# missing here, so bumping FixtureProfile's MAX_RANGES left
+# apply_loaded_show.o/test_apply_loaded_show.o stale (old, smaller
+# FixtureProfile) while show.o got rebuilt fresh (new, larger
+# FixtureProfile) -- test_apply_loaded_show then crashed with an ASan
+# "unknown-crash" heap-buffer-overflow inside Show::patchCommon that had
+# nothing to do with Show/PatchedFixture logic. The -MMD -MP flags above
+# (regenerating .d files with header prerequisites) are the other half of
+# the fix -- they make plain incremental builds (no `make clean` at all)
+# correctly rebuild every .o whose included headers changed.
 clean:
 	rm -f $(AIM_OBJECTS) $(AIM_TARGET) $(FP_OBJECTS) $(FP_TARGET) $(SHOW_OBJECTS) $(SHOW_TARGET) \
 	      $(EFFECTS_OBJECTS) $(EFFECTS_TARGET) $(SHOW_CONTROL_OBJECTS) $(SHOW_CONTROL_TARGET) \
@@ -321,6 +368,8 @@ clean:
 	      $(LIVE_CONTROL_OBJECTS) $(LIVE_CONTROL_TARGET) \
 	      $(WEB_PROTOCOL_OBJECTS) $(WEB_PROTOCOL_TARGET) \
 	      $(CONTROL_QUEUE_TARGET) \
+	      $(PACING_OBJECTS) $(PACING_TARGET) \
+	      $(APPLY_OBJECTS) $(APPLY_TARGET) \
 	      $(LUA_VM_OBJECTS) $(LUA_VM_TARGET) \
 	      $(LUA_EFFECT_OBJECTS) $(LUA_EFFECT_TARGET) \
 	      $(GLOW_LUA_API_OBJECTS) $(GLOW_LUA_API_TARGET) \
@@ -335,7 +384,16 @@ clean:
 	      $(DJLINK_PARSER_OBJECTS) $(DJLINK_PARSER_TARGET) \
 	      $(DJLINK_MASTER_OBJECTS) $(DJLINK_MASTER_TARGET) \
 	      $(SAFE_BLACKOUT_OBJECTS) $(SAFE_BLACKOUT_TARGET) \
+	      $(FDEF_CHECK_OBJECTS) $(FDEF_CHECK_TARGET) \
 	      $(LUA_C_OBJECTS)
+	rm -f $(wildcard *.d) $(wildcard third_party/lua/*.d)
+
+# Pull in header dependencies generated by -MMD -MP (see CXXFLAGS/LUA_CFLAGS
+# above) so an incremental `make test` -- not just `make clean && make test`
+# -- rebuilds every .o whose #included headers changed, not just the ones
+# whose .cpp file's own mtime changed.
+-include $(wildcard *.d)
+-include $(wildcard third_party/lua/*.d)
 
 # Rebuild
 rebuild: clean test

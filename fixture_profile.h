@@ -29,10 +29,17 @@ static constexpr int MAX_CAPS = 24;
 
 // v2 function-range table limits. Compact and fixed-size (no heap) since
 // FixtureProfile is a value type copied around freely (see show_bundle.cpp's
-// PatchEntry). ~25 ranges (a 12-slot colour wheel + 10-slot gobo wheel) is
-// the worked example in the design doc; MAX_RANGES gives headroom above that.
-static constexpr int MAX_RANGES = 64;
-static constexpr int MAX_RANGE_NAME_BLOB = 512;
+// PatchEntry). Sized against a real commercial moving head (a Clay Paky
+// Sharpy-class fixture imported from its manufacturer's QLC+/GDTF file --
+// see web/shared/importers/testdata/), not just the original 12+10-slot
+// worked example: a colour wheel and gobo wheel that each mix ~15-30
+// discrete slots with a couple of continuous rotation sub-ranges, plus
+// prism/prism-rotation and a few housekeeping channels (reset, lamp
+// on/off, pan-tilt function), come to just over 100 ranges and ~1.7kB of
+// (undeduplicated -- see ProfileBuilder::encode) range names. MAX_RANGES
+// and MAX_RANGE_NAME_BLOB give headroom above that real-world case.
+static constexpr int MAX_RANGES = 192;
+static constexpr int MAX_RANGE_NAME_BLOB = 2048;
 
 struct ChannelMap {
   Capability cap;

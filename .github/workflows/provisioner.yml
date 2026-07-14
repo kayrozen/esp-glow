@@ -84,6 +84,12 @@ jobs:
       - name: Run editor smoke tests
         run: node web/provision-wasm/smoke-test-wasm.mjs
 
+      - name: Build fdef_check (host g++, not emcc -- round-trip oracle for the importers)
+        run: make fdef_check
+
+      - name: Run fixture importer tests (QLC+/OFL/GDTF -- web/shared/importers/)
+        run: node web/shared/importers/test-importers.mjs
+
       - name: Upload WASM artifacts
         uses: actions/upload-artifact@v4
         with:

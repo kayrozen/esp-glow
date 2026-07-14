@@ -14,6 +14,8 @@ import { serialSupported, secureContextOk, flash as flashDevice } from "./flash.
 import { createFennelEditor, getEditorDoc, lintFootguns } from "./shared/fennel-editor.js";
 import { checkFennelSyntax } from "./fennel-check.js";
 import { buildScriptsImage } from "./boot-image.js";
+import { detectAndParse, listImportModes, buildImportModel, normalizeFixtureUrl, FORMAT_LABEL } from "./import.js";
+import { emitFdef, fitRangeBudget, CAP_NAMES as IMPORT_CAP_NAMES } from "./shared/importers/model.js";
 
 // --- tiny DOM helper ----------------------------------------------------
 
@@ -42,14 +44,20 @@ const el = (tag, attrs = {}, ...children) => {
 
 // --- capability / transport name maps (mirror fixture_profile.h) -------
 
+// Wire order matches the Capability enum in fixture_profile.h exactly
+// (0..26, then Generic=255) -- this predates PFX2 and used to stop at Fan,
+// silently mislabeling every v2 capability (ColorWheel..Macro) as
+// "Unknown" in the .fdef preview/diagnostics pane.
 const CAP_NAMES = [
   "Dimmer", "Red", "Green", "Blue", "White", "Amber", "Uv",
   "Cyan", "Magenta", "Yellow", "Pan", "Tilt",
-  "ShutterStrobe", "Gobo", "Focus", "Zoom", "Fog", "Fan", "Generic",
+  "ShutterStrobe", "Gobo", "Focus", "Zoom", "Fog", "Fan",
+  "ColorWheel", "GoboRotation", "Prism", "PrismRotation", "Frost", "Iris", "CTO",
+  "AnimationWheel", "Macro",
 ];
 const CAP_VALUES = (() => {
-  const m = {};
-  CAP_NAMES.forEach((n, i) => (m[n] = i === 18 ? 255 : i));
+  const m = { Generic: 255 };
+  CAP_NAMES.forEach((n, i) => (m[n] = i));
   return m;
 })();
 function capNameFromValue(v) {
@@ -183,6 +191,36 @@ const state = {
     includeShow: true,
     includeBoot: false,
     baud: 460800,
+  },
+  // Fixture importer (QLC+/OFL/GDTF) -- see import.js for format dispatch,
+  // web/shared/importers/ for the actual parsing + Capability/range
+  // mapping (shared with the Node test suite).
+  import: {
+    open: false,
+    stage: "input",       // "input" | "mode" | "table"
+    loading: false,
+    error: null,
+    urlText: "",
+    format: null,         // "qlcplus" | "ofl" | "gdtf"
+    fixtureLabel: "",      // manufacturer/model or name, for display
+    parsed: null,          // format-specific parsed fixture
+    modes: [],             // [{name, footprint}]
+    modeName: null,
+    model: null,           // current (possibly hand-edited) intermediate model -- FULL mapping, never trimmed (the channel table always shows everything the source defines)
+    warnings: [],
+    // fitRangeBudget() result for what's ACTUALLY about to be saved (see
+    // regenerateImportFdefText). Empty on every real fixture this importer
+    // has been tested against at PFX2's current MAX_RANGES=192/
+    // MAX_RANGE_NAME_BLOB=2048 budget -- this is a last-resort safety net
+    // for a pathological one, and it must never trim silently: rendered as
+    // its own unmissable banner (renderImportModal), separate from the
+    // softer informational `warnings` above, plus a per-range strike-
+    // through in the channel table so the user sees exactly which named
+    // slots wouldn't make it into the saved .fdef.
+    budgetDropped: [],
+    fdefName: "",
+    fdefText: "",
+    fdefDirty: false,      // true once the user hand-edits the preview textarea
   },
 };
 
@@ -386,8 +424,20 @@ function downloadBlob(filename, mime, data) {
   URL.revokeObjectURL(url);
 }
 
+const IMPORT_FORMAT_EXTENSIONS = [".qxf", ".gdtf", ".json"];
+
 function handleFiles(files) {
   const arr = Array.from(files);
+  // A dropped/selected QLC+/GDTF/OFL file goes through the importer (it
+  // needs a mode picked and a mapping review, not a straight text load)
+  // rather than being silently ignored by the .show/.fdef branches below.
+  // One at a time, matching every other importer entry point.
+  const importable = arr.find((f) => IMPORT_FORMAT_EXTENSIONS.some((ext) => f.name.toLowerCase().endsWith(ext)));
+  if (importable) {
+    openImportModal();
+    importFromFile(importable);
+    return;
+  }
   let i = 0;
   const reader = new FileReader();
   const next = () => {
@@ -465,6 +515,7 @@ function render() {
   app.innerHTML = "";
   app.appendChild(renderConsole());
   if (state.flash.open) app.appendChild(renderFlashModal());
+  if (state.import.open) app.appendChild(renderImportModal());
 }
 
 function renderConsole() {
@@ -519,7 +570,7 @@ function renderTopbar() {
     el("input", {
       id: "file-input",
       type: "file",
-      accept: ".show,.fdef",
+      accept: ".show,.fdef,.qxf,.gdtf,.json",
       multiple: "",
       style: "display:none",
       onchange: (e) => {
@@ -605,6 +656,15 @@ function renderSidebar() {
       "div",
       { class: "sidebar-header" },
       el("span", { class: "label" }, "Files"),
+      el(
+        "button",
+        {
+          class: "btn btn-icon",
+          title: "Import fixture (QLC+/OFL/GDTF)",
+          onclick: openImportModal,
+        },
+        icon("upload"),
+      ),
       el(
         "button",
         {
@@ -933,6 +993,400 @@ function diagRow(label, ok, err, extra) {
       ok === true && extra && el("div", { class: "extra" }, extra),
     ),
   );
+}
+
+// --- fixture importer modal (QLC+ / OFL / GDTF) -------------------------
+//
+// Three stages: pick a file/URL -> pick a mode (mandatory, no default --
+// a fixture patched in the wrong mode is completely mispatched) -> review
+// the channel table and .fdef preview, both editable, before saving into
+// the fixture library. See import.js + web/shared/importers/ for the
+// actual parsing/mapping.
+
+function openImportModal() {
+  state.import = {
+    ...state.import,
+    open: true, stage: "input", loading: false, error: null, urlText: "",
+    format: null, fixtureLabel: "", parsed: null, modes: [], modeName: null,
+    model: null, warnings: [], budgetDropped: [], fdefName: "", fdefText: "", fdefDirty: false,
+  };
+  render();
+}
+
+function closeImportModal() {
+  if (state.import.loading) return;
+  state.import.open = false;
+  render();
+}
+
+async function importFromBytes(name, bytes) {
+  const im = state.import;
+  im.loading = true;
+  im.error = null;
+  render();
+  try {
+    const { format, parsed } = await detectAndParse(name, bytes);
+    const modes = listImportModes(format, parsed);
+    im.format = format;
+    im.parsed = parsed;
+    im.modes = modes;
+    im.fixtureLabel = `${FORMAT_LABEL[format]} fixture -- ${name}`;
+    im.stage = "mode";
+    if (modes.length === 1) {
+      // Still an explicit choice, just a trivial one: pre-fill the
+      // dropdown's value but leave the user to press Continue (no
+      // auto-advance -- "never auto-pick" applies even when there's only
+      // one option, since a future re-import of an updated file could add
+      // modes).
+      im.modeName = modes[0].name;
+    }
+  } catch (e) {
+    im.error = e && e.message ? e.message : String(e);
+  } finally {
+    im.loading = false;
+    render();
+  }
+}
+
+function importFromFile(file) {
+  const reader = new FileReader();
+  reader.onload = () => importFromBytes(file.name, new Uint8Array(reader.result));
+  reader.onerror = () => {
+    state.import.error = `Couldn't read ${file.name}`;
+    render();
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+async function importFromUrl() {
+  const im = state.import;
+  const url = normalizeFixtureUrl(im.urlText);
+  if (!url) return;
+  im.loading = true;
+  im.error = null;
+  render();
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`fetch failed: HTTP ${resp.status}`);
+    const bytes = new Uint8Array(await resp.arrayBuffer());
+    const name = url.split("/").pop() || url;
+    im.loading = false;
+    await importFromBytes(name, bytes);
+  } catch (e) {
+    im.loading = false;
+    im.error = `${e && e.message ? e.message : String(e)} -- if this is a CORS/network problem, download the file and drop it in instead.`;
+    render();
+  }
+}
+
+function importSelectMode(modeName) {
+  const im = state.import;
+  im.modeName = modeName || null;
+  if (!modeName) return render();
+  try {
+    const { model, warnings } = buildImportModel(im.format, im.parsed, modeName);
+    im.model = model;
+    im.warnings = warnings;
+    im.fdefName = suggestFdefName(model.name);
+    im.fdefDirty = false;
+    regenerateImportFdefText();
+    im.stage = "table";
+  } catch (e) {
+    im.error = e && e.message ? e.message : String(e);
+  }
+  render();
+}
+
+function suggestFdefName(fixtureName) {
+  const slug = (fixtureName || "fixture")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "fixture";
+  return `${slug}.fdef`;
+}
+
+// Recomputes the .fdef preview text from the current (possibly
+// hand-edited-in-the-table) model. A no-op once the user has typed
+// directly into the preview textarea (fdefDirty) -- their raw edits win
+// until they explicitly ask to regenerate.
+//
+// The table (im.model) always shows the FULL mapping; what's emitted here
+// is run through fitRangeBudget first, because that's what actually gets
+// saved and compiled. On every real fixture this is a no-op (PFX2's
+// budget is sized for real fixtures now -- see fixture_profile.h), but if
+// it ever does trim, im.budgetDropped must be populated so the "table"
+// stage's warning banner and the per-range strikethrough can show exactly
+// what got cut -- never a silent loss.
+function regenerateImportFdefText() {
+  const im = state.import;
+  if (!im.model) return;
+  try {
+    const { model: fitted, dropped } = fitRangeBudget(im.model);
+    im.budgetDropped = dropped;
+    im.fdefText = emitFdef(fitted);
+    im.error = null;
+  } catch (e) {
+    im.error = e && e.message ? e.message : String(e);
+  }
+}
+
+function importSetCap(coarseOffset, capName) {
+  const im = state.import;
+  const c = im.model.caps.find((x) => x.coarse === coarseOffset);
+  if (!c) return;
+  c.cap = capName;
+  c.unmapped = false; // an explicit user choice is never "unmapped"
+  if (!im.fdefDirty) regenerateImportFdefText();
+  render();
+}
+
+function importSetRangeField(coarseOffset, rangeIdx, field, value) {
+  const im = state.import;
+  const c = im.model.caps.find((x) => x.coarse === coarseOffset);
+  if (!c || !c.ranges[rangeIdx]) return;
+  c.ranges[rangeIdx][field] = value;
+  if (!im.fdefDirty) regenerateImportFdefText();
+  render();
+}
+
+function importEditFdefText(text) {
+  state.import.fdefText = text;
+  state.import.fdefDirty = true;
+}
+
+function importRegenerateFromTable() {
+  state.import.fdefDirty = false;
+  regenerateImportFdefText();
+  render();
+}
+
+function importSaveToLibrary() {
+  const im = state.import;
+  let name = (im.fdefName || "").trim();
+  if (!name) return;
+  if (!name.toLowerCase().endsWith(".fdef")) name += ".fdef";
+  const existing = new Set(state.workspace.fdefs.map((f) => f.name));
+  let finalName = name;
+  let n = 2;
+  while (existing.has(finalName)) {
+    finalName = name.replace(/\.fdef$/i, `-${n}.fdef`);
+    n++;
+  }
+  state.workspace.fdefs.push({ name: finalName, text: im.fdefText });
+  state.selection = { kind: "fdef", name: finalName };
+  im.open = false;
+  reparseFdefs().then(render);
+  toast("Imported", `${finalName} added to the fixture library`, "ok");
+  render();
+}
+
+function renderImportModal() {
+  const im = state.import;
+  const body = [];
+
+  if (im.stage === "input") {
+    body.push(
+      el("div", { class: "import-dropzone",
+        ondragover: (e) => { e.preventDefault(); e.stopPropagation(); },
+        ondrop: (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (e.dataTransfer.files.length > 0) importFromFile(e.dataTransfer.files[0]);
+        },
+      },
+        icon("upload"),
+        el("div", {}, "Drop a .qxf, .gdtf, or Open Fixture Library .json file here"),
+        el(
+          "button",
+          { class: "btn", onclick: () => $("#import-file-input").click() },
+          "Choose file…",
+        ),
+        el("input", {
+          id: "import-file-input", type: "file", accept: ".qxf,.gdtf,.json",
+          style: "display:none",
+          onchange: (e) => { if (e.target.files.length > 0) importFromFile(e.target.files[0]); e.target.value = ""; },
+        }),
+      ),
+    );
+    body.push(
+      el("div", { class: "import-url-row" },
+        el("input", {
+          type: "text", placeholder: "…or paste a QLC+/OFL GitHub URL",
+          value: im.urlText,
+          oninput: (e) => { im.urlText = e.target.value; },
+          onkeydown: (e) => { if (e.key === "Enter") importFromUrl(); },
+        }),
+        el("button", { class: "btn", disabled: !im.urlText.trim() || im.loading, onclick: importFromUrl }, "Fetch"),
+      ),
+    );
+    if (im.loading) body.push(el("div", { class: "import-status" }, icon("spin"), " Parsing…"));
+    if (im.error) body.push(errorBlock("Import failed", im.error, ""));
+  } else if (im.stage === "mode") {
+    body.push(el("div", { class: "import-fixture-label" }, im.fixtureLabel));
+    body.push(
+      el(
+        "label",
+        { class: "import-mode-select" },
+        el("span", {}, "Mode (personality) -- pick the one you'll patch:"),
+        el(
+          "select",
+          { onchange: (e) => importSelectMode(e.target.value) },
+          el("option", { value: "", selected: im.modeName == null }, "Select a mode…"),
+          ...im.modes.map((m) =>
+            el("option", { value: m.name, selected: im.modeName === m.name }, `${m.name} (${m.footprint}ch)`),
+          ),
+        ),
+      ),
+    );
+    if (im.error) body.push(errorBlock("Import failed", im.error, ""));
+  } else if (im.stage === "table") {
+    if (im.budgetDropped.length) {
+      // Unmissable, on its own, above the softer informational warnings --
+      // this is data loss (named states that won't make it into the
+      // saved .fdef), not a mapping judgment call. Should be vanishingly
+      // rare at PFX2's current budget; if it fires, the user must not
+      // find out only after flashing a fixture with half its gobos.
+      const totalDropped = im.budgetDropped.reduce((n, d) => n + d.count, 0);
+      body.push(
+        el(
+          "div",
+          { class: "import-budget-alert" },
+          icon("err"),
+          el(
+            "div",
+            {},
+            el(
+              "div",
+              { class: "import-budget-alert-title" },
+              `${totalDropped} named state${totalDropped === 1 ? "" : "s"} won't be saved -- the fixture profile's slot budget is full`,
+            ),
+            ...im.budgetDropped.map((d) =>
+              el("div", { class: "import-budget-alert-detail" },
+                `"${d.cap}" (offset ${d.coarse}): ${d.count} of its trailing ranges dropped, marked with strikethrough below`),
+            ),
+          ),
+        ),
+      );
+    }
+    if (im.warnings.length) {
+      body.push(
+        el(
+          "div",
+          { class: "import-warnings" },
+          el("div", { class: "import-warnings-title" }, `${im.warnings.length} note${im.warnings.length === 1 ? "" : "s"} from the importer`),
+          ...im.warnings.map((w) => el("div", { class: "import-warning" }, w)),
+        ),
+      );
+    }
+    body.push(renderImportChannelTable(im.model, im.budgetDropped));
+    body.push(
+      el(
+        "div",
+        { class: "import-fdef-preview" },
+        el(
+          "div",
+          { class: "import-fdef-preview-header" },
+          el("span", {}, ".fdef preview (editable)"),
+          im.fdefDirty && el("button", { class: "btn btn-small", onclick: importRegenerateFromTable }, "Regenerate from table"),
+        ),
+        el("textarea", {
+          class: "import-fdef-textarea",
+          spellcheck: "false",
+          oninput: (e) => importEditFdefText(e.target.value),
+        }, im.fdefText),
+      ),
+    );
+    body.push(
+      el(
+        "label",
+        { class: "import-save-row" },
+        el("span", {}, "Save as:"),
+        el("input", { type: "text", value: im.fdefName, oninput: (e) => { im.fdefName = e.target.value; } }),
+      ),
+    );
+  }
+
+  const footerButtons = [
+    el("button", { class: "btn", disabled: im.loading, onclick: closeImportModal }, "Cancel"),
+  ];
+  if (im.stage === "mode") {
+    footerButtons.unshift(el("button", { class: "btn", onclick: () => { im.stage = "input"; render(); } }, "Back"));
+  }
+  if (im.stage === "table") {
+    footerButtons.unshift(el("button", { class: "btn", onclick: () => { im.stage = "mode"; render(); } }, "Back"));
+    footerButtons.push(
+      el("button", { class: "btn btn-primary", disabled: !im.fdefName.trim(), onclick: importSaveToLibrary }, "Add to fixture library"),
+    );
+  }
+
+  return el(
+    "div",
+    { class: "modal-backdrop", onclick: (e) => { if (e.target === e.currentTarget) closeImportModal(); } },
+    el(
+      "div",
+      { class: "modal modal-wide" },
+      el(
+        "div",
+        { class: "modal-header" },
+        icon("upload"),
+        el("span", { class: "title" }, "Import fixture"),
+        el("div", { class: "spacer" }),
+        el("button", { class: "btn btn-icon", onclick: closeImportModal, disabled: im.loading }, icon("close")),
+      ),
+      el("div", { class: "modal-body" }, ...body),
+      el("div", { class: "flash-footer" }, ...footerButtons),
+    ),
+  );
+}
+
+function renderImportChannelTable(model, budgetDropped = []) {
+  // fitRangeBudget trims from the END of a channel's own range list (see
+  // model.js) -- mirror that here so the marked rows are the exact ones
+  // that will actually be cut, not just "some N of them".
+  const droppedCountByOffset = new Map(budgetDropped.map((d) => [d.coarse, d.count]));
+  const rows = model.caps.map((c) => {
+    const offsetLabel = c.fine != null ? `${c.coarse}/${c.fine}` : `${c.coarse}`;
+    const droppedCount = droppedCountByOffset.get(c.coarse) || 0;
+    const firstDroppedIdx = droppedCount > 0 ? c.ranges.length - droppedCount : Infinity;
+    const rangeRows = c.ranges.map((r, i) =>
+      el(
+        "div",
+        { class: `import-range-row ${i >= firstDroppedIdx ? "import-range-will-drop" : ""}` },
+        el("span", { class: "import-range-span" }, `${r.from}–${r.to}`),
+        el(
+          "select",
+          {
+            onchange: (e) => importSetRangeField(c.coarse, i, "continuous", e.target.value === "continuous"),
+          },
+          el("option", { value: "discrete", selected: !r.continuous }, "SLOT (discrete)"),
+          el("option", { value: "continuous", selected: r.continuous }, "RANGE (continuous)"),
+        ),
+        el("input", {
+          type: "text", class: "import-range-name", value: r.name || "",
+          oninput: (e) => importSetRangeField(c.coarse, i, "name", e.target.value),
+        }),
+      ),
+    );
+    return el(
+      "div",
+      { class: `import-channel-row ${c.unmapped ? "import-unmapped" : ""}` },
+      el(
+        "div",
+        { class: "import-channel-main" },
+        el("span", { class: "import-channel-offset" }, offsetLabel),
+        el("span", { class: "import-channel-source" }, c.sourceName || "(unnamed)"),
+        el(
+          "select",
+          { onchange: (e) => importSetCap(c.coarse, e.target.value) },
+          ...IMPORT_CAP_NAMES.map((name) => el("option", { value: name, selected: c.cap === name }, name)),
+        ),
+        c.unmapped && el("span", { class: "import-unmapped-badge" }, "unmapped"),
+        droppedCount > 0 && el("span", { class: "import-unmapped-badge" }, `${droppedCount} won't be saved`),
+      ),
+      rangeRows.length > 0 && el("div", { class: "import-range-list" }, ...rangeRows),
+    );
+  });
+  return el("div", { class: "import-channel-table" }, ...rows);
 }
 
 // --- USB flash modal (esptool-js over Web Serial) -----------------------

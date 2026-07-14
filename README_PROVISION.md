@@ -191,15 +191,33 @@ The loader (`loadShow`) is the security boundary for device-side loading:
 - **No exceptions**: Portable, uses return values for errors.
 - Testable under `-fsanitize=address` to detect OOB reads.
 
-## Future: GDTF / QLC+ Importers
+## GDTF / QLC+ / OFL Importers
 
-This agent implements **no** GDTF, QLC+ (.qxf), or Open Fixture Library parsing. Those are complex (ZIP + XML) and belong in separate PC-side tools that:
+Implemented, entirely in the browser: `web/shared/importers/` parses QLC+
+`.qxf` (XML), Open Fixture Library `.json`, and GDTF `.gdtf` (a ZIP
+containing `description.xml`) fixture definitions and maps them to the
+intermediate model in `web/shared/importers/model.js`, which
+`emitFdef()` turns into `.fdef` text — including PFX2 `SLOT`/`RANGE`
+lines, so a real fixture's colour wheel, gobo wheel, prism, etc. come
+through named, not just as bare linear bytes. See the import panel in the
+provisioner editor (`web/provisioner-static/import.js`) and
+`web/shared/importers/testdata/NOTICE.md` for the real manufacturer files
+this was built and tested against.
 
-1. Read GDTF/QLC+/OFL files using proper libraries (libzip, libxml2).
-2. Emit `.fdef` and `.show` text files in the formats described above.
-3. Run provisioning on the emitted text.
+None of this runs on the device or needs a native ZIP/XML library: a tiny
+dependency-free XML parser (`xml-lite.js`) and ZIP reader (`zip-lite.js`,
+STORE + DEFLATE via `DecompressionStream`/`node:zlib`) are enough for
+these formats. The `.fdef` and `.show` text formats are the stable seam
+the importers target — same as any hand-written `.fdef` — which is what
+keeps the device-side loader simple and the importers entirely
+PC/browser-side.
 
-The `.fdef` and `.show` text formats are the stable seam — all importers target them, and all firmware loads from `SHW1` bundles compiled from them. This separation keeps the device-side loader simple and the text formats forward-compatible.
+Test suite: `node web/shared/importers/test-importers.mjs` (or
+`make test-importers`) — pure-JS parsing/mapping tests against the
+committed real fixture files, plus a round-trip through `fdef_check` (a
+host build of this same `parseFixtureDef`/`encodeProfile`/`parseProfile`
+pipeline) that proves an imported `.fdef` actually compiles to the
+channel map and ranges expected, not just plausible-looking text.
 
 ## API
 
