@@ -52,6 +52,18 @@ CXXFLAGS=(
   # No sanitizers under WASM — ASan/UBSan have a non-trivial WASM runtime
   # cost and complicate embind. The host `make test` gate keeps sanitizers.
   -I"$REPO_ROOT"
+  # Emscripten's default stack is 64KB. FixtureProfile/MidiControllerProfile/
+  # PatchEntry are copied-by-value value types (deliberately -- see their own
+  # headers) sized against real-world worst cases (PFX2's MAX_RANGES=192
+  # bumped FixtureProfile past 3.7KB), so a handful of them as locals across
+  # a few stack frames (e.g. test_provision.cpp building profiles to feed
+  # compileShow) is enough to blow a 64KB stack -- an unhelpful bare
+  # `Aborted()` via __abort_js, not a clear "stack overflow" message. The
+  # host build never sees this (8MB default stack); ESP32 tasks are sized
+  # per-task and unaffected. 1MB is free in a browser tab. In this list (not
+  # duplicated per-target) so it can't be forgotten in just one of
+  # build_test/build_editor -- see LIB_SOURCES' own history for that mistake.
+  -s STACK_SIZE=1048576
 )
 
 # Sources shared by both test and editor builds. Mirrors the
