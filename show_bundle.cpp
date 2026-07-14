@@ -71,7 +71,11 @@ bool loadShow(const uint8_t* data, size_t len, LoadedShow& out) {
     return false;
   }
 
-  uint8_t version;
+  // Zero-initialized: readU8 always sets `version` before returning true,
+  // but the ESP-IDF toolchain's GCC (12.2.0, -Og) can't see that across the
+  // reference-parameter call and flags line 86 as -Werror=maybe-uninitialized
+  // otherwise (a false positive -- the host build's GCC/-O0 doesn't hit it).
+  uint8_t version = 0;
   if (!reader.readU8(version)) return false;
   if (version != 1 && version != 2) return false;
 
