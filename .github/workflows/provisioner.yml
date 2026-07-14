@@ -19,7 +19,8 @@
 #
 # Trigger: any push or pull request touching web/provision-wasm/**,
 # web/provisioner-static/**, provision.cpp, provision.h, fixture_profile.*,
-# profile_encoder.*, show_bundle.*, or the workflow itself -- build-wasm runs
+# profile_encoder.*, show_bundle.*, test_provision.cpp, or the workflow
+# itself -- build-wasm runs
 # (and must pass) on every branch/PR, not just main, so a WASM-only
 # regression is caught before merge instead of after (this used to be
 # push-to-main-only, so a WASM build/test break could merge cleanly and only
@@ -45,6 +46,7 @@ on:
       - "controller_encoder.*"
       - "show_bundle.*"
       - "vec_math.*"
+      - "test_provision.cpp"
       - ".github/workflows/provisioner.yml"
   pull_request:
     paths:
@@ -61,6 +63,7 @@ on:
       - "controller_encoder.*"
       - "show_bundle.*"
       - "vec_math.*"
+      - "test_provision.cpp"
       - ".github/workflows/provisioner.yml"
   workflow_run:
     workflows: ["Firmware build"]
