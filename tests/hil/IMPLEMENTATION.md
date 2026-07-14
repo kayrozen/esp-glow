@@ -23,8 +23,7 @@ tests/hil/
 ├── test_l8_ota_robustness.py  # F5 robustness (mostly skipped -- not implemented)
 ├── pytest.ini
 ├── requirements.txt
-├── run_hil_tests.sh
-└── __init__.py
+└── run_hil_tests.sh
 ```
 
 ## The `GLOW-TEST:` telemetry protocol
