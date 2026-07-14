@@ -56,6 +56,19 @@ jobs:
           tar -xJf /tmp/qemu-xtensa.tar.xz -C /opt/qemu-xtensa
           dirname "$(find /opt/qemu-xtensa -name qemu-system-xtensa -type f | head -1)" >> "$GITHUB_PATH"
 
+          # This prebuilt binary dynamically links against SDL2 (its
+          # optional display backend, unused with -nographic, but still
+          # required at dynamic-link time) plus the usual glib/pixman/
+          # slirp/gcrypt runtime libs -- none of which espressif/idf's
+          # docker image ships, since it's a toolchain image, not a QEMU
+          # one. `ldd` after install turns any future missing dependency
+          # into a clear log line instead of a bare "exit code 127".
+          apt-get update -qq
+          apt-get install -y --no-install-recommends \
+            libsdl2-2.0-0 libglib2.0-0 libpixman-1-0 libslirp0 libgcrypt20
+          QEMU_BIN="$(find /opt/qemu-xtensa -name qemu-system-xtensa -type f | head -1)"
+          ldd "$QEMU_BIN" | grep "not found" && exit 1 || true
+
       - name: Run QEMU boot tests
         shell: bash
         run: |
