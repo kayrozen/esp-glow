@@ -282,12 +282,37 @@ static char g_blackoutReason[160] = {0};
 // and test_show.cpp's regression check for this same constant).
 static constexpr float kSelftestDimmerLevel = 200.0f / 255.0f;
 
+// The "main" task's handle (the one that runs app_main and, since
+// app_main never returns, keeps existing for the device's whole life) --
+// captured once at the top of app_main so selftest_print_stack_hwm below
+// (called from the render task) can read ITS high water mark too, not
+// just its own. See CONFIG_ESP_MAIN_TASK_STACK_SIZE's sdkconfig.defaults
+// comment for why this task's stack budget is not a formality here.
+static TaskHandle_t g_mainTaskHandle = nullptr;
+
 static void selftest_print_stats(uint32_t frames, uint32_t behind, uint32_t dropped) {
   size_t heap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
   size_t luaMem = g_luaReady ? glow::glowLuaVM().memUsed() : 0;
   printf("GLOW-TEST: stats frames=%u behind=%u dropped=%u heap=%u lua_mem=%u\n",
          (unsigned)frames, (unsigned)behind, (unsigned)dropped,
          (unsigned)heap, (unsigned)luaMem);
+}
+
+// Stack high-water marks (uxTaskGetStackHighWaterMark returns bytes on
+// ESP-IDF's FreeRTOS port, not words -- see its header comment): the
+// smallest amount of free stack space either task has had since it
+// started. Both matter for different reasons -- main: one-time boot cost
+// (driver bring-up, FixtureProfile-by-value show patching, Lua/Fennel VM
+// init) that only ever gets worse if boot.fnl or the bundle grows; render:
+// an ONGOING cost every frame the live-coding REPL is used, since
+// glow_lua_eval_fennel (a recursive-descent Fennel compiler) and every
+// effect's lua_pcall both run on THIS task's stack, not a dedicated one
+// (see glow_fennel.h/lua_effect.cpp). A high-water mark trending toward 0
+// over a long soak is the signal to size up, not a guess.
+static void selftest_print_stack_hwm() {
+  UBaseType_t mainHwm = g_mainTaskHandle ? uxTaskGetStackHighWaterMark(g_mainTaskHandle) : 0;
+  UBaseType_t renderHwm = uxTaskGetStackHighWaterMark(nullptr);  // NULL = calling (render) task
+  printf("GLOW-TEST: stack main=%u render=%u\n", (unsigned)mainHwm, (unsigned)renderHwm);
 }
 
 // Answers one query line (already trimmed of its trailing newline). Runs on
@@ -548,6 +573,7 @@ static void render_tick_hooks(RenderTickPhase phase, float t, uint32_t slack_us)
         uint32_t frames = 0, behind = 0, dropped = 0;
         render_task_get_and_reset_stats(&frames, &behind, &dropped);
         selftest_print_stats(frames, behind, dropped);
+        selftest_print_stack_hwm();
 #endif
       }
 
@@ -764,6 +790,12 @@ static bool setup_show_from_bundle() {
 }
 
 extern "C" void app_main(void) {
+#ifdef CONFIG_GLOW_SELFTEST
+  // Captured first, before anything else can fail/return early -- see
+  // g_mainTaskHandle's own comment and selftest_print_stack_hwm.
+  g_mainTaskHandle = xTaskGetCurrentTaskHandle();
+#endif
+
   // --- Banner (F0) ---
   esp_chip_info_t chip;
   esp_chip_info(&chip);
@@ -890,7 +922,16 @@ extern "C" void app_main(void) {
   rcfg.show       = &g_show;
   rcfg.targetHz   = 44;
   rcfg.core       = 1;
-  rcfg.stackBytes = 4096;
+  // 4096 was sized for what this task used to do (pixel-matrix rendering,
+  // fixed per-frame work). It's no longer just that: glow_lua_eval_fennel
+  // (live-coded Fennel -- a recursive-descent compiler) is drained here on
+  // eval, and every effect's lua_pcall runs here every frame too (see
+  // glow_fennel.h/lua_effect.cpp) -- both on THIS stack, not a dedicated
+  // one. 20 KB is a generous starting point, not a measured minimum; see
+  // GLOW-TEST: stack telemetry (CONFIG_GLOW_SELFTEST,
+  // selftest_print_stack_hwm) for the real high-water mark under a full
+  // boot + Fennel eval + effects load.
+  rcfg.stackBytes = 20480;
   rcfg.priority   = 20;
   rcfg.pre_render = on_pre_render;
   rcfg.pre_render_ctx = nullptr;

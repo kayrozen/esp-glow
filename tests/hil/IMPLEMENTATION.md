@@ -44,6 +44,7 @@ naive whitespace tokenization.
 | `bundle` | `fixtures`, `matrices` | once per successful bundle load | `main.cpp`, `setup_show_from_bundle()` |
 | `scripts` | `mount=ok` | once, after the "scripts" LittleFS partition mounts | `main.cpp`, `setup_lua()` |
 | `stats` | `frames`, `behind`, `dropped`, `heap`, `lua_mem` | ~once/sec (every 44 render frames) | `main.cpp`'s `render_tick_hooks` Post phase, via `render_task_get_and_reset_stats()` |
+| `stack` | `main`, `render` (bytes, `uxTaskGetStackHighWaterMark`) | ~once/sec, alongside `stats` | `main.cpp`'s `selftest_print_stack_hwm()`, called from `render_tick_hooks` Post phase |
 | `fx_disabled` | `name`, `err` | once per newly-disabled Lua effect | `main.cpp`'s `send_fx_error_to_ws` (extended `FxErrorReplyFn`) |
 
 `stats`' `behind` vs `dropped` is the important distinction for L7:
