@@ -81,7 +81,36 @@ jobs:
           qemu-system-xtensa --version
           pip install -r tests/qemu/requirements.txt
           cd tests/qemu
-          GLOW_SKIP_BUILD=1 pytest -v --tb=short
+          GLOW_SKIP_BUILD=1 pytest -v --tb=short 2>&1 | tee /tmp/pytest_output.log
+
+      # A crash (panic backtrace, "assert failed: 0x...") only ever shows up
+      # in this suite's assertion messages as raw, unsymbolicated addresses
+      # -- ESP32 firmware panic output isn't decoded until something runs it
+      # through addr2line against the matching ELF (idf.py monitor normally
+      # does this live over serial; there is no serial here). Decode every
+      # 0x-prefixed address in this run's output against the ELF this same
+      # job just built, so a future crash's actual file:line/function shows
+      # up in the CI log directly instead of requiring a live gdb attach
+      # (which already proved unreliable once in this suite's development --
+      # see git history) or manual addr2line by hand.
+      - name: Decode any crash addresses (addr2line)
+        if: always()
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          ELF="firmware/build-qemu-selftest/esp-glow.elf"
+          ADDR2LINE="$(find /opt/esp/tools -type f -name 'xtensa-esp32s3-elf-addr2line' | head -1)"
+          ADDRS="$(grep -oE '0x[0-9a-fA-F]{8}' /tmp/pytest_output.log | sort -u)"
+          if [ -z "$ADDR2LINE" ]; then
+            echo "xtensa-esp32s3-elf-addr2line not found on PATH; skipping decode."
+          elif [ -z "$ADDRS" ]; then
+            echo "No 0x-addresses found in this run's output; nothing to decode."
+          else
+            echo "=== Decoded addresses (addr2line -e $ELF -fipC) ==="
+            echo "$ADDRS" | "$ADDR2LINE" -e "$ELF" -fipC
+            echo "(Not every address above is code -- register-dump values and"
+            echo "other hex fields get swept up too; '?? ??:0' for those is expected.)"
+          fi
 
       - uses: actions/upload-artifact@v4
         if: always()
