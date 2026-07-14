@@ -68,6 +68,22 @@ config GLOW_MIDI_TX_GPIO
         that's the receiver's job). Drives LED feedback (A5/.mdef); -1
         leaves MIDI OUT disabled and glow.led.* stays a no-op.
 
+config GLOW_USB_MIDI_HOST
+    bool "Enable USB-MIDI host (requires a board with a powered VBUS USB-A port)"
+    default n
+    help
+        Lets a class-compliant USB-MIDI controller plug directly into the
+        S3 (usb_midi_input.cpp/usb_host_lib), instead of DIN-MIDI over
+        GLOW_MIDI_RX_GPIO. This is a BOARD change, not just a firmware
+        flag: USB host mode means the ESP32 must supply 5V VBUS to the
+        controller (a USB-A receptacle, a power path able to source a few
+        hundred mA, ideally with over-current protection). Leave this OFF
+        on a board wired for GLOW_MIDI_RX_GPIO only -- it has no VBUS path
+        to offer a controller. One device at a time (same as every other
+        input transport here); the host task runs on core 0 with WiFi, so
+        watch the render task's `dropped` frame counter for coexistence
+        regressions after enabling this.
+
 config GLOW_OSC_UDP_PORT
     int "OSC UDP listen port"
     default 9000

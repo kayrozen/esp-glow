@@ -201,16 +201,18 @@ Converts 3-byte MIDI channel messages to `ControlEvent`:
 - Fader crossfaders for manual cue mixing — requires `setManualLevel(cueId, level)` on ShowController
 - MIDI clock, beat sync, tap tempo — separate concern
 - Modifying `ShowController` or other existing modules
-- USB-MIDI host — deliberately deferred. `.mdef`/LED feedback/MIDI OUT work
-  identically over the DIN transport already implemented here; USB host
-  needs an ESP-IDF `usb_host_lib`-based MIDI class driver (none shipped by
-  Espressif) *and* a board respin (the ESP32 must supply 5V VBUS to the
-  controller). A USB-host-to-DIN adapter (~$20) gets the same result today
-  with no firmware or hardware risk. Add it later, as a transport, once
-  the hardware question is settled -- `usb_midi_input.cpp` would be
-  structurally identical to `midi_input.cpp`: strip USB-MIDI event packets
-  to raw MIDI bytes, call the existing host-tested `parseMidi`, push onto
-  the same control queue. Nothing else.
+- USB-MIDI host — implemented (`usb_midi_input.cpp`), gated behind
+  `CONFIG_GLOW_USB_MIDI_HOST` (Kconfig.projbuild), OFF by default. `.mdef`/
+  LED feedback/MIDI OUT still only work over the DIN transport -- USB-MIDI
+  is input-only here, structurally identical to `midi_input.cpp`: strip
+  USB-MIDI event packets to raw MIDI bytes, call the existing host-tested
+  `parseMidi`, push onto the same control queue. Nothing else. Enabling it
+  is still a board decision, not just a firmware flag: USB host mode means
+  the ESP32 must supply 5V VBUS to the controller (a USB-A receptacle, a
+  power path able to source a few hundred mA, ideally with over-current
+  protection) -- a board wired for DIN-MIDI only has no VBUS path to offer
+  a controller. A USB-host-to-DIN adapter (~$20) remains the lower-risk
+  option if that board change isn't worth it yet.
 
 ## Testing
 
