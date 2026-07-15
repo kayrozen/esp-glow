@@ -87,7 +87,7 @@ bool loadShow(const uint8_t* data, size_t len, LoadedShow& out) {
   // otherwise (a false positive -- the host build's GCC/-O0 doesn't hit it).
   uint8_t version = 0;
   if (!reader.readU8(version)) return false;
-  if (version != 1 && version != 2 && version != 3) return false;
+  if (version != 1 && version != 2 && version != 4) return false;
 
   uint8_t universeCount;
   if (!reader.readU8(universeCount)) return false;
@@ -103,10 +103,10 @@ bool loadShow(const uint8_t* data, size_t len, LoadedShow& out) {
 
   out.universeCount = universeCount;
 
-  // Read universe table. v1/v2 entries are just the transport byte; v3
+  // Read universe table. v1/v2/v3 entries are just the transport byte; v4
   // entries add destIp/wireUniverse (see show_bundle.h's format comment).
-  // Default every universe to today's implicit behavior first -- a v1/v2
-  // bundle (or a v3 universe that happens not to need overriding) leaves
+  // Default every universe to today's implicit behavior first -- a v1/v2/v3
+  // bundle (or a v4 universe that happens not to need overriding) leaves
   // this as-is: fallback/broadcast destination, wire universe = the
   // universe's own internal index.
   for (int i = 0; i < universeCount; i++) {
@@ -119,7 +119,7 @@ bool loadShow(const uint8_t* data, size_t len, LoadedShow& out) {
     if (transport > 3) return false;
     out.transport[i] = static_cast<UniverseTransport>(transport);
 
-    if (version == 3) {
+    if (version >= 4) {
       uint32_t destIp;
       uint16_t wireUniverse;
       if (!reader.readU32(destIp)) return false;

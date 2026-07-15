@@ -1347,7 +1347,7 @@ TEST(show_artnet_explicit_dest_lands_in_bundle) {
 
   CompileResult result = compileShow(showText, readFile);
   CHECK(result.ok);
-  CHECK(result.bundle[4] == 3);  // explicit route -> bundle version 3
+  CHECK(result.bundle[4] == 4);  // explicit route -> bundle version 4
 
   LoadedShow loaded;
   CHECK(loadShow(result.bundle.data(), result.bundle.size(), loaded));
@@ -1447,7 +1447,7 @@ TEST(show_artnet_wire_universe_out_of_range_error) {
   CHECK(!result.err.empty());
 }
 
-TEST(show_artnet_bare_form_still_works_no_v3_bump) {
+TEST(show_artnet_bare_form_still_works_no_v4_bump) {
   // Existing shows that specify no IPs must keep working, unchanged.
   std::string showText = R"(
     SHOW 2
@@ -1621,7 +1621,7 @@ int main() {
   RUN_TEST(show_artnet_missing_wire_universe_warns_and_defaults_to_index);
   RUN_TEST(show_artnet_malformed_ip_error);
   RUN_TEST(show_artnet_wire_universe_out_of_range_error);
-  RUN_TEST(show_artnet_bare_form_still_works_no_v3_bump);
+  RUN_TEST(show_artnet_bare_form_still_works_no_v4_bump);
   RUN_TEST(loader_old_version_bundle_loads_with_todays_semantics);
 
   RUN_TEST(show_apc40_roundtrip_40_distinct_grid_pads);

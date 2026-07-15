@@ -194,13 +194,13 @@ MATRIX 2 1 16 16 SERP H GRB
 
 Little-endian encoding. Assumes all platforms (x86-64 host and ESP32-S3 Xtensa device) are little-endian. Floating-point numbers are IEEE-754 32-bit (native byte order). Document any assumption changes.
 
-Note: this `version` byte (1; 2 once a `CONTROLLER` is compiled in; 3 once a `.show` gives at
+Note: this `version` byte (1; 2 once a `CONTROLLER` is compiled in; 4 once a `.show` gives at
 least one `UNIVERSE ... ARTNET` line an explicit IP and/or wire universe) is the **binary
 bundle** format version, unrelated to the `.show` text's `SHOW 2` header above — the text format
 moved to 1-indexed addressing without touching this byte at all; a `SHOW 2` source file with
 neither a `CONTROLLER` nor explicit Art-Net routing still compiles to `version = 1` bytes,
 byte-identical to a pre-migration bundle. Versions only ever go up when the feature that needs
-the extra bytes is actually used -- see "Universe Table" below for what v3 adds.
+the extra bytes is actually used -- see "Universe Table" below for what v4 adds.
 
 ### Layout
 
@@ -214,9 +214,9 @@ Header (11 bytes):
   matrixCount   u16           count of pixel matrices
 
 Universe Table (universeCount entries):
-  v1/v2 -- 1 byte each:
+  v1/v2/v3 -- 1 byte each:
     transport[i]  u8            0=Dmx, 1=ArtNet, 2=Sacn, 3=Unused
-  v3 -- 7 bytes each (see FORMAT.md's "Art-Net Wire Universe & Destination
+  v4 -- 7 bytes each (see FORMAT.md's "Art-Net Wire Universe & Destination
   Routing" for the full writeup):
     transport[i]     u8         (as above)
     destIp[i]        u32        packed host-byte-order IPv4; 0 = no explicit route
@@ -362,7 +362,7 @@ struct ArtNetDest { uint32_t ip; uint16_t wireUniverse; };  // ip == 0 -> fallba
 struct LoadedShow {
   uint8_t universeCount;
   UniverseTransport transport[8];
-  ArtNetDest artnetDest[8];  // always populated -- v1/v2 bundles get today's
+  ArtNetDest artnetDest[8];  // always populated -- v1/v2/v3 bundles get today's
                              // implicit default (ip=0, wireUniverse=index)
   std::vector<PatchEntry> fixtures;
   std::vector<MatrixMap> matrices;

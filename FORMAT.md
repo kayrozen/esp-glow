@@ -655,24 +655,24 @@ UNIVERSE 5 ARTNET                    # no IP -> the CFG1 fallback, or broadcast 
 - **A malformed IP** (not exactly four dot-separated `0..255` octets) is a compile error naming the offending `UNIVERSE` line.
 - **A wire universe outside `0..32767`** is a compile error.
 
-## `SHW1` Bundle: Version 3
+## `SHW1` Bundle: Version 4
 
-The universe table (see README_PROVISION.md's `SHW1` bundle section) grows from 1 byte/entry to 7 bytes/entry when the bundle is version 3:
+The universe table (see README_PROVISION.md's `SHW1` bundle section) grows from 1 byte/entry to 7 bytes/entry when the bundle is version 4:
 
 ```
-v1/v2 universe table entry (1 byte):
+v1/v2/v3 universe table entry (1 byte):
   transport      u8    (0=Dmx, 1=ArtNet, 2=Sacn, 3=Unused)
 
-v3 universe table entry (7 bytes):
+v4 universe table entry (7 bytes):
   transport      u8    (as above)
   destIp         u32   (packed host-byte-order IPv4; 0 = no explicit route)
   wireUniverse   u16   (0..32767; already resolved by the compiler -- either
                          what the .show said, or the internal index default)
 ```
 
-Version 3 also always carries `mdefCount` (same header shape as v2 -- see README_PROVISION.md), whether or not a `CONTROLLER` was actually compiled in, mirroring the existing "only bump the version once the new feature is actually used" convention: **a `.show` with no explicit Art-Net routes compiles to byte-identical v1/v2 output, never v3**, even if it uses `ARTNET` transport at all (bare `UNIVERSE N ARTNET`, no IP/wire-universe args, never bumps the version).
+Version 4 also always carries `mdefCount` (same header shape as v2 -- see README_PROVISION.md), whether or not a `CONTROLLER` was actually compiled in, mirroring the existing "only bump the version once the new feature is actually used" convention: **a `.show` with no explicit Art-Net routes compiles to byte-identical v1/v2/v3 output, never v4**, even if it uses `ARTNET` transport at all (bare `UNIVERSE N ARTNET`, no IP/wire-universe args, never bumps the version).
 
-The loader (`loadShow`) accepts v1/v2/v3 uniformly: for every universe, it first fills in today's implicit default (`destIp=0`, `wireUniverse=`the universe's own index), then -- only for a v3 bundle -- overwrites those two fields from the wire bytes. An already-flashed board's saved show, or a `.show` compiled by an older provisioner, loads with exactly its pre-Wave-3 semantics; nothing about v1/v2 bytes changes.
+The loader (`loadShow`) accepts v1/v2/v3/v4 uniformly: for every universe, it first fills in today's implicit default (`destIp=0`, `wireUniverse=`the universe's own index), then -- only for a v4 bundle -- overwrites those two fields from the wire bytes. An already-flashed board's saved show, or a `.show` compiled by an older provisioner, loads with exactly its pre-Wave-3 semantics; nothing about v1/v2/v3 bytes changes.
 
 ## `ArtNetSink` / `ArtNetRouter`
 

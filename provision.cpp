@@ -680,7 +680,7 @@ CompileResult compileShow(const std::string& showText,
   // never intentional (two streams fighting over one node output) -- same
   // IP with different wire universes is fine (a multi-output node).
   std::map<std::pair<uint32_t, uint16_t>, uint8_t> artnetDestOwner;
-  bool anyExplicitArtnetRoute = false;  // gates the v3 bundle-version bump
+  bool anyExplicitArtnetRoute = false;  // gates the v4 bundle-version bump
 
   uint8_t maxUniverse = 0;
   FixtureInstance* lastFixture = nullptr;
@@ -753,7 +753,7 @@ CompileResult compileShow(const std::string& showText,
         // "Art-Net Wire Universe & Destination Routing" section. Bare
         // ARTNET (no args) keeps today's behavior exactly: fallback/
         // broadcast destination, wire universe defaults to the internal
-        // index -- and does NOT bump the bundle to v3.
+        // index -- and does NOT bump the bundle to v4.
         entry.wireUniverse = idx;
         if (tokens.size() >= 4) {
           entry.hasExplicitRoute = true;
@@ -1118,7 +1118,7 @@ CompileResult compileShow(const std::string& showText,
   uint8_t universeCount = maxUniverse + 1;
 
   // Write SHW1 bundle. Version 2 (mdefCount + a trailing controller table)
-  // when at least one CONTROLLER was compiled; version 3 (v2's header plus
+  // when at least one CONTROLLER was compiled; version 4 (v2's header plus
   // a 7-byte-per-entry universe table carrying destIp/wireUniverse) when at
   // least one UNIVERSE ARTNET line gave an explicit ip/wireUniverse -- byte-
   // identical to v1/v2 otherwise, same "only bump the version once the new
@@ -1126,7 +1126,7 @@ CompileResult compileShow(const std::string& showText,
   std::vector<uint8_t> bundle;
   uint8_t version = 1;
   if (anyExplicitArtnetRoute) {
-    version = 3;
+    version = 4;
   } else if (!controllerBlobs.empty()) {
     version = 2;
   }
@@ -1177,15 +1177,15 @@ CompileResult compileShow(const std::string& showText,
     writeU16(mdefCount);
   }
 
-  // Universe table: 1 byte/entry (transport only) for v1/v2, 7 bytes/entry
-  // (transport + destIp + wireUniverse) for v3 -- see show_bundle.h.
+  // Universe table: 1 byte/entry (transport only) for v1/v2/v3, 7 bytes/entry
+  // (transport + destIp + wireUniverse) for v4 -- see show_bundle.h.
   for (int i = 0; i < universeCount; i++) {
     UniverseTransportEntry entry;
     if (universes.find(i) != universes.end()) {
       entry = universes[i];
     }
     writeU8(static_cast<uint8_t>(entry.transport));
-    if (version == 3) {
+    if (version >= 4) {
       writeU32(entry.destIp);
       writeU16(entry.wireUniverse);
     }
