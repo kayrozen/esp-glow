@@ -47,18 +47,23 @@ ArtNetRouter::ArtNetRouter(uint32_t fallbackIp, uint16_t port)
   for (uint8_t i = 0; i < MAX_UNIVERSES; ++i) {
     dest_[i].ip = 0;
     dest_[i].wireUniverse = i;
+    seq_[i] = 1;
   }
 }
 
 void ArtNetRouter::setDest(uint8_t universeIndex, const ArtNetDest& d) {
   if (universeIndex >= MAX_UNIVERSES) return;
+  portENTER_CRITICAL(&destMux_);
   dest_[universeIndex] = d;
+  portEXIT_CRITICAL(&destMux_);
 }
 
-const ArtNetDest& ArtNetRouter::destFor(uint8_t universeIndex) const {
-  static const ArtNetDest kDefault{};
-  if (universeIndex >= MAX_UNIVERSES) return kDefault;
-  return dest_[universeIndex];
+ArtNetDest ArtNetRouter::destFor(uint8_t universeIndex) const {
+  if (universeIndex >= MAX_UNIVERSES) return ArtNetDest{};
+  portENTER_CRITICAL(&destMux_);
+  ArtNetDest d = dest_[universeIndex];
+  portEXIT_CRITICAL(&destMux_);
+  return d;
 }
 
 uint32_t ArtNetRouter::resolveIp(const ArtNetDest& d) const {
@@ -71,12 +76,16 @@ void ArtNetRouter::send(uint8_t universeIndex, const uint8_t* data, uint16_t len
                          IArtNetTransport& transport) {
   if (universeIndex >= MAX_UNIVERSES) return;
 
-  uint8_t pkt[ARTNET_DMX_PACKET_MAX];
-  uint16_t pktLen = buildArtDmxPacket(pkt, dest_[universeIndex].wireUniverse,
-                                      seq_[universeIndex], data, len);
-  seq_[universeIndex]++;  // wraps at 255; per-universe, never shared
+  portENTER_CRITICAL(&destMux_);
+  ArtNetDest dest = dest_[universeIndex];
+  portEXIT_CRITICAL(&destMux_);
 
-  transport.sendTo(resolveIp(dest_[universeIndex]), port_, pkt, pktLen);
+  uint8_t pkt[ARTNET_DMX_PACKET_MAX];
+  uint16_t pktLen = buildArtDmxPacket(pkt, dest.wireUniverse,
+                                      seq_[universeIndex], data, len);
+  if (++seq_[universeIndex] == 0) seq_[universeIndex] = 1;
+
+  transport.sendTo(resolveIp(dest), port_, pkt, pktLen);
 }
 
 void ArtNetRouter::frameEnd(IArtNetTransport& transport) {

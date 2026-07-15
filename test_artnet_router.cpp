@@ -85,18 +85,18 @@ static void test_sequence_numbers_advance_independently_per_universe() {
   // Interleave: u0, u1, u0, u1, u0 -- each universe's own sequence must
   // advance by exactly 1 per call to that universe, unaffected by calls to
   // the other.
-  router.send(0, data.data(), (uint16_t)data.size(), transport);  // u0 seq 0
-  router.send(1, data.data(), (uint16_t)data.size(), transport);  // u1 seq 0
   router.send(0, data.data(), (uint16_t)data.size(), transport);  // u0 seq 1
   router.send(1, data.data(), (uint16_t)data.size(), transport);  // u1 seq 1
   router.send(0, data.data(), (uint16_t)data.size(), transport);  // u0 seq 2
+  router.send(1, data.data(), (uint16_t)data.size(), transport);  // u1 seq 2
+  router.send(0, data.data(), (uint16_t)data.size(), transport);  // u0 seq 3
 
   CHECK(transport.calls.size() == 5);
-  CHECK(sequenceOf(transport.calls[0]) == 0);  // u0
-  CHECK(sequenceOf(transport.calls[1]) == 0);  // u1
-  CHECK(sequenceOf(transport.calls[2]) == 1);  // u0
-  CHECK(sequenceOf(transport.calls[3]) == 1);  // u1
-  CHECK(sequenceOf(transport.calls[4]) == 2);  // u0
+  CHECK(sequenceOf(transport.calls[0]) == 1);  // u0
+  CHECK(sequenceOf(transport.calls[1]) == 1);  // u1
+  CHECK(sequenceOf(transport.calls[2]) == 2);  // u0
+  CHECK(sequenceOf(transport.calls[3]) == 2);  // u1
+  CHECK(sequenceOf(transport.calls[4]) == 3);  // u0
 
   // Same IP, different wire universes: both destinations are the "same
   // node, second output" case -- both must actually go to that IP.
@@ -104,6 +104,16 @@ static void test_sequence_numbers_advance_independently_per_universe() {
   CHECK(transport.calls[1].ip == 0xC0A80150);
   CHECK(wireUniverseOf(transport.calls[0]) == 0);
   CHECK(wireUniverseOf(transport.calls[1]) == 1);
+
+  ArtNetRouter wrapRouter(/*fallbackIp=*/0xC0A80101);
+  MockTransport wrapTransport;
+  for (int i = 0; i < 256; ++i) {
+    wrapRouter.send(0, data.data(), (uint16_t)data.size(), wrapTransport);
+  }
+  CHECK(wrapTransport.calls.size() == 256);
+  CHECK(sequenceOf(wrapTransport.calls[0]) == 1);
+  CHECK(sequenceOf(wrapTransport.calls[254]) == 255);
+  CHECK(sequenceOf(wrapTransport.calls[255]) == 1);
 }
 
 static void test_frameEnd_emits_exactly_one_artsync_after_data() {

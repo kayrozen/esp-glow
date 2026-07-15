@@ -14,6 +14,16 @@
 #include <cstdint>
 #include <cstddef>
 
+#ifdef ESP_PLATFORM
+#include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h"
+#else
+typedef int portMUX_TYPE;
+#define portMUX_INITIALIZER_UNLOCKED 0
+#define portENTER_CRITICAL(mux) ((void)(mux))
+#define portEXIT_CRITICAL(mux) ((void)(mux))
+#endif
+
 constexpr uint16_t ARTNET_OP_DMX = 0x5000;
 constexpr uint16_t ARTNET_OP_SYNC = 0x5200;
 constexpr uint16_t ARTNET_PROTOCOL_VERSION = 14;
@@ -65,12 +75,12 @@ public:
   // fallback/broadcast behavior, never a crash. universeIndex >=
   // MAX_UNIVERSES is a no-op.
   void setDest(uint8_t universeIndex, const ArtNetDest& d);
-  const ArtNetDest& destFor(uint8_t universeIndex) const;
+  ArtNetDest destFor(uint8_t universeIndex) const;
 
   // Builds and sends one ArtDMX packet for universeIndex via `transport`,
   // stamping the routed wire universe (not universeIndex) and incrementing
-  // that universe's own sequence counter (wraps at 255). universeIndex >=
-  // MAX_UNIVERSES is a no-op.
+  // that universe's own sequence counter (cycles 1..255, never 0).
+  // universeIndex >= MAX_UNIVERSES is a no-op.
   void send(uint8_t universeIndex, const uint8_t* data, uint16_t len, IArtNetTransport& transport);
 
   // Broadcasts one ArtSync so every node latches simultaneously. Call
@@ -85,6 +95,7 @@ private:
 
   uint32_t fallbackIp_;
   uint16_t port_;
+  mutable portMUX_TYPE destMux_ = portMUX_INITIALIZER_UNLOCKED;
   ArtNetDest dest_[MAX_UNIVERSES];
-  uint8_t seq_[MAX_UNIVERSES] = {0};
+  uint8_t seq_[MAX_UNIVERSES];
 };

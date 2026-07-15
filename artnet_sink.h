@@ -39,10 +39,9 @@ public:
   // to {ip=0, wireUniverse=universeIndex} (fallback/broadcast, today's
   // implicit behavior) -- never a crash.
   //
-  // IMPORTANT (learned the hard way in the QEMU bring-up): destinations
-  // must be set before the first send() for that universe. main.cpp's boot
-  // order already guarantees this -- the bundle loads (and calls setDest)
-  // before the render task starts -- so don't reorder that.
+  // IMPORTANT: the discovery task may update destinations while the render
+  // task is sending frames; ArtNetRouter synchronizes those updates with a
+  // tiny critical section around its per-universe routing table.
   void setDest(uint8_t universeIndex, const ArtNetDest& d);
 
   void send(uint8_t universeIndex, const uint8_t* data, uint16_t len) override;
