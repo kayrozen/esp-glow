@@ -77,10 +77,20 @@ permissions:
   pages: write
   id-token: write
 
-# Allow one concurrent deployment.
+# Scope concurrency per ref so unrelated branches/PRs don't cancel each
+# other's build-wasm CI job. A single static group (the old
+# "provisioner-pages") plus cancel-in-progress meant any newly-started run
+# canceled every other in-progress run of this workflow -- so two open PRs
+# building at once would cancel each other's "Build WASM + run tests" check
+# (seen as "Canceling since a higher priority waiting request ... exists").
+# Per-ref grouping still collapses redundant runs on the SAME ref, but only
+# for non-main refs: on main we never cancel in-progress so a Pages deploy
+# already underway is allowed to finish (newer main runs queue instead).
+# Deploys are additionally serialized globally by the deploy-pages job's own
+# concurrency group below.
 concurrency:
-  group: "provisioner-pages"
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   build-wasm:
@@ -139,6 +149,13 @@ jobs:
     # never a pull_request event or a push to some other branch.
     if: github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
+    # Serialize actual Pages deployments globally (across push-to-main,
+    # workflow_run, and workflow_dispatch), independent of the per-ref
+    # workflow concurrency above. cancel-in-progress: false so an in-flight
+    # deployment is never aborted -- overlapping deploys queue behind it.
+    concurrency:
+      group: provisioner-pages-deploy
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
