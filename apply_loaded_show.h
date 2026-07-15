@@ -24,6 +24,14 @@ public:
   virtual ~ISinkFactory() = default;
   // universeIdx: 0..ls.universeCount-1. transport: from LoadedShow.transport[].
   virtual IUniverseSink* sinkFor(uint8_t universeIdx, UniverseTransport t) = 0;
+
+  // Wave 3: called once for every ArtNet-transport universe, right after
+  // sinkFor(), with that universe's destination as resolved by the bundle
+  // (ls.artnetDest[universeIdx] -- see show_bundle.h). Default no-op so
+  // factories that don't care (MockSinkFactory, a DMX-only rig) don't need
+  // to implement it; the device's DeviceSinkFactory overrides this to call
+  // ArtNetSink::setDest.
+  virtual void configureArtnetDest(uint8_t /*universeIdx*/, const ArtNetDest& /*dest*/) {}
 };
 
 struct ApplyResult {

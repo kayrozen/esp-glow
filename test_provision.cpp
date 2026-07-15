@@ -1147,6 +1147,163 @@ CONTROLLER samples/apc40.mdef
 }
 
 // ============================================================================
+// Wave 3: Art-Net Destination Routing Tests
+// ============================================================================
+
+TEST(show_artnet_explicit_dest_lands_in_bundle) {
+  std::string showText = R"(
+    SHOW 2
+    UNIVERSE 1 DMX
+    UNIVERSE 2 ARTNET 192.168.1.50 0
+  )";
+  auto readFile = [](const std::string&) { return std::string(); };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(result.ok);
+  CHECK(result.bundle[4] == 3);  // explicit route -> bundle version 3
+
+  LoadedShow loaded;
+  CHECK(loadShow(result.bundle.data(), result.bundle.size(), loaded));
+  CHECK(loaded.transport[1] == UniverseTransport::ArtNet);
+  CHECK(loaded.artnetDest[1].ip == ((192u << 24) | (168u << 16) | (1u << 8) | 50u));
+  CHECK(loaded.artnetDest[1].wireUniverse == 0);
+}
+
+TEST(show_artnet_same_ip_two_wire_universes_accepted) {
+  // The normal case: one multi-output node, two of its outputs patched.
+  std::string showText = R"(
+    SHOW 2
+    UNIVERSE 1 ARTNET 192.168.1.50 0
+    UNIVERSE 2 ARTNET 192.168.1.50 1
+  )";
+  auto readFile = [](const std::string&) { return std::string(); };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(result.ok);
+
+  LoadedShow loaded;
+  CHECK(loadShow(result.bundle.data(), result.bundle.size(), loaded));
+  CHECK(loaded.artnetDest[0].ip == loaded.artnetDest[1].ip);
+  CHECK(loaded.artnetDest[0].wireUniverse == 0);
+  CHECK(loaded.artnetDest[1].wireUniverse == 1);
+}
+
+TEST(show_artnet_same_ip_and_wire_universe_collision_error) {
+  std::string showText = R"(
+    SHOW 2
+    UNIVERSE 1 ARTNET 192.168.1.50 0
+    UNIVERSE 2 ARTNET 192.168.1.50 0
+  )";
+  auto readFile = [](const std::string&) { return std::string(); };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(!result.ok);
+  CHECK(!result.err.empty());
+}
+
+TEST(show_artnet_ip_omitted_is_fallback_marker) {
+  std::string showText = R"(
+    SHOW 2
+    UNIVERSE 1 ARTNET
+  )";
+  auto readFile = [](const std::string&) { return std::string(); };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(result.ok);
+  CHECK(result.bundle[4] == 1);  // no explicit args at all -> stays v1
+
+  LoadedShow loaded;
+  CHECK(loadShow(result.bundle.data(), result.bundle.size(), loaded));
+  CHECK(loaded.artnetDest[0].ip == 0);          // fallback/broadcast marker
+  CHECK(loaded.artnetDest[0].wireUniverse == 0); // defaults to internal index
+}
+
+TEST(show_artnet_missing_wire_universe_warns_and_defaults_to_index) {
+  std::string showText = R"(
+    SHOW 2
+    UNIVERSE 1 DMX
+    UNIVERSE 2 ARTNET 192.168.1.55
+  )";
+  auto readFile = [](const std::string&) { return std::string(); };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(result.ok);
+  CHECK(!result.warnings.empty());
+
+  LoadedShow loaded;
+  CHECK(loadShow(result.bundle.data(), result.bundle.size(), loaded));
+  CHECK(loaded.artnetDest[1].ip == ((192u << 24) | (168u << 16) | (1u << 8) | 55u));
+  CHECK(loaded.artnetDest[1].wireUniverse == 1);  // defaulted to internal index
+}
+
+TEST(show_artnet_malformed_ip_error) {
+  std::string showText = R"(
+    SHOW 2
+    UNIVERSE 1 ARTNET 192.168.1
+  )";
+  auto readFile = [](const std::string&) { return std::string(); };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(!result.ok);
+  CHECK(!result.err.empty());
+}
+
+TEST(show_artnet_wire_universe_out_of_range_error) {
+  std::string showText = R"(
+    SHOW 2
+    UNIVERSE 1 ARTNET 192.168.1.50 32768
+  )";
+  auto readFile = [](const std::string&) { return std::string(); };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(!result.ok);
+  CHECK(!result.err.empty());
+}
+
+TEST(show_artnet_bare_form_still_works_no_v3_bump) {
+  // Existing shows that specify no IPs must keep working, unchanged.
+  std::string showText = R"(
+    SHOW 2
+    UNIVERSE 1 DMX
+    UNIVERSE 2 ARTNET
+    UNIVERSE 3 ARTNET
+  )";
+  auto readFile = [](const std::string&) { return std::string(); };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(result.ok);
+  CHECK(result.bundle[4] == 1);
+  CHECK(result.warnings.empty());
+
+  LoadedShow loaded;
+  CHECK(loadShow(result.bundle.data(), result.bundle.size(), loaded));
+  CHECK(loaded.artnetDest[1].wireUniverse == 1);
+  CHECK(loaded.artnetDest[2].wireUniverse == 2);
+}
+
+TEST(loader_old_version_bundle_loads_with_todays_semantics) {
+  // A v1 bundle predates the per-universe Art-Net destination table
+  // entirely -- the loader must still fill in today's implicit defaults
+  // (fallback/broadcast, wire universe = internal index) rather than
+  // leaving artnetDest uninitialized or rejecting the bundle.
+  std::string showText = R"(
+    SHOW 2
+    UNIVERSE 1 DMX
+    UNIVERSE 2 ARTNET
+  )";
+  auto readFile = [](const std::string&) { return std::string(); };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(result.ok);
+  CHECK(result.bundle[4] == 1);  // confirm this really is a v1 bundle
+
+  LoadedShow loaded;
+  CHECK(loadShow(result.bundle.data(), result.bundle.size(), loaded));
+  CHECK(loaded.artnetDest[1].ip == 0);
+  CHECK(loaded.artnetDest[1].wireUniverse == 1);
+}
+
+// ============================================================================
 // Loader Strictness Tests
 // ============================================================================
 
@@ -1262,6 +1419,17 @@ int main() {
   RUN_TEST(show_three_fixture_overlap_all_reported);
   RUN_TEST(show_matrix_overlaps_fixture_error);
   RUN_TEST(show_demo_golden_bytes_unchanged_by_1_indexing_migration);
+
+  RUN_TEST(show_artnet_explicit_dest_lands_in_bundle);
+  RUN_TEST(show_artnet_same_ip_two_wire_universes_accepted);
+  RUN_TEST(show_artnet_same_ip_and_wire_universe_collision_error);
+  RUN_TEST(show_artnet_ip_omitted_is_fallback_marker);
+  RUN_TEST(show_artnet_missing_wire_universe_warns_and_defaults_to_index);
+  RUN_TEST(show_artnet_malformed_ip_error);
+  RUN_TEST(show_artnet_wire_universe_out_of_range_error);
+  RUN_TEST(show_artnet_bare_form_still_works_no_v3_bump);
+  RUN_TEST(loader_old_version_bundle_loads_with_todays_semantics);
+
   RUN_TEST(loader_bad_magic);
   RUN_TEST(loader_truncated_header);
   RUN_TEST(loader_truncated_fixture_table);

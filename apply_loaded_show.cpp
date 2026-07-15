@@ -38,6 +38,10 @@ ApplyResult applyLoadedShow(const LoadedShow& ls, Show& show, ISinkFactory& fact
     UniverseMode mode = isMatrixUniverse[u] ? UniverseMode::Raw : UniverseMode::Fixture;
     show.configureUniverse(u, mode, sink);
     r.universesConfigured++;
+
+    if (t == UniverseTransport::ArtNet) {
+      factory.configureArtnetDest(u, ls.artnetDest[u]);
+    }
   }
 
   // 3. Patch every fixture. patchHead vs patch is decided by the entry's

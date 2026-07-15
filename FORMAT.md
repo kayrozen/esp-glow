@@ -463,17 +463,17 @@ The format is little-endian throughout, like every other format in this document
 
 ## The `artnetFallbackIp` Field
 
-This field's name and scope are deliberate, and worth getting right now because a future feature (Wave 3) will collide with it otherwise.
+This field's name and scope were deliberate from the start, specifically so Wave 3 (per-universe Art-Net routing) would not collide with it.
 
-The obvious name -- `artnetIp`, "the bridge IP" -- would collide with Wave 3, which moves per-universe Art-Net routing into the `.show` itself (a `(IP, wire-universe)` table, so different universes can go to different Art-Net nodes). If this field meant "the" Art-Net destination, that meaning would have to be walked back or overloaded the moment Wave 3 landed.
+The obvious name -- `artnetIp`, "the bridge IP" -- would have collided with Wave 3, which moves per-universe Art-Net routing into the `.show` itself (a `(IP, wire-universe)` table, so different universes can go to different Art-Net nodes; see "Art-Net Wire Universe & Destination Routing" below). If this field meant "the" Art-Net destination, that meaning would have had to be walked back or overloaded the moment Wave 3 landed.
 
-So it's defined, from the start, as: **the destination used for Art-Net universes the loaded `.show` does not route explicitly.** `0` means broadcast (`255.255.255.255`). Precedence, stated once and for all:
+So it's defined as: **the destination used for Art-Net universes the loaded `.show` does not route explicitly.** `0` means broadcast (`255.255.255.255`). Precedence, stated once and for all:
 
 ```
 explicit route in the .show   >   CFG1 artnetFallbackIp   >   broadcast
 ```
 
-Today, with no per-universe routing table in `.show` yet, `artnetFallbackIp` is the *only* routing there is -- every Art-Net universe goes to it (or broadcasts, if 0). That's not a contradiction of the precedence rule above; it's just that the first tier of it (explicit `.show` routes) is empty until Wave 3 ships. When it does, this field's meaning does not change at all -- only its role narrows to "what happens for the universes nobody explicitly routed," which is exactly what it was already defined to mean.
+Now that Wave 3 has shipped, this is exactly the second tier of that precedence chain: a `.show` with no explicit Art-Net routes still behaves exactly as before (every Art-Net universe goes to `artnetFallbackIp`, or broadcasts if that's 0); a `.show` with explicit routes uses this field only for the universes it left unspecified.
 
 ## Validation Rules
 
@@ -503,5 +503,170 @@ The WiFi password sits in plaintext in the `devcfg` partition, exactly like ever
 ## Out of Scope
 
 - Flash/NVS encryption (see "Security" above).
-- Per-universe Art-Net routing (the `.show`'s own `(IP, wire-universe)` table) -- that's Wave 3. `artnetFallbackIp` only ever defines the fallback, by design (see above).
 - Fleet provisioning (serial numbers, device management).
+
+Per-universe Art-Net routing (the `.show`'s own `(IP, wire-universe)` table) is Wave 3, and it *has* shipped -- see "Art-Net Wire Universe & Destination Routing" below. `artnetFallbackIp` above only ever defines the fallback tier of that routing's precedence, by design.
+
+# Art-Net Wire Universe & Destination Routing
+
+## Overview
+
+A real rig usually has several Art-Net nodes, and a node usually has several DMX outputs (2/4/8 is common). Wave 1/2 conflated "internal universe index" with "Art-Net wire universe" and sent every Art-Net universe to one configured bridge IP (`artnetFallbackIp` above) -- fine for one node, impossible for two nodes that both want to use wire universe 0 (same number, different IP).
+
+Wave 3 fixes this in three parts, all in `ArtNetSink`/`ArtNetRouter` (`artnet_router.h`/`artnet_sink.h`) and the `.show` compiler (`provision.cpp`):
+
+1. **A destination is `(IP, wire universe)`, not just an IP.** Modeled as `ArtNetDest { uint32_t ip; uint16_t wireUniverse; }` (`show.h`) -- `ip == 0` is the "no explicit route" sentinel (falls back to `artnetFallbackIp`, or broadcast).
+2. **The `.show` carries an explicit per-universe routing table** (`UNIVERSE ... ARTNET <ip> <wireUniverse>`, below) -- this is rig topology, the same class of fact as a fixture's DMX address, not a device setting.
+3. **ArtSync (OpCode 0x5200)** is sent once per frame, after every Art-Net `send()`, so every node latches its outputs simultaneously instead of updating whenever its own packet happens to arrive -- without this, a pixel matrix spanning multiple universes shows visible tearing the instant it's split across more than one Art-Net destination.
+
+## The Wire Universe: One `uint16_t`, Decomposed Net:SubNet:Universe
+
+Art-Net's own addressing is a 15-bit "Port-Address": **Net** (7 bits) : **Sub-Net** (4 bits) : **Universe** (4 bits). This codebase models the whole 15-bit quantity as a single `uint16_t wireUniverse` in the range `0..32767` everywhere above the wire-packet layer (`ArtNetDest`, the SHW1 bundle, the `.show` grammar) -- the Net/Sub-Net/Universe split only happens at the one place a raw ArtDMX/ArtPollReply packet is actually built or parsed:
+
+```
+wireUniverse:            0brNNNNNNNSSSSUUUU   (r = reserved, always 0; 15 significant bits)
+Net      (bits 14..8):   (wireUniverse >> 8) & 0x7F
+SubUni byte (bits 7..0): wireUniverse & 0xFF     (= SubNet<<4 | Universe, but transmitted as one byte)
+```
+
+On the wire, an ArtDMX packet's `SubUni` field (byte 14) and `Net` field (byte 15) are exactly those two bytes (see `artnet_router.cpp`'s `buildArtDmxPacket`); an ArtPollReply's `NetSwitch`/`SubSwitch`/`SwOut[]` fields compose back into the same `wireUniverse` the same way (see "ArtPoll / ArtPollReply Discovery" below). Do not invent a different Net/SubNet split -- this is Art-Net's own documented Port-Address structure, not a project convention.
+
+`.show` `UNIVERSE` numbers stay 1-indexed and human-facing as ever (README_PROVISION.md); the internal 0-indexed universe number is *not* the wire universe once an explicit route is given -- it's only the *default* wire universe when none is given (today's pre-Wave-3 behavior, kept for compatibility).
+
+## `.show` Grammar: Explicit Per-Universe Routing
+
+```
+SHOW 2
+UNIVERSE 1 DMX
+UNIVERSE 2 ARTNET 192.168.1.50 0     # node A, wire universe 0
+UNIVERSE 3 ARTNET 192.168.1.50 1     # SAME node, second DMX output -- the normal case
+UNIVERSE 4 ARTNET 192.168.1.51 0     # node B, also wire universe 0 -- different IP, no conflict
+UNIVERSE 5 ARTNET                    # no IP -> the CFG1 fallback, or broadcast if that's 0
+```
+
+- **A multi-output node (2/4/8 DMX ports) is the normal case, not an exception**: same IP, different wire universes on different `UNIVERSE` lines.
+- **IP omitted** -> the destination is left as the `0` marker in the bundle; the device resolves it to `artnetFallbackIp`, or broadcast if that's also `0` (see the CFG1 section above for the precedence chain). Existing shows that specify no IPs keep working unchanged -- broadcast is genuinely fine for small rigs, and nothing pushes you off it.
+- **Wire universe omitted, but IP given** -> defaults to the universe's own internal (0-indexed) number, and the compiler emits a non-fatal warning (`CompileResult::warnings`) -- an explicit number is almost always what's meant, but this is not an error.
+- **Wire universe omitted AND IP omitted** (bare `ARTNET`) -> today's implicit behavior exactly, no warning: internal index as the wire universe, fallback/broadcast as the destination.
+
+### Compile-Time Validation
+
+- **Two `UNIVERSE ARTNET` lines resolving to the same `(ip, wireUniverse)`** (after defaulting) is a compile error, naming both universes -- two data streams fighting over one node output is never intentional.
+- **Same IP, different wire universes** is accepted -- that's the multi-output-node case.
+- **A malformed IP** (not exactly four dot-separated `0..255` octets) is a compile error naming the offending `UNIVERSE` line.
+- **A wire universe outside `0..32767`** is a compile error.
+
+## `SHW1` Bundle: Version 3
+
+The universe table (see README_PROVISION.md's `SHW1` bundle section) grows from 1 byte/entry to 7 bytes/entry when the bundle is version 3:
+
+```
+v1/v2 universe table entry (1 byte):
+  transport      u8    (0=Dmx, 1=ArtNet, 2=Sacn, 3=Unused)
+
+v3 universe table entry (7 bytes):
+  transport      u8    (as above)
+  destIp         u32   (packed host-byte-order IPv4; 0 = no explicit route)
+  wireUniverse   u16   (0..32767; already resolved by the compiler -- either
+                         what the .show said, or the internal index default)
+```
+
+Version 3 also always carries `mdefCount` (same header shape as v2 -- see README_PROVISION.md), whether or not a `CONTROLLER` was actually compiled in, mirroring the existing "only bump the version once the new feature is actually used" convention: **a `.show` with no explicit Art-Net routes compiles to byte-identical v1/v2 output, never v3**, even if it uses `ARTNET` transport at all (bare `UNIVERSE N ARTNET`, no IP/wire-universe args, never bumps the version).
+
+The loader (`loadShow`) accepts v1/v2/v3 uniformly: for every universe, it first fills in today's implicit default (`destIp=0`, `wireUniverse=`the universe's own index), then -- only for a v3 bundle -- overwrites those two fields from the wire bytes. An already-flashed board's saved show, or a `.show` compiled by an older provisioner, loads with exactly its pre-Wave-3 semantics; nothing about v1/v2 bytes changes.
+
+## `ArtNetSink` / `ArtNetRouter`
+
+Packet building, per-universe destination routing, and per-universe sequence numbering are split into a portable, host-tested module (`artnet_router.h`/`.cpp`) and a thin device-only socket wrapper (`artnet_sink.h`/`.cpp`):
+
+```cpp
+struct ArtNetDest { uint32_t ip; uint16_t wireUniverse; };   // ip == 0 -> fallback/broadcast
+
+class ArtNetSink : public IUniverseSink {
+public:
+  ArtNetSink(uint16_t port, uint32_t fallbackIp);
+  bool begin();
+  void setDest(uint8_t universeIndex, const ArtNetDest& d);  // from the bundle, later from discovery
+  void send(uint8_t universeIndex, const uint8_t* data, uint16_t len) override;
+  void frameEnd();                                            // one ArtSync per frame
+};
+```
+
+One unconnected UDP socket, one `sendto()` per packet -- never a socket per node; that scales to any number of destinations for free.
+
+**Sequence numbers are per destination universe**, not global: each of the (up to 8) internal universes gets its own sequence counter, incremented only when that universe sends. Sharing one global counter across universes/destinations would make a receiving node see gaps in its own sequence whenever *another* universe's packet was sent in between -- indistinguishable from a flaky network, and a nightmare to diagnose (this is called out explicitly because it is exactly the kind of bug that looks like "the WiFi is bad" for days).
+
+**Ordering**: `setDest()` must be called (from the loaded bundle, via `applyLoadedShow`'s `ISinkFactory::configureArtnetDest`) before the first `send()` for that universe. `main.cpp`'s boot order already guarantees this -- the bundle loads, and every universe's destination is set, before the render task starts (see `app_main`'s comments on why DMX/render come up before the network). A universe nobody ever calls `setDest` for still defaults to `{ip=0, wireUniverse=its own index}` -- never a crash, never silently dropped.
+
+## ArtSync
+
+Without ArtSync, a node outputs each universe as it arrives -- invisible for two independent matrices, but the moment a pixel matrix spans multiple Art-Net universes, half the panel updates a frame before the other half: visible horizontal tearing on any moving gradient. `ArtNetSink::frameEnd()` (called once per frame from the render loop, right after every Art-Net `send()` for that frame) broadcasts one ArtSync packet:
+
+```
+Offset  Size  Field
+0       8     ID = "Art-Net\0"
+8       2     OpCode = 0x5200, little-endian (bytes 0x00, 0x52)
+10      2     ProtVerHi, ProtVerLo (big-endian; 14 today)
+12      1     Aux1 (0, unused)
+13      1     Aux2 (0, unused)
+```
+
+Always broadcast (`255.255.255.255`), regardless of any individual universe's own (possibly unicast) destination -- it has to reach every node, not just the ones this controller happens to unicast to.
+
+## ArtPoll / ArtPollReply Discovery (Phase 3)
+
+A static IP in a `.show` breaks the moment a venue's DHCP hands the node a different address. Phase 3 fixes this by discovering nodes instead of typing their IPs: the device broadcasts an ArtPoll, nodes reply with ArtPollReply (name, IP, which universes they carry), and those replies fill in exactly the same `setDest()` table Phase 1 built -- discovery is not a parallel mechanism, it's what populates the routing table when the `.show` didn't.
+
+**Precedence holds**: an explicit `.show` route (`ArtNetDest.ip != 0`) is never overwritten by discovery -- a user who typed an address meant it. Discovery only fills in universes the `.show` left as the `ip=0` marker. A node that stops answering ArtPoll (unplugged, powered off, DHCP-relocated and re-polled under a new IP) has its universes revert to the fallback/broadcast marker after a timeout -- never left silently pointed at a now-wrong IP, and never left dark either.
+
+### Byte Layout
+
+Parsed against the fields actually needed (source IP, ShortName/LongName, NetSwitch/SubSwitch, NumPorts, SwOut\[\]) -- every other documented ArtPollReply field (PortTypes/GoodInput/GoodOutput/Status1/Status2/MAC/BindIp/Style/etc.) is skipped over, not guessed at, and every read is bounds-checked regardless of what the packet claims (see `artnet_discovery.cpp`'s `parseArtPollReply`).
+
+```
+ArtPollReply (OpCode 0x2100), fixed 239 bytes total:
+Offset  Size  Field
+0       8     ID = "Art-Net\0"
+8       2     OpCode = 0x2100, little-endian
+10      4     IP (raw bytes, dotted-quad order)
+18      1     NetSwitch (bits 0-6)
+19      1     SubSwitch (bits 0-3)
+26      18    ShortName (NUL-padded ASCII)
+44      64    LongName (NUL-padded ASCII)
+172-173 2     NumPorts (Hi, Lo byte -- this parser only reads the Lo byte;
+               every real node reports <= 4, so Hi is always 0 in practice)
+190-193 4     SwOut[4] (low nibble of each byte = that output port's
+               Universe field; combined with NetSwitch/SubSwitch this is the
+               same Net:SubNet:Universe composition ArtDMX sends)
+
+ArtPoll (OpCode 0x2000), 14 bytes total:
+Offset  Size  Field
+0       8     ID = "Art-Net\0"
+8       2     OpCode = 0x2000, little-endian
+10      2     ProtVerHi, ProtVerLo (big-endian; 14)
+12      1     TalkToMe (0 -- no unsolicited updates requested; this device polls periodically instead)
+13      1     Priority (0, unused -- no diagnostics requested)
+```
+
+Per output port `i` (`0..NumPorts-1`): `wireUniverse[i] = (NetSwitch & 0x7F) << 8 | (SubSwitch & 0x0F) << 4 | (SwOut[i] & 0x0F)`.
+
+**Provenance note**: these byte offsets are cross-checked against a mature, widely-deployed open-source Art-Net implementation (OpenLightingProject/ola, `plugins/artnet/ArtNetPackets.h`'s `artnet_reply_s`/`artnet_poll_s`), not reconstructed from memory alone -- this codebase has already lost real time once to a hallucinated API, and Art-Net is a published spec, not something to guess at. The committed test fixture (`test_artnet_discovery.cpp`'s `makeSampleArtPollReply`) is a byte-accurate *synthetic* packet built field-by-field against that same layout, not a literal hardware capture (no Art-Net node was available to sniff from in the environment this was built in) -- swap in a real capture from an actual node during HIL bring-up if maximum fidelity matters. If you're maintaining this, treat any discrepancy an actual node's reply exposes as a bug to fix here, not evidence the node is wrong.
+
+### Discovery Table
+
+`ArtNetDiscovery` (`artnet_discovery.h`) tracks which nodes are alive: `onReply()` adds/refreshes a node by IP; `expire()` drops any node not heard from within its timeout (default 10s); `resolveDiscoveredDests()` is the pure precedence logic above, taking the `.show`'s own per-universe table plus the current discovery table and producing what to hand `ArtNetSink::setDest()` for every universe the `.show` left unspecified. The device-only glue (`artnet_discovery_task.h`/`.cpp`) broadcasts ArtPoll every few seconds on its own socket, feeds replies into this table, and re-applies it after every cycle.
+
+### Web Console
+
+`GET /artnet_nodes` (see `artnet_nodes_web.h`) returns the currently-discovered nodes as JSON (`{"nodes":[{"ip":..., "shortName":..., "longName":..., "universes":[...]}]}`), read from a thread-safe snapshot published once per poll cycle. The device console's reconfigure page lists them -- this is the screen that turns "why is nothing lighting up" into "ah, the node isn't on the network."
+
+## Testing Reality
+
+QEMU cannot validate any of this end-to-end -- the S3 fork has no 802.11 model (see `skipWifi`/`tests/qemu/README.md`). Everything above the socket layer (packet building, routing/sequencing/ArtSync ordering, ArtPollReply parsing, the discovery table's precedence/timeout logic) is host-tested (`test_artnet_router.cpp`, `test_artnet_discovery.cpp`, plus the `.show`/`SHW1` coverage in `test_provision.cpp`). The actual wire behavior -- real packets landing on real UDP sockets, at the real frame rate -- is a HIL-only gate (`tests/hil/test_l2_artnet.py`).
+
+## Out of Scope
+
+- sACN / E1.31 (a plausible future sink -- same destination-table shape, different packet).
+- Art-Net input (receiving DMX from another controller) -- this project is a controller, never a node.
+- ArtNzs, RDM-over-Art-Net.
+- Being an Art-Net node ourselves (answering ArtPoll, not just sending it).

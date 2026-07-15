@@ -30,8 +30,15 @@ public:
     used_[universeIdx] = true;
     return &sinks_[universeIdx];
   }
+  void configureArtnetDest(uint8_t universeIdx, const ArtNetDest& dest) override {
+    if (universeIdx >= MAX_UNIVERSES) return;
+    dests_[universeIdx] = dest;
+    destConfigured_[universeIdx] = true;
+  }
   MockSink sinks_[MAX_UNIVERSES];
   bool     used_[MAX_UNIVERSES] = {false};
+  ArtNetDest dests_[MAX_UNIVERSES];
+  bool     destConfigured_[MAX_UNIVERSES] = {false};
 };
 
 static FixtureProfile makeDimmerProfile() {
@@ -222,6 +229,24 @@ static void test_fixture_in_unconfigured_universe_skipped() {
   CHECK(show.fixture(0) == nullptr);
 }
 
+static void test_artnet_dest_configured_only_for_artnet_universes() {
+  printf("Test: configureArtnetDest called only for ArtNet-transport universes, with the bundle's dest\n");
+  LoadedShow ls;
+  ls.universeCount = 2;
+  ls.transport[0] = UniverseTransport::Dmx;
+  ls.transport[1] = UniverseTransport::ArtNet;
+  ls.artnetDest[1] = ArtNetDest{0xC0A80132, 5};  // 192.168.1.50, wire universe 5
+
+  Show show;
+  MockSinkFactory fact;
+  applyLoadedShow(ls, show, fact);
+
+  CHECK(!fact.destConfigured_[0]);  // Dmx universe -- never called
+  CHECK(fact.destConfigured_[1]);
+  CHECK(fact.dests_[1].ip == 0xC0A80132);
+  CHECK(fact.dests_[1].wireUniverse == 5);
+}
+
 int main() {
   test_basic_patch_and_sink_routing();
   test_head_patch_carries_geometry();
@@ -229,6 +254,7 @@ int main() {
   test_matrix_spans_two_universes();
   test_unsupported_transport_skipped();
   test_fixture_in_unconfigured_universe_skipped();
+  test_artnet_dest_configured_only_for_artnet_universes();
   if (g_fail == 0) {
     printf("All apply_loaded_show tests passed!\n");
     return 0;

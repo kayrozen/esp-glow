@@ -3,6 +3,7 @@
 #include "show_bundle.h"
 #include <sstream>
 #include <map>
+#include <utility>
 #include <algorithm>
 #include <cstring>
 #include <cstdlib>
@@ -487,8 +488,39 @@ std::vector<uint8_t> encodeController(const ControllerBuilder& def, std::string&
 // .show Parsing and Compilation
 // ============================================================================
 
+// Parses "a.b.c.d" (each octet 0..255, no extra characters) into a packed
+// host-byte-order IPv4, same convention as CFG1's artnetFallbackIp and
+// device_config.h. Never throws (parseIntToken doesn't either) -- rejects
+// anything that isn't exactly four dot-separated octets.
+static bool parseIPv4Token(const std::string& s, uint32_t& out) {
+  uint8_t octets[4];
+  size_t start = 0;
+  for (int i = 0; i < 4; ++i) {
+    size_t dot = (i < 3) ? s.find('.', start) : s.size();
+    if (dot == std::string::npos) return false;
+    std::string part = s.substr(start, dot - start);
+    int v;
+    if (!parseIntToken(part, v)) return false;
+    if (v < 0 || v > 255) return false;
+    octets[i] = static_cast<uint8_t>(v);
+    start = dot + 1;
+  }
+  out = (static_cast<uint32_t>(octets[0]) << 24) | (static_cast<uint32_t>(octets[1]) << 16) |
+        (static_cast<uint32_t>(octets[2]) << 8) | static_cast<uint32_t>(octets[3]);
+  return true;
+}
+
 struct UniverseTransportEntry {
   UniverseTransport transport = UniverseTransport::Unused;
+  // Wave 3: explicit Art-Net routing (see FORMAT.md's "Art-Net Wire
+  // Universe & Destination Routing"). destIp==0 means "no explicit IP" --
+  // the fallback/broadcast marker carried straight into the SHW1 bundle.
+  // wireUniverse is always resolved by the time this is written to the
+  // bundle: either what the .show said, or (if omitted) the universe's own
+  // internal 0-indexed number, matching today's implicit behavior.
+  uint32_t destIp = 0;
+  uint16_t wireUniverse = 0;
+  bool hasExplicitRoute = false;  // true if the .show gave ip and/or wireUniverse
 };
 
 struct FixtureInstance {
@@ -579,6 +611,13 @@ CompileResult compileShow(const std::string& showText,
   std::map<std::string, int> controllerIndexMap;  // defFile -> mdef blob index
   std::vector<std::vector<uint8_t>> controllerBlobs;
 
+  // Wave 3: (destIp, wireUniverse) -> the internal universe index that
+  // already claimed it. Two ARTNET universes resolving to the same pair is
+  // never intentional (two streams fighting over one node output) -- same
+  // IP with different wire universes is fine (a multi-output node).
+  std::map<std::pair<uint32_t, uint16_t>, uint8_t> artnetDestOwner;
+  bool anyExplicitArtnetRoute = false;  // gates the v3 bundle-version bump
+
   uint8_t maxUniverse = 0;
   FixtureInstance* lastFixture = nullptr;
   bool sawHeader = false;
@@ -642,7 +681,55 @@ CompileResult compileShow(const std::string& showText,
         return result;
       }
 
-      universes[idx].transport = transport;
+      UniverseTransportEntry entry;
+      entry.transport = transport;
+
+      if (transport == UniverseTransport::ArtNet) {
+        // UNIVERSE <idx> ARTNET [<ip>] [<wireUniverse>] -- see FORMAT.md's
+        // "Art-Net Wire Universe & Destination Routing" section. Bare
+        // ARTNET (no args) keeps today's behavior exactly: fallback/
+        // broadcast destination, wire universe defaults to the internal
+        // index -- and does NOT bump the bundle to v3.
+        entry.wireUniverse = idx;
+        if (tokens.size() >= 4) {
+          entry.hasExplicitRoute = true;
+          if (!parseIPv4Token(tokens[3], entry.destIp)) {
+            result.err = "UNIVERSE " + std::to_string(idxInt) + ": invalid Art-Net IP: " + tokens[3];
+            return result;
+          }
+          if (tokens.size() >= 5) {
+            int wireInt;
+            if (!parseIntToken(tokens[4], wireInt) || wireInt < 0 || wireInt > 32767) {
+              result.err = "UNIVERSE " + std::to_string(idxInt) + ": wire universe must be 0..32767";
+              return result;
+            }
+            entry.wireUniverse = static_cast<uint16_t>(wireInt);
+          } else {
+            // An explicit IP with no wire universe is almost always a
+            // mistake (it silently falls back to the internal index) --
+            // non-fatal, but worth surfacing.
+            result.warnings.push_back(
+                "UNIVERSE " + std::to_string(idxInt) + " ARTNET " + tokens[3] +
+                ": no wire universe given; defaulting to " + std::to_string(idx) +
+                " (the internal index) -- write it explicitly if that isn't what you mean");
+          }
+        }
+
+        auto key = std::make_pair(entry.destIp, entry.wireUniverse);
+        auto collideIt = artnetDestOwner.find(key);
+        if (collideIt != artnetDestOwner.end() && collideIt->second != idx) {
+          result.err = "UNIVERSE " + std::to_string(idxInt) +
+                       ": routes to the same Art-Net destination (ip, wire universe) as "
+                       "UNIVERSE " + std::to_string(collideIt->second + 1) +
+                       " -- two universes cannot share one node output "
+                       "(same IP with a different wire universe is fine)";
+          return result;
+        }
+        artnetDestOwner[key] = idx;
+        if (entry.hasExplicitRoute) anyExplicitArtnetRoute = true;
+      }
+
+      universes[idx] = entry;
       if (idx > maxUniverse) {
         maxUniverse = idx;
       }
@@ -967,11 +1054,18 @@ CompileResult compileShow(const std::string& showText,
   uint8_t universeCount = maxUniverse + 1;
 
   // Write SHW1 bundle. Version 2 (mdefCount + a trailing controller table)
-  // only when at least one CONTROLLER was compiled -- byte-identical to the
-  // original v1 layout otherwise, same "only bump the version once the new
+  // when at least one CONTROLLER was compiled; version 3 (v2's header plus
+  // a 7-byte-per-entry universe table carrying destIp/wireUniverse) when at
+  // least one UNIVERSE ARTNET line gave an explicit ip/wireUniverse -- byte-
+  // identical to v1/v2 otherwise, same "only bump the version once the new
   // feature is actually used" convention as ProfileBuilder::encode's PFX2.
   std::vector<uint8_t> bundle;
-  uint8_t version = controllerBlobs.empty() ? 1 : 2;
+  uint8_t version = 1;
+  if (anyExplicitArtnetRoute) {
+    version = 3;
+  } else if (!controllerBlobs.empty()) {
+    version = 2;
+  }
 
   // Header
   bundle.push_back('S');
@@ -1005,20 +1099,32 @@ CompileResult compileShow(const std::string& showText,
     bundle.push_back((bits >> 24) & 0xFF);
   };
 
+  auto writeU32 = [&](uint32_t v) {
+    bundle.push_back(v & 0xFF);
+    bundle.push_back((v >> 8) & 0xFF);
+    bundle.push_back((v >> 16) & 0xFF);
+    bundle.push_back((v >> 24) & 0xFF);
+  };
+
   writeU16(profileCount);
   writeU16(fixtureCount);
   writeU16(matrixCount);
-  if (version == 2) {
+  if (version >= 2) {
     writeU16(mdefCount);
   }
 
-  // Universe table
+  // Universe table: 1 byte/entry (transport only) for v1/v2, 7 bytes/entry
+  // (transport + destIp + wireUniverse) for v3 -- see show_bundle.h.
   for (int i = 0; i < universeCount; i++) {
-    UniverseTransport transport = UniverseTransport::Unused;
+    UniverseTransportEntry entry;
     if (universes.find(i) != universes.end()) {
-      transport = universes[i].transport;
+      entry = universes[i];
     }
-    writeU8(static_cast<uint8_t>(transport));
+    writeU8(static_cast<uint8_t>(entry.transport));
+    if (version == 3) {
+      writeU32(entry.destIp);
+      writeU16(entry.wireUniverse);
+    }
   }
 
   // Profile table
@@ -1064,7 +1170,7 @@ CompileResult compileShow(const std::string& showText,
     writeU16(mi.startChannel);
   }
 
-  // Controller (mdef) table -- v2 only.
+  // Controller (mdef) table -- present (possibly empty) whenever version >= 2.
   for (const auto& blob : controllerBlobs) {
     writeU16(static_cast<uint16_t>(blob.size()));
     for (uint8_t b : blob) {
