@@ -233,9 +233,10 @@ void usb_midi_input_handle_packet(const uint8_t packet[4]) {
   // complete (zero-padded if shorter) MIDI message -- no running status,
   // no realtime-byte interleaving to resolve (that's midi_realtime.h's job
   // for the DIN byte stream; USB framing makes it moot here). parseMidi
-  // rejects anything that isn't Note On/Off/CC, so System/SysEx/Program-
-  // Change packets (byte 0's CIN nibble selects those) are silently
-  // ignored -- "strip to raw MIDI bytes, call parseMidi, push. Nothing
+  // handles all seven channel-voice types (including the 2-byte Program
+  // Change/Channel Pressure, whose unused 3rd byte here is just the
+  // zero-padding) and rejects System/SysEx (byte 0's CIN nibble selects
+  // those) -- "strip to raw MIDI bytes, call parseMidi, push. Nothing
   // else" (see usb_midi_input.h).
   ControlEvent ev;
   if (parseMidi(packet + 1, 3, ev)) g_queue->push(ev);

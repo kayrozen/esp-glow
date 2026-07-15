@@ -60,6 +60,15 @@ public:
 //   glow.bind.pad/fader/clear  — wraps LiveControl: MIDI/OSC/web control ids
 //                                 -> cue triggers. The *show* (live-editable,
 //                                 no file format); see README_LIVE_CONTROL.md.
+//   glow.bind.pad-xy           — like glow.bind.pad, but resolves a grid
+//                                 (col, row) coordinate to a (note, channel)
+//                                 via the wired .mdef's channel-significant
+//                                 PAD declarations (mdef.h's resolvePadXY) --
+//                                 e.g. the APC40's 8x5 clip-launch grid. A
+//                                 silent no-op if there's no LED capability
+//                                 (no .mdef) or the coordinate is out of
+//                                 range, same graceful-degradation contract
+//                                 as glow.led.*.
 //   glow.led.set/auto          — wraps LedFeedback (nullable): LED feedback
 //                                 for a controller with a .mdef. No-op, not
 //                                 an error, when null or the addressed pad/
@@ -159,6 +168,7 @@ private:
   static int l_tap(lua_State* L);
 
   static int l_bind_pad(lua_State* L);
+  static int l_bind_pad_xy(lua_State* L);
   static int l_bind_fader(lua_State* L);
   static int l_bind_clear(lua_State* L);
   static int l_led_set(lua_State* L);

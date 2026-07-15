@@ -308,6 +308,7 @@ bool parseWebCommand(const char* json, size_t len, ControlEvent& out) {
 
     out.type = ControlType::Button;
     out.id = (uint16_t)idVal;
+    out.channel = 0;  // the web console has no MIDI channel concept -- always channel-agnostic
     out.pressed = pressedVal;
     out.value = 0.0f;
     return true;
@@ -317,6 +318,7 @@ bool parseWebCommand(const char* json, size_t len, ControlEvent& out) {
     if (!hasValue) return false;
     out.type = ControlType::Fader;
     out.id = 0;  // single grandmaster fader; device binds it to controlId 0
+    out.channel = 0;
     out.pressed = false;
     // Clamp here so a hostile UI cannot drive master outside [0,1]. The
     // LiveControl layer also clamps, but defense in depth.

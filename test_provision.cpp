@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <set>
 #include <cmath>
 
 static int testsPassed = 0;
@@ -643,6 +644,126 @@ TEST(parse_mdef_unknown_encoder_mode_error) {
 }
 
 // ============================================================================
+// .mdef Per-Range Channel Significance (CH) Tests
+// ============================================================================
+
+TEST(parse_mdef_pad_ch_modifier) {
+  std::string text = R"(
+    CONTROLLER Grid
+    PAD 53 CH 0 7
+    PAD 0 39
+  )";
+  ControllerBuilder def;
+  std::string err;
+  CHECK(parseControllerDef(text, def, err));
+  CHECK(err.empty());
+
+  CHECK(def.pads.size() == 2);
+  CHECK(def.pads[0].noteFrom == 53 && def.pads[0].noteTo == 53);
+  CHECK(def.pads[0].channelFrom == 0 && def.pads[0].channelTo == 7);
+  CHECK(def.pads[1].noteFrom == 0 && def.pads[1].noteTo == 39);
+  CHECK(def.pads[1].channelFrom == kChannelAgnostic);  // no CH -- agnostic, unchanged
+}
+
+TEST(parse_mdef_fader_ch_modifier_with_name) {
+  std::string text = R"(
+    CONTROLLER Grid
+    FADER CC 7 track CH 0 8
+    FADER CC 14 master
+  )";
+  ControllerBuilder def;
+  std::string err;
+  CHECK(parseControllerDef(text, def, err));
+
+  CHECK(def.faders.size() == 2);
+  CHECK(def.faders[0].ccFrom == 7 && def.faders[0].ccTo == 7);
+  CHECK(def.faders[0].name == "track");
+  CHECK(def.faders[0].channelFrom == 0 && def.faders[0].channelTo == 8);
+  CHECK(def.faders[1].name == "master");
+  CHECK(def.faders[1].channelFrom == kChannelAgnostic);
+}
+
+TEST(parse_mdef_led_ch_modifier) {
+  std::string text = R"(
+    CONTROLLER Grid
+    LED NOTE 53 57 velocity CH 0 7
+      COLOR off 0
+      COLOR on 1
+  )";
+  ControllerBuilder def;
+  std::string err;
+  CHECK(parseControllerDef(text, def, err));
+
+  CHECK(def.leds.size() == 1);
+  CHECK(def.leds[0].channelFrom == 0 && def.leds[0].channelTo == 7);
+
+  std::string encErr;
+  std::vector<uint8_t> blob = encodeController(def, encErr);
+  CHECK(encErr.empty());
+  CHECK(blob[4] == 2);  // channel range present -> version 2
+  MidiControllerProfile p;
+  CHECK(parseMidiController(blob.data(), blob.size(), p));
+  CHECK(p.leds[0].channelFrom == 0 && p.leds[0].channelTo == 7);
+}
+
+TEST(parse_mdef_ch_channel_out_of_range_error) {
+  std::string text = R"(
+    CONTROLLER Grid
+    PAD 53 CH 0 16
+  )";
+  ControllerBuilder def;
+  std::string err;
+  CHECK(!parseControllerDef(text, def, err));
+  CHECK(!err.empty());
+}
+
+TEST(parse_mdef_ch_lo_greater_than_hi_error) {
+  std::string text = R"(
+    CONTROLLER Grid
+    PAD 53 CH 5 2
+  )";
+  ControllerBuilder def;
+  std::string err;
+  CHECK(!parseControllerDef(text, def, err));
+}
+
+TEST(parse_mdef_pad_extra_token_without_ch_error) {
+  std::string text = R"(
+    CONTROLLER Grid
+    PAD 53 60 garbage
+  )";
+  ControllerBuilder def;
+  std::string err;
+  CHECK(!parseControllerDef(text, def, err));
+}
+
+TEST(parse_mdef_no_ch_anywhere_every_committed_mdef_still_loads) {
+  // Byte-identical to how these files parsed before CH existed -- the
+  // regression test for "channel-agnostic, unchanged" (FORMAT.md/A1-style
+  // backward compatibility).
+  std::string text = R"(
+    CONTROLLER Akai APC40 mkII
+    MIDI_CHANNEL 1
+    PAD  53 60
+    PAD  0
+    FADER CC 48 55
+    FADER CC 7   master
+    ENCODER CC 16 23 relative-2c
+    LED NOTE 53 60 velocity
+      COLOR off    0
+      COLOR green  1
+      COLOR red    3
+    LED CC 48 55 value
+  )";
+  ControllerBuilder def;
+  std::string err;
+  CHECK(parseControllerDef(text, def, err));
+  std::string encErr;
+  std::vector<uint8_t> blob = encodeController(def, encErr);
+  CHECK(blob[4] == 1);  // no CH anywhere -> version 1
+}
+
+// ============================================================================
 // .show CONTROLLER / SHW1 v2 Tests
 // ============================================================================
 
@@ -1120,33 +1241,44 @@ TEST(show_matrix_overlaps_fixture_error) {
 // ============================================================================
 
 static const uint8_t kDemoShowGoldenBytes[] = {
-  83, 72, 87, 49, 2, 4, 2, 0, 4, 0, 1, 0, 1, 0, 0, 1, 1, 1, 39, 0, 80, 70, 88, 49, 1, 0, 4, 4, 10,
-  68, 105, 109, 109, 101, 114, 32, 82, 71, 66, 0, 0, 255, 0, 0, 1, 1, 255, 0, 0, 2, 2, 255, 0, 0,
-  3, 3, 255, 0, 0, 55, 0, 80, 70, 88, 49, 1, 0, 9, 7, 11, 77, 111, 118, 105, 110, 103, 32, 72,
-  101, 97, 100, 0, 0, 255, 0, 0, 10, 1, 2, 0, 0, 11, 3, 4, 0, 0, 1, 5, 255, 0, 0, 2, 6, 255, 0, 0,
-  3, 7, 255, 0, 0, 12, 8, 255, 8, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 68, 0, 0, 135, 67, 0, 0, 0, 63, 0, 0, 0, 63, 0, 0, 0, 0,
-  0, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7,
-  68, 0, 0, 135, 67, 0, 0, 0, 63, 0, 0, 0, 63, 0, 0, 1, 0, 0, 21, 0, 1, 0, 0, 0, 64, 0, 0, 128,
-  63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 68, 0, 0, 135, 67, 0, 0, 0, 63, 0,
-  0, 0, 63, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 7, 68, 0, 0, 135, 67, 0, 0, 0, 63, 0, 0, 0, 63, 0, 0, 16, 0, 8, 0, 1, 0, 0, 2, 0,
-  0, 108, 1, 77, 68, 70, 49, 1, 0, 0, 15, 6, 5, 2, 4, 28, 65, 107, 97, 105, 32, 65, 80, 67, 52,
-  48, 32, 109, 107, 73, 73, 0, 39, 48, 52, 58, 66, 80, 81, 82, 86, 87, 103, 7, 7, 0, 0, 14, 14, 6,
-  0, 15, 15, 13, 0, 16, 23, 255, 255, 48, 55, 255, 255, 13, 13, 1, 47, 47, 1, 0, 0, 39, 0, 0, 0,
-  17, 0, 82, 86, 0, 17, 0, 5, 0, 52, 52, 0, 22, 0, 3, 0, 66, 66, 0, 25, 0, 3, 24, 0, 0, 28, 0, 1,
-  37, 0, 2, 42, 0, 3, 48, 0, 5, 52, 0, 9, 59, 0, 13, 66, 0, 17, 71, 0, 21, 77, 0, 29, 84, 0, 33,
-  89, 0, 37, 98, 0, 41, 103, 0, 45, 110, 0, 49, 117, 0, 53, 125, 0, 57, 130, 0, 0, 134, 0, 3, 140,
-  0, 5, 144, 0, 21, 150, 0, 41, 155, 0, 0, 159, 0, 1, 162, 0, 2, 168, 0, 0, 172, 0, 1, 179, 0, 2,
-  116, 114, 97, 99, 107, 0, 109, 97, 115, 116, 101, 114, 0, 99, 114, 111, 115, 115, 102, 97, 100,
-  101, 114, 0, 111, 102, 102, 0, 103, 114, 101, 121, 45, 100, 105, 109, 0, 103, 114, 101, 121, 0,
-  119, 104, 105, 116, 101, 0, 114, 101, 100, 0, 111, 114, 97, 110, 103, 101, 0, 121, 101, 108,
-  108, 111, 119, 0, 108, 105, 109, 101, 0, 103, 114, 101, 101, 110, 0, 115, 112, 114, 105, 110,
-  103, 0, 97, 113, 117, 97, 0, 115, 107, 121, 45, 98, 108, 117, 101, 0, 98, 108, 117, 101, 0, 105,
-  110, 100, 105, 103, 111, 0, 118, 105, 111, 108, 101, 116, 0, 109, 97, 103, 101, 110, 116, 97, 0,
-  112, 105, 110, 107, 0, 111, 102, 102, 0, 119, 104, 105, 116, 101, 0, 114, 101, 100, 0, 103, 114,
-  101, 101, 110, 0, 98, 108, 117, 101, 0, 111, 102, 102, 0, 111, 110, 0, 98, 108, 105, 110, 107,
-  0, 111, 102, 102, 0, 121, 101, 108, 108, 111, 119, 0, 111, 114, 97, 110, 103, 101, 0,
+  83, 72, 87, 49, 2, 4, 2, 0, 4, 0, 1, 0, 1, 0, 0, 1, 1, 1, 39, 0,
+  80, 70, 88, 49, 1, 0, 4, 4, 10, 68, 105, 109, 109, 101, 114, 32, 82, 71, 66, 0,
+  0, 255, 0, 0, 1, 1, 255, 0, 0, 2, 2, 255, 0, 0, 3, 3, 255, 0, 0, 55,
+  0, 80, 70, 88, 49, 1, 0, 9, 7, 11, 77, 111, 118, 105, 110, 103, 32, 72, 101, 97,
+  100, 0, 0, 255, 0, 0, 10, 1, 2, 0, 0, 11, 3, 4, 0, 0, 1, 5, 255, 0,
+  0, 2, 6, 255, 0, 0, 3, 7, 255, 0, 0, 12, 8, 255, 8, 0, 0, 0, 0, 1,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 7, 68, 0, 0, 135, 67, 0, 0, 0, 63, 0, 0,
+  0, 63, 0, 0, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 68, 0, 0,
+  135, 67, 0, 0, 0, 63, 0, 0, 0, 63, 0, 0, 1, 0, 0, 21, 0, 1, 0, 0,
+  0, 64, 0, 0, 128, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 7, 68, 0, 0, 135, 67, 0, 0, 0, 63, 0, 0, 0, 63, 0, 0,
+  0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 68, 0, 0, 135, 67, 0, 0,
+  0, 63, 0, 0, 0, 63, 0, 0, 16, 0, 8, 0, 1, 0, 0, 2, 0, 0, 170, 1,
+  77, 68, 70, 49, 2, 0, 0, 15, 14, 5, 2, 4, 28, 65, 107, 97, 105, 32, 65, 80,
+  67, 52, 48, 32, 109, 107, 73, 73, 53, 53, 0, 7, 54, 54, 0, 7, 55, 55, 0, 7,
+  56, 56, 0, 7, 57, 57, 0, 7, 48, 48, 0, 7, 49, 49, 0, 7, 50, 50, 0, 7,
+  51, 51, 0, 7, 52, 52, 0, 7, 58, 66, 255, 255, 80, 81, 255, 255, 82, 86, 255, 255,
+  87, 103, 255, 255, 7, 7, 0, 0, 0, 8, 14, 14, 6, 0, 255, 255, 15, 15, 13, 0,
+  255, 255, 16, 23, 255, 255, 255, 255, 48, 55, 255, 255, 255, 255, 13, 13, 1, 47, 47, 1,
+  0, 53, 57, 0, 0, 0, 17, 0, 7, 0, 82, 86, 0, 17, 0, 5, 255, 255, 0, 52,
+  52, 0, 22, 0, 3, 0, 7, 0, 66, 66, 0, 25, 0, 3, 255, 255, 24, 0, 0, 28,
+  0, 1, 37, 0, 2, 42, 0, 3, 48, 0, 5, 52, 0, 9, 59, 0, 13, 66, 0, 17,
+  71, 0, 21, 77, 0, 29, 84, 0, 33, 89, 0, 37, 98, 0, 41, 103, 0, 45, 110, 0,
+  49, 117, 0, 53, 125, 0, 57, 130, 0, 0, 134, 0, 3, 140, 0, 5, 144, 0, 21, 150,
+  0, 41, 155, 0, 0, 159, 0, 1, 162, 0, 2, 168, 0, 0, 172, 0, 1, 179, 0, 2,
+  116, 114, 97, 99, 107, 0, 109, 97, 115, 116, 101, 114, 0, 99, 114, 111, 115, 115, 102, 97,
+  100, 101, 114, 0, 111, 102, 102, 0, 103, 114, 101, 121, 45, 100, 105, 109, 0, 103, 114, 101,
+  121, 0, 119, 104, 105, 116, 101, 0, 114, 101, 100, 0, 111, 114, 97, 110, 103, 101, 0, 121,
+  101, 108, 108, 111, 119, 0, 108, 105, 109, 101, 0, 103, 114, 101, 101, 110, 0, 115, 112, 114,
+  105, 110, 103, 0, 97, 113, 117, 97, 0, 115, 107, 121, 45, 98, 108, 117, 101, 0, 98, 108,
+  117, 101, 0, 105, 110, 100, 105, 103, 111, 0, 118, 105, 111, 108, 101, 116, 0, 109, 97, 103,
+  101, 110, 116, 97, 0, 112, 105, 110, 107, 0, 111, 102, 102, 0, 119, 104, 105, 116, 101, 0,
+  114, 101, 100, 0, 103, 114, 101, 101, 110, 0, 98, 108, 117, 101, 0, 111, 102, 102, 0, 111,
+  110, 0, 98, 108, 105, 110, 107, 0, 111, 102, 102, 0, 121, 101, 108, 108, 111, 119, 0, 111,
+  114, 97, 110, 103, 101, 0,
 };
 
 // Mirrors samples/demo.show and the .fdef/.mdef files it references
@@ -1184,23 +1316,31 @@ CAP ShutterStrobe 8 - 8
   fileMap["samples/apc40.mdef"] = R"(CONTROLLER Akai APC40 mkII
 MIDI_CHANNEL 0
 
-PAD 0 39
-PAD 48 52
+PAD 53 CH 0 7   # CLIP LAUNCH row 1 (scene 1), tracks 1-8 via channel
+PAD 54 CH 0 7   # CLIP LAUNCH row 2 (scene 2)
+PAD 55 CH 0 7   # CLIP LAUNCH row 3 (scene 3)
+PAD 56 CH 0 7   # CLIP LAUNCH row 4 (scene 4)
+PAD 57 CH 0 7   # CLIP LAUNCH row 5 (scene 5)
+PAD 48 CH 0 7   # RECORD ARM
+PAD 49 CH 0 7   # SOLO
+PAD 50 CH 0 7   # ACTIVATOR
+PAD 51 CH 0 7   # TRACK SELECT
+PAD 52 CH 0 7   # CLIP STOP
 PAD 58 66
 PAD 80 81
 PAD 82 86
 PAD 87 103
 
-FADER CC 7   track      # 9 track faders (0x07, track = MIDI channel)
-FADER CC 14  master     # master fader (0x0E)
-FADER CC 15  crossfader # crossfader (0x0F)
-FADER CC 16 23          # 8 DEVICE CONTROL knobs (0x10..0x17), absolute
-FADER CC 48 55          # 8 TRACK CONTROL knobs (0x30..0x37), absolute
+FADER CC 7   track CH 0 8   # 9 track faders (0x07): channel 0-7 = tracks 1-8, channel 8 = master
+FADER CC 14  master         # master fader (0x0E)
+FADER CC 15  crossfader     # crossfader (0x0F)
+FADER CC 16 23                # 8 DEVICE CONTROL knobs (0x10..0x17), absolute
+FADER CC 48 55                # 8 TRACK CONTROL knobs (0x30..0x37), absolute
 
 ENCODER CC 13 relative-2c   # tempo knob
 ENCODER CC 47 relative-2c   # cue level
 
-LED NOTE 0 39 velocity
+LED NOTE 53 57 velocity CH 0 7
   COLOR off       0
   COLOR grey-dim  1
   COLOR grey      2
@@ -1224,7 +1364,7 @@ LED NOTE 82 86 velocity
   COLOR red   5
   COLOR green 21
   COLOR blue  41
-LED NOTE 52 52 velocity
+LED NOTE 52 52 velocity CH 0 7
   COLOR off   0
   COLOR on    1
   COLOR blink 2
@@ -1267,6 +1407,53 @@ CONTROLLER samples/apc40.mdef
   size_t goldenLen = sizeof(kDemoShowGoldenBytes) / sizeof(kDemoShowGoldenBytes[0]);
   CHECK(result.bundle.size() == goldenLen);
   CHECK(std::memcmp(result.bundle.data(), kDemoShowGoldenBytes, goldenLen) == 0);
+}
+
+// Round-trip: the real APC40 mkII .mdef grammar -> SHW1 bundle -> parsed
+// MidiControllerProfile -> 40 distinct clip-launch grid pads (5 rows x 8
+// tracks via channel), the DoD's own "all 40 grid pads independently
+// bindable" claim, exercised through the actual compiler/loader pipeline
+// rather than a synthetic ControllerBuilder.
+TEST(show_apc40_roundtrip_40_distinct_grid_pads) {
+  std::map<std::string, std::string> fileMap;
+  fileMap["apc.mdef"] = R"(
+    CONTROLLER Akai APC40 mkII
+    PAD 53 CH 0 7
+    PAD 54 CH 0 7
+    PAD 55 CH 0 7
+    PAD 56 CH 0 7
+    PAD 57 CH 0 7
+  )";
+  std::string showText = R"(
+    SHOW 2
+    UNIVERSE 1 DMX
+    CONTROLLER apc.mdef
+  )";
+  auto readFile = [&](const std::string& name) {
+    auto it = fileMap.find(name);
+    return it != fileMap.end() ? it->second : std::string();
+  };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(result.ok);
+
+  LoadedShow loaded;
+  CHECK(loadShow(result.bundle.data(), result.bundle.size(), loaded));
+  CHECK(loaded.controllers.size() == 1);
+  const MidiControllerProfile& ctrl = loaded.controllers[0];
+
+  std::set<int> distinctPads;
+  for (int row = 0; row < 5; ++row) {
+    for (int col = 0; col < 8; ++col) {
+      uint8_t note, channel;
+      CHECK(resolvePadXY(ctrl, col, row, note, channel));
+      distinctPads.insert((channel << 8) | note);
+    }
+  }
+  CHECK(distinctPads.size() == 40);
+
+  uint8_t note, channel;
+  CHECK(!resolvePadXY(ctrl, 0, 5, note, channel));  // no 6th row
 }
 
 // ============================================================================
@@ -1370,6 +1557,13 @@ int main() {
   RUN_TEST(parse_mdef_color_before_led_error);
   RUN_TEST(parse_mdef_missing_name_error);
   RUN_TEST(parse_mdef_unknown_encoder_mode_error);
+  RUN_TEST(parse_mdef_pad_ch_modifier);
+  RUN_TEST(parse_mdef_fader_ch_modifier_with_name);
+  RUN_TEST(parse_mdef_led_ch_modifier);
+  RUN_TEST(parse_mdef_ch_channel_out_of_range_error);
+  RUN_TEST(parse_mdef_ch_lo_greater_than_hi_error);
+  RUN_TEST(parse_mdef_pad_extra_token_without_ch_error);
+  RUN_TEST(parse_mdef_no_ch_anywhere_every_committed_mdef_still_loads);
   RUN_TEST(show_compile_and_load_roundtrip_with_controller);
   RUN_TEST(show_compile_no_controller_stays_v1);
   RUN_TEST(show_controller_missing_deffile_error);
@@ -1391,6 +1585,7 @@ int main() {
   RUN_TEST(show_three_fixture_overlap_all_reported);
   RUN_TEST(show_matrix_overlaps_fixture_error);
   RUN_TEST(show_demo_golden_bytes_unchanged_by_1_indexing_migration);
+  RUN_TEST(show_apc40_roundtrip_40_distinct_grid_pads);
   RUN_TEST(loader_bad_magic);
   RUN_TEST(loader_truncated_header);
   RUN_TEST(loader_truncated_fixture_table);

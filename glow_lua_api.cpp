@@ -673,6 +673,46 @@ int GlowLuaApi::l_bind_pad(lua_State* L) {
   return 0;
 }
 
+int GlowLuaApi::l_bind_pad_xy(lua_State* L) {
+  GlowLuaApi& api = self(L);
+  lua_Integer col = luaL_checkinteger(L, 1);
+  lua_Integer row = luaL_checkinteger(L, 2);
+  const char* mode = luaL_checkstring(L, 3);
+  const char* cueName = luaL_checkstring(L, 4);
+
+  // No .mdef wired (no LED capability) -- silent no-op, same
+  // graceful-degradation contract as glow.led.set/auto on a missing
+  // capability. A controller lacking that specific grid coordinate is
+  // ALSO a no-op (resolvePadXY returns false), not an error -- pad-xy must
+  // degrade gracefully on a smaller (or grid-less) controller.
+  if (api.ledFeedback_ == nullptr) return 0;
+
+  uint8_t note, channel;
+  if (!resolvePadXY(api.ledFeedback_->profile(), static_cast<int>(col), static_cast<int>(row), note, channel)) {
+    return 0;
+  }
+
+  ActionKind action;
+  if (std::strcmp(mode, "flash") == 0) {
+    action = ActionKind::CueFlash;
+  } else if (std::strcmp(mode, "toggle") == 0) {
+    action = ActionKind::CueToggle;
+  } else {
+    return luaL_error(L, "glow.bind.pad-xy: mode must be :flash or :toggle, got '%s'", mode);
+  }
+
+  uint16_t cueId;
+  if (!api.cueIdForName(cueName, cueId)) {
+    return luaL_error(L, "glow.bind.pad-xy: unknown cue '%s'", cueName);
+  }
+
+  // Packed id, exactly what LiveControl::effectiveId computes for an
+  // incoming event on a channel-significant pad (live_control.h/.cpp).
+  uint16_t packedId = static_cast<uint16_t>((static_cast<uint16_t>(channel) << 8) | note);
+  api.liveControl_.bindButton(packedId, action, cueId);
+  return 0;
+}
+
 int GlowLuaApi::l_bind_fader(lua_State* L) {
   GlowLuaApi& api = self(L);
   lua_Integer cc = luaL_checkinteger(L, 1);
@@ -682,10 +722,8 @@ int GlowLuaApi::l_bind_fader(lua_State* L) {
     return luaL_error(L, "glow.bind.fader: only :master is supported, got '%s'", target);
   }
 
-  // Fader control ids carry the same +128 offset parseMidi assigns
-  // (live_control.cpp) so this one binding table entry matches a CC
-  // whether it arrived over MIDI, OSC, or the web console.
-  api.liveControl_.bindFader(static_cast<uint16_t>(128 + cc), ActionKind::Master);
+  const MidiControllerProfile* profile = api.ledFeedback_ != nullptr ? &api.ledFeedback_->profile() : nullptr;
+  api.liveControl_.bindFader(resolveFaderBindingId(profile, static_cast<uint8_t>(cc)), ActionKind::Master);
   return 0;
 }
 
@@ -881,6 +919,7 @@ void GlowLuaApi::install() {
 
   lua_newtable(L);  // glow.bind
   registerFn(L, -1, "pad", &GlowLuaApi::l_bind_pad, this);
+  registerFn(L, -1, "pad-xy", &GlowLuaApi::l_bind_pad_xy, this);
   registerFn(L, -1, "fader", &GlowLuaApi::l_bind_fader, this);
   registerFn(L, -1, "clear", &GlowLuaApi::l_bind_clear, this);
   lua_setfield(L, glowIdx, "bind");

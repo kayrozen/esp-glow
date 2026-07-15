@@ -57,17 +57,24 @@ std::vector<uint8_t> encodeProfile(const FixtureDef& def);
 // belong in Fennel (glow.bind.*/glow.led.*, glow_lua_api.h), live-editable
 // per show, not baked into a shareable controller-library file.
 // CONTROLLER <name...>                    # rest of line is the name
-// MIDI_CHANNEL <0-16>                     # optional, default 0 (any; parseMidi already ignores channel)
-// PAD  <note> [<note2>]                   # a contiguous block of pads (a single pad if note2 omitted)
-// FADER CC <from> [<to>] [<name...>]      # faders on CC <from>..<to>, optionally named
+// MIDI_CHANNEL <0-16>                     # optional, default 0 (any; the whole-controller LED-output channel default -- see led_feedback.cpp)
+// PAD  <note> [<note2>] [CH <lo> <hi>]     # a contiguous block of pads (a single pad if note2 omitted)
+// FADER CC <from> [<to>] [<name...>] [CH <lo> <hi>]  # faders on CC <from>..<to>, optionally named
 // ENCODER CC <from> [<to>] [absolute|relative-2c|relative-signmag]  # default: absolute
-// LED NOTE|CC <from> <to> velocity|value  # how a block of pads/faders lights up
+// LED NOTE|CC <from> <to> velocity|value [CH <lo> <hi>]  # how a block of pads/faders lights up
 //   COLOR <name> <value>                  # indented under the preceding LED line
 //
 // PAD/FADER/ENCODER declare what exists; LED+COLOR (attaches to the most
 // recent LED line, like SLOT/RANGE attach to the preceding CAP in .fdef)
 // declare how it lights up. A controller with no LED lines still works --
 // glow.led.* is a no-op without them.
+//
+// CH <lo> <hi> (0..15, 0-indexed -- NOT MIDI_CHANNEL's 1-indexed "any"
+// scheme) marks a PAD/FADER/LED range as channel-significant: the same
+// note/CC number is multiplexed across channels <lo>..<hi> to address
+// several distinct physical controls (see FORMAT.md's "Per-range channel
+// significance" and samples/apc40.mdef). Omitting CH (every existing .mdef)
+// keeps that range channel-agnostic, unchanged from before CH existed.
 
 // Parse a .mdef text and populate `out`. Returns false on any parse error.
 // On failure, sets `err` to a non-empty error message.

@@ -7,6 +7,14 @@ describes MIDI *hardware* (pads/faders/encoders/LEDs) so that `glow.led.*`
 (below) has something to address. `.mdef` never contains bindings -- those
 stay here, in Fennel, live-editable per show (`glow.bind.*`).
 
+`parseMidi` reports every message's MIDI channel (see "MIDI Parsing" below),
+and `.mdef`'s per-range channel significance (FORMAT.md) plus
+`glow.bind.pad-xy` let a channel-multiplexed controller like the Akai APC40
+work correctly: all 40 clip-launch grid pads (`samples/apc40.mdef`,
+`samples/apc40-original.mdef`) are independently bindable and independently
+lit, even though they share only 5 MIDI note numbers -- the track is carried
+on the channel nibble, not the note.
+
 ## Architecture
 
 The layer splits into two parts:
@@ -28,17 +36,23 @@ Each transport is a stub with `TODO` comments marking where hardware I/O actuall
 ## Control Types and Events
 
 ```cpp
-enum class ControlType : uint8_t { Button, Fader };
+enum class ControlType : uint8_t { Button, Fader, Aftertouch, PitchBend, Program };
 
 struct ControlEvent {
   ControlType type;
-  uint16_t id;      // opaque logical id (0..65535)
-  bool pressed;     // Button: true = down/on, false = up/off
-  float value;      // Fader: [0,1]
+  uint16_t id;       // opaque logical id (0..65535) -- note/CC(+128)/program, see parseMidi
+  uint8_t channel;   // 0..15, low nibble of the MIDI status byte. ALWAYS set by
+                     // parseMidi; OSC/web sources always report 0 (no MIDI channel
+                     // concept). Only consulted for binding/LED lookups on a
+                     // controller whose .mdef marks the address channel-significant
+                     // (FORMAT.md's "Per-Range Channel Significance") -- see
+                     // LiveControl::effectiveId below.
+  bool pressed;      // Button: true = down/on, false = up/off
+  float value;       // Fader/Aftertouch/PitchBend: [0,1]
 };
 ```
 
-Events are type-checked during dispatch: a Button event sent to a Fader binding (or vice versa) is silently ignored.
+Events are type-checked during dispatch: a Button event sent to a Fader binding (or vice versa) is silently ignored. `Aftertouch`/`PitchBend`/`Program` events are parsed and queued like any other `ControlEvent`, but `LiveControl` has no built-in `ActionKind` binding for them yet -- they're reported for a future binding to consume (e.g. via `glow.bind.*`), not silently dropped at the parser.
 
 ## Action Types
 
@@ -112,6 +126,10 @@ Bindings are stored in a vector that grows at setup time only. No heap allocatio
 ```fennel
 (glow.bind.pad 53 :flash :chorus)      ; note 53 -> momentary cue (CueFlash)
 (glow.bind.pad 54 :toggle :verse)      ; note 54 -> latching cue (CueToggle)
+(glow.bind.pad-xy 0 0 :flash :chorus)  ; grid (col,row) -> (note,channel) via the
+                                        ; wired .mdef's channel-significant PAD
+                                        ; declarations (FORMAT.md's resolvePadXY) --
+                                        ; the APC40's clip-launch grid, e.g.
 (glow.bind.fader 48 :master)           ; CC 48 -> grandmaster level
 (glow.bind.clear)                       ; wipe every binding (and every
                                          ; glow.led.auto tracker -- see below)
@@ -120,6 +138,16 @@ Bindings are stored in a vector that grows at setup time only. No heap allocatio
 `glow.bind.pad`'s cue name must already be defined (`glow.cue.define`); an
 unknown name is a Lua error, same as `glow.cue.go`. `glow.bind.fader` only
 supports `:master` today (the only fader `ActionKind` `LiveControl` has).
+
+`glow.bind.pad-xy` is a no-op (not an error) when there's no `.mdef`/LED
+capability wired at all, or the `(col, row)` coordinate is out of range for
+the loaded controller's declared grid -- same graceful-degradation contract
+as `glow.led.*` below. It resolves through the same channel-significant PAD
+ranges `LiveControl::effectiveId` uses to match incoming events, so a
+`glow.bind.pad-xy`-bound cue and the physical pad it names always agree on
+which packed `(channel << 8) | note` id to use -- this is what makes two
+pads sharing a note (different tracks on the APC40's clip grid) independently
+bindable instead of collapsing onto the same cue.
 
 ### LED feedback: `glow.led.*` (needs a `.mdef`)
 
@@ -155,17 +183,38 @@ controller shouldn't take down the whole show.
 bool parseMidi(const uint8_t* msg, size_t len, ControlEvent& out);
 ```
 
-Converts 3-byte MIDI channel messages to `ControlEvent`:
+Converts one complete, already-framed MIDI channel-voice message (status
+byte `0xSn`, `n` = channel 0..15) to a `ControlEvent`. All seven
+channel-voice message types are handled, each validated against its OWN
+wire length (2 bytes for Program Change/Channel Pressure, 3 for everything
+else) -- not a blanket "len < 3":
 
 | Status | Bytes | → ControlEvent | Notes |
 |--------|-------|---|---|
-| Note On `0x9n` | data1=note, data2=velocity | Button id=note, pressed=(velocity>0) | velocity 0 → released |
-| Note Off `0x8n` | data1=note, data2=any | Button id=note, pressed=false | |
-| Control Change `0xBn` | data1=CC#, data2=value | Fader id=128+CC#, value=data2/127.0 | |
+| Note On `0x9n` | data1=note, data2=velocity | Button id=note, channel=n, pressed=(velocity>0) | velocity 0 → released |
+| Note Off `0x8n` | data1=note, data2=any | Button id=note, channel=n, pressed=false | |
+| Poly Aftertouch `0xAn` | data1=note, data2=pressure | Aftertouch id=note, channel=n, value=pressure/127.0 | |
+| Control Change `0xBn` | data1=CC#, data2=value | Fader id=128+CC#, channel=n, value=data2/127.0 | |
+| Program Change `0xCn` | data1=program | Program id=program, channel=n | **2 bytes**, not 3 |
+| Channel Pressure `0xDn` | data1=pressure | Aftertouch id=0, channel=n, value=pressure/127.0 | **2 bytes**, not 3 |
+| Pitch Bend `0xEn` | data1=LSB, data2=MSB | PitchBend id=0, channel=n, value=((MSB\<\<7)\|LSB)/16383.0 | 14-bit; center 0x2000 → ~0.5 |
 
-- Channel nibble (low 4 bits of status) is ignored; all channels map alike.
-- Returns `false` on buffer too short (<3 bytes) or unsupported status.
-- Only handles standard 3-byte messages. SysEx, Running Status, and other extended formats are not supported.
+- `channel` (the status byte's low nibble) is **always** reported, for every
+  message type -- whether a binding cares is a per-controller `.mdef`
+  decision (`FORMAT.md`'s "Per-Range Channel Significance"), not `parseMidi`'s.
+  Before this table existed, `parseMidi` discarded the channel entirely,
+  which is why two APC40 pads sharing a note (different tracks) used to
+  collapse onto the same binding -- see `glow.bind.pad-xy` above.
+- Returns `false` when the buffer is shorter than the status's own required
+  length (2 or 3 bytes, see above), or the status is `>= 0xF0`
+  (System/Realtime -- not a channel-voice message at all; that's
+  `MidiByteReader`'s job, `midi_realtime.h`).
+- `msg` may be longer than the message needs (e.g. USB-MIDI's fixed 3-byte,
+  zero-padded packets calling this with `len=3` even for a 2-byte Program
+  Change) -- only *too short*, never *too long*, is rejected.
+- Framing (running status, Realtime-byte interleaving) is out of scope here
+  -- that's `MidiByteReader` (`midi_realtime.h`), which feeds this function
+  a complete message.
 
 ## Example Workflow
 
@@ -200,6 +249,13 @@ Converts 3-byte MIDI channel messages to `ControlEvent`:
   IS implemented, see `glow.led.*` above and FORMAT.md's MDF1 section)
 - Fader crossfaders for manual cue mixing — requires `setManualLevel(cueId, level)` on ShowController
 - MIDI clock, beat sync, tap tempo — separate concern
+- SysEx (device inquiry, the APC40's mode-switch handshake) — see FORMAT.md's
+  MDF1 "Out of Scope" for the follow-up flag on the APC40 specifically.
+- MPE, 14-bit CC (RPN/NRPN), running status (that's `MidiByteReader`,
+  `midi_realtime.h`) — not this parser's job.
+- `Aftertouch`/`PitchBend`/`Program` events are parsed but have no built-in
+  `ActionKind`/binding yet (see "Control Types and Events" above) — a future
+  `glow.bind.*` addition, not implemented here.
 - Modifying `ShowController` or other existing modules
 - USB-MIDI host — implemented (`usb_midi_input.cpp`), gated behind
   `CONFIG_GLOW_USB_MIDI_HOST` (Kconfig.projbuild), OFF by default. `.mdef`/
@@ -226,7 +282,16 @@ The test suite covers:
 2. Scene actions (Go, Toggle)
 3. Master fader clamping
 4. Unbound and type-mismatch events
-5. MIDI parsing (Note On/Off, CC, channel masking, boundary cases)
+5. MIDI parsing: all seven channel-voice types, correct per-status lengths
+   (2-byte Program Change/Channel Pressure accepted, not rejected), channel
+   always reported, `status >= 0xF0` rejected, truncated buffers rejected
+   with no OOB read
 6. End-to-end MIDI → dispatch → cue activation
+7. Channel-significant pads (a channel-multiplexed `.mdef` wired via
+   `LiveControl::setControllerProfile`): same note + different channel fire
+   independently -- the regression test for the bug this format addition
+   fixes (`test_channel_significant_pads_fire_independently`)
+8. `glow.bind.pad-xy` grid resolution and graceful degradation
+   (`test_glow_lua_api.cpp`)
 
 All tests link against the real `ShowController` with proper fixture profiles and effect evaluation.

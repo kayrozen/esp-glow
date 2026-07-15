@@ -207,12 +207,12 @@ void test_bad_magic() {
 }
 
 void test_bad_version() {
-  TEST("Reject unsupported version");
+  TEST("Reject unsupported version (3 -- 1 and 2 are both valid)");
 
   ControllerBuilder b = makeController();
   std::string err;
   std::vector<uint8_t> blob = b.encode(err);
-  blob[4] = 2;
+  blob[4] = 3;
 
   MidiControllerProfile p;
   CHECK(!parseMidiController(blob.data(), blob.size(), p));
@@ -313,6 +313,161 @@ void test_encoder_builder_limits() {
   CHECK(!err.empty());
 }
 
+// ============================================================================
+// Per-range channel significance (MDF1 v2)
+// ============================================================================
+
+void test_no_ch_stays_v1_byte_identical() {
+  TEST("No CH anywhere -> version 1, byte-identical to before v2 existed");
+
+  ControllerBuilder b = makeController();  // no CH on any pad/fader/LED
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  CHECK(err.empty());
+  CHECK(blob[4] == 1);  // version byte
+
+  MidiControllerProfile p;
+  CHECK(parseMidiController(blob.data(), blob.size(), p));
+  CHECK(p.pads[0].channelFrom == kChannelAgnostic);
+  CHECK(p.pads[0].channelTo == kChannelAgnostic);
+  CHECK(p.faders[0].channelFrom == kChannelAgnostic);
+  CHECK(p.leds[0].channelFrom == kChannelAgnostic);
+}
+
+void test_one_ch_range_bumps_to_v2() {
+  TEST("A single CH range bumps the whole blob to version 2");
+
+  ControllerBuilder b;
+  b.name = "One Channel Range";
+  b.pads.push_back({53, 53, 0, 7});
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  CHECK(err.empty());
+  CHECK(blob[4] == 2);
+
+  MidiControllerProfile p;
+  CHECK(parseMidiController(blob.data(), blob.size(), p));
+  CHECK(p.pads[0].channelFrom == 0);
+  CHECK(p.pads[0].channelTo == 7);
+}
+
+void test_ch_0_7_is_8_distinct_logical_pads() {
+  TEST("PAD 53 CH 0 7 -> 8 distinct logical pads (via findPadChannelRange + packed id)");
+
+  ControllerBuilder b;
+  b.name = "Grid Row";
+  b.pads.push_back({53, 53, 0, 7});
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  MidiControllerProfile p;
+  CHECK(parseMidiController(blob.data(), blob.size(), p));
+
+  const MdefPadRange* r = findPadChannelRange(p, 53);
+  CHECK(r != nullptr);
+  CHECK(r->channelFrom == 0 && r->channelTo == 7);
+
+  // Every channel 0..7 packs to a distinct id; a channel outside the
+  // declared range (8) still resolves to the SAME range (findPadChannelRange
+  // only checks the note), but packing with an out-of-declared-range
+  // channel is the caller's (LiveControl::effectiveId's) business, not
+  // this lookup's -- it only answers "is this note channel-significant".
+  std::vector<uint16_t> packedIds;
+  for (uint8_t ch = 0; ch <= 7; ++ch) {
+    packedIds.push_back(static_cast<uint16_t>((static_cast<uint16_t>(ch) << 8) | 53));
+  }
+  for (size_t i = 0; i < packedIds.size(); ++i) {
+    for (size_t j = 0; j < packedIds.size(); ++j) {
+      if (i != j) CHECK(packedIds[i] != packedIds[j]);
+    }
+  }
+}
+
+void test_old_v1_blob_loads_as_agnostic() {
+  TEST("An old (hand-built) v1 blob with no channel fields loads as channel-agnostic");
+
+  // Hand-build a minimal v1 blob: header + one pad, no name/faders/etc.
+  std::vector<uint8_t> blob = {
+    'M', 'D', 'F', '1',
+    1,     // version 1
+    0,     // flags
+    0,     // midiChannel
+    0,     // nameLen
+    1,     // padCount
+    0, 0, 0, 0,  // faderCount, encoderCount, ledCount, colorCount
+    53, 60,      // pad record: noteFrom=53, noteTo=60 (v1 shape: 2 bytes, no channel fields)
+  };
+
+  MidiControllerProfile p;
+  CHECK(parseMidiController(blob.data(), blob.size(), p));
+  CHECK(p.padCount == 1);
+  CHECK(p.pads[0].noteFrom == 53 && p.pads[0].noteTo == 60);
+  CHECK(p.pads[0].channelFrom == kChannelAgnostic);
+  CHECK(p.pads[0].channelTo == kChannelAgnostic);
+  CHECK(findPadChannelRange(p, 55) == nullptr);  // agnostic -- not channel-significant
+}
+
+void test_channel_range_validation() {
+  TEST("v2 channel range validation: mismatched sentinel, out-of-range, from>to all rejected");
+
+  ControllerBuilder base;
+  base.name = "X";
+  base.pads.push_back({53, 53, 0, 7});
+  std::string err;
+  std::vector<uint8_t> blob = base.encode(err);
+  CHECK(blob[4] == 2);
+
+  // Pad record starts right after the 13-byte header + 1-byte name ("X").
+  size_t padOffset = 13 + 1;
+
+  auto tryChannels = [&](uint8_t from, uint8_t to) {
+    std::vector<uint8_t> mutated = blob;
+    mutated[padOffset + 2] = from;
+    mutated[padOffset + 3] = to;
+    MidiControllerProfile p;
+    return parseMidiController(mutated.data(), mutated.size(), p);
+  };
+
+  CHECK(!tryChannels(kChannelAgnostic, 7));   // one sentinel, one real value
+  CHECK(!tryChannels(0, kChannelAgnostic));
+  CHECK(!tryChannels(5, 2));                  // from > to
+  CHECK(!tryChannels(0, 16));                 // 16 is out of range (0..15)
+  CHECK(tryChannels(0, 15));                  // full range is valid
+  CHECK(tryChannels(kChannelAgnostic, kChannelAgnostic));  // both agnostic is valid
+}
+
+void test_resolve_pad_xy_grid() {
+  TEST("resolvePadXY: (col,row) -> (note,channel) via declaration-ordered grid rows");
+
+  ControllerBuilder b;
+  b.name = "Grid";
+  b.pads.push_back({53, 53, 0, 7});  // row 0
+  b.pads.push_back({54, 54, 0, 7});  // row 1
+  b.pads.push_back({58, 66, kChannelAgnostic, kChannelAgnostic});  // not a grid row (agnostic, multi-note)
+  b.pads.push_back({55, 55, 0, 7});  // row 2 (grid rows need not be contiguous with agnostic pads between)
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  MidiControllerProfile p;
+  CHECK(parseMidiController(blob.data(), blob.size(), p));
+
+  uint8_t note, channel;
+  CHECK(resolvePadXY(p, 0, 0, note, channel));
+  CHECK(note == 53 && channel == 0);
+
+  CHECK(resolvePadXY(p, 3, 0, note, channel));
+  CHECK(note == 53 && channel == 3);
+
+  CHECK(resolvePadXY(p, 0, 1, note, channel));
+  CHECK(note == 54 && channel == 0);
+
+  CHECK(resolvePadXY(p, 0, 2, note, channel));
+  CHECK(note == 55 && channel == 0);  // the agnostic multi-note pad is skipped, not counted as a row
+
+  CHECK(!resolvePadXY(p, 0, 3, note, channel));   // no 4th row
+  CHECK(!resolvePadXY(p, 8, 0, note, channel));   // col 8 is past channel span 0..7
+  CHECK(!resolvePadXY(p, -1, 0, note, channel));  // negative col
+  CHECK(!resolvePadXY(p, 0, -1, note, channel));  // negative row
+}
+
 int main() {
   test_roundtrip_basic_fields();
   test_led_range_lookup_by_note();
@@ -330,6 +485,13 @@ int main() {
   test_pad_from_after_to();
   test_led_bad_colorOffset();
   test_encoder_builder_limits();
+
+  test_no_ch_stays_v1_byte_identical();
+  test_one_ch_range_bumps_to_v2();
+  test_ch_0_7_is_8_distinct_logical_pads();
+  test_old_v1_blob_loads_as_agnostic();
+  test_channel_range_validation();
+  test_resolve_pad_xy_grid();
 
   if (g_failCount == 0) {
     printf("\nAll tests passed!\n");

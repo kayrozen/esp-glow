@@ -351,6 +351,45 @@ static bool parseEncoderMode(const std::string& s, EncoderMode& out) {
   return false;
 }
 
+// Parses a trailing "CH <lo> <hi>" channel-significance modifier (PAD/FADER/
+// LED lines -- FORMAT.md's "Per-range channel significance"). `idx` must
+// point at the "CH" token itself; `lo`/`hi` are 0-indexed MIDI channels
+// (0..15), NOT the 1-indexed MIDI_CHANNEL directive's 0..16 scheme -- CH's
+// 0 means "channel 1" the way parseMidi's ControlEvent::channel does, not
+// MIDI_CHANNEL's "any".
+static bool parseChannelRange(const std::vector<std::string>& tokens, size_t idx,
+                              const char* context, uint8_t& loOut, uint8_t& hiOut,
+                              std::string& err) {
+  if (tokens[idx] != "CH") {
+    err = std::string(context) + ": unexpected extra token '" + tokens[idx] + "'";
+    return false;
+  }
+  if (idx + 2 >= tokens.size()) {
+    err = std::string(context) + ": CH expects '<lo> <hi>'";
+    return false;
+  }
+  int lo, hi;
+  if (!parseIntToken(tokens[idx + 1], lo) || !parseIntToken(tokens[idx + 2], hi)) {
+    err = std::string(context) + ": CH channel numbers must be integers";
+    return false;
+  }
+  if (lo < 0 || lo > 15 || hi < 0 || hi > 15) {
+    err = std::string(context) + ": CH channel out of range (0..15)";
+    return false;
+  }
+  if (lo > hi) {
+    err = std::string(context) + ": CH lo must be <= hi";
+    return false;
+  }
+  if (idx + 3 != tokens.size()) {
+    err = std::string(context) + ": unexpected extra token '" + tokens[idx + 3] + "'";
+    return false;
+  }
+  loOut = static_cast<uint8_t>(lo);
+  hiOut = static_cast<uint8_t>(hi);
+  return true;
+}
+
 // FADER/ENCODER below use parseIntToken (defined above, near tokenize) not
 // just for genuinely malformed input but as *routine* control flow: peeking
 // at the next token to decide "is this a <to> number, or does the name/mode
@@ -389,13 +428,22 @@ bool parseControllerDef(const std::string& text, ControllerBuilder& out, std::st
       int from, to;
       if (!parseIntToken(tokens[1], from)) { err = "PAD: invalid note number"; return false; }
       to = from;
-      if (tokens.size() >= 3 && !parseIntToken(tokens[2], to)) { err = "PAD: invalid note number"; return false; }
+      size_t idx = 2;
+      if (idx < tokens.size() && tokens[idx] != "CH") {
+        if (!parseIntToken(tokens[idx], to)) { err = "PAD: invalid note number"; return false; }
+        idx++;
+      }
       if (from < 0 || from > 127 || to < 0 || to > 127) { err = "PAD: note out of range (0..127)"; return false; }
       if (from > to) { err = "PAD: from must be <= to"; return false; }
-      out.pads.push_back({static_cast<uint8_t>(from), static_cast<uint8_t>(to)});
+
+      uint8_t chFrom = kChannelAgnostic, chTo = kChannelAgnostic;
+      if (idx < tokens.size()) {
+        if (!parseChannelRange(tokens, idx, "PAD", chFrom, chTo, err)) return false;
+      }
+      out.pads.push_back({static_cast<uint8_t>(from), static_cast<uint8_t>(to), chFrom, chTo});
     } else if (cmd == "FADER") {
       if (tokens.size() < 3 || tokens[1] != "CC") {
-        err = "FADER: expected 'CC <from> [<to>] [name]'";
+        err = "FADER: expected 'CC <from> [<to>] [name] [CH <lo> <hi>]'";
         return false;
       }
       int from;
@@ -409,12 +457,21 @@ bool parseControllerDef(const std::string& text, ControllerBuilder& out, std::st
       }
       if (from < 0 || from > 127 || to < 0 || to > 127) { err = "FADER: CC out of range (0..127)"; return false; }
       if (from > to) { err = "FADER: from must be <= to"; return false; }
+
+      // The name runs up to (not including) a "CH" token, if any -- CH's
+      // <lo> <hi> come after it, same "reserved keyword ends the free-text
+      // field" convention used nowhere else in this grammar yet, but the
+      // only way to let a name and a trailing CH modifier coexist.
       std::string fname;
-      for (; idx < tokens.size(); ++idx) {
+      for (; idx < tokens.size() && tokens[idx] != "CH"; ++idx) {
         if (!fname.empty()) fname += " ";
         fname += tokens[idx];
       }
-      out.faders.push_back({static_cast<uint8_t>(from), static_cast<uint8_t>(to), fname});
+      uint8_t chFrom = kChannelAgnostic, chTo = kChannelAgnostic;
+      if (idx < tokens.size()) {
+        if (!parseChannelRange(tokens, idx, "FADER", chFrom, chTo, err)) return false;
+      }
+      out.faders.push_back({static_cast<uint8_t>(from), static_cast<uint8_t>(to), fname, chFrom, chTo});
     } else if (cmd == "ENCODER") {
       if (tokens.size() < 3 || tokens[1] != "CC") {
         err = "ENCODER: expected 'CC <from> [<to>] [mode]'";
@@ -446,7 +503,7 @@ bool parseControllerDef(const std::string& text, ControllerBuilder& out, std::st
       out.encoders.push_back({static_cast<uint8_t>(from), static_cast<uint8_t>(to), mode});
     } else if (cmd == "LED") {
       if (tokens.size() < 5) {
-        err = "LED: expected 'NOTE|CC <from> <to> velocity|value'";
+        err = "LED: expected 'NOTE|CC <from> <to> velocity|value [CH <lo> <hi>]'";
         return false;
       }
       LedMsgType msgType;
@@ -467,11 +524,18 @@ bool parseControllerDef(const std::string& text, ControllerBuilder& out, std::st
       else if (tokens[4] == "value") semantic = LedSemantic::Value;
       else { err = "LED: expected velocity or value, got '" + tokens[4] + "'"; return false; }
 
+      uint8_t chFrom = kChannelAgnostic, chTo = kChannelAgnostic;
+      if (tokens.size() > 5) {
+        if (!parseChannelRange(tokens, 5, "LED", chFrom, chTo, err)) return false;
+      }
+
       ControllerLedSpec spec;
       spec.msgType = msgType;
       spec.addrFrom = static_cast<uint8_t>(from);
       spec.addrTo = static_cast<uint8_t>(to);
       spec.semantic = semantic;
+      spec.channelFrom = chFrom;
+      spec.channelTo = chTo;
       out.leds.push_back(std::move(spec));
       lastLedIndex = static_cast<int>(out.leds.size()) - 1;
     } else if (cmd == "COLOR") {

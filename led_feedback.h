@@ -63,12 +63,32 @@ public:
   // isn't in its palette.
   void set(uint8_t addr, const char* colorName);
 
+  // Channel-aware glow.led.set, for a channel-multiplexed pad (the APC40's
+  // clip grid): `channel` picks which of the several physical controls
+  // sharing `addr` this call addresses, so each channel gets its own
+  // tracked state instead of stomping the others. At send time, the
+  // channel nibble actually emitted follows the LED-OUTPUT rule declared on
+  // the matched LED range (MdefLedRange::channelFrom/channelTo,
+  // independent of the PAD range's own flag -- FORMAT.md's "Per-range
+  // channel significance"): if that range is LED-channel-significant,
+  // `channel` is used; if not (e.g. the APC40's input-only-significant
+  // ranges), `channel` is ignored and the ordinary MIDI_CHANNEL-derived
+  // nibble is sent instead, exactly like the plain overload above.
+  void set(uint8_t addr, uint8_t channel, const char* colorName);
+
   // glow.led.auto: `addr` continuously tracks whether `cueId` is active in
   // the ShowController passed to refresh() -- `activeColorName` while
   // active, `inactiveColorName` while not. Re-evaluated every refresh();
   // registering another auto binding for the same `addr` replaces the
   // earlier one (same "redefine wins" convention as glow.cue.define).
   void setAuto(uint8_t addr, uint16_t cueId, std::string activeColorName,
+              std::string inactiveColorName);
+
+  // Channel-aware glow.led.auto -- see the channel-aware set() above for
+  // what `channel` means. Registering another auto binding for the same
+  // (addr, channel) pair replaces the earlier one; a plain (addr)-only auto
+  // binding and a (addr, channel) one are tracked independently.
+  void setAuto(uint8_t addr, uint8_t channel, uint16_t cueId, std::string activeColorName,
               std::string inactiveColorName);
 
   // glow.bind.clear also calls this: stop tracking every auto binding (a
@@ -87,9 +107,16 @@ public:
   // since last actually sent, e.g. still waiting on the rate limiter).
   size_t pendingCount() const;
 
+  // The .mdef this feedback engine was built against -- glow.bind.pad-xy
+  // (glow_lua_api.cpp) reads it to resolve a grid (col, row) via
+  // resolvePadXY (mdef.h). Always valid: `profile` is a required
+  // constructor argument, borrowed, and must outlive this object.
+  const MidiControllerProfile& profile() const { return profile_; }
+
 private:
   struct AutoBinding {
     uint8_t addr;
+    uint8_t channel;  // kChannelAgnostic (mdef.h) for the plain (addr)-only overload
     uint16_t cueId;
     std::string activeColorName;
     std::string inactiveColorName;
@@ -97,15 +124,17 @@ private:
 
   struct LedState {
     uint8_t addr = 0;
+    uint8_t stateChannel = kChannelAgnostic;  // storage key's channel component (kChannelAgnostic = the legacy, addr-only slot)
     LedMsgType msgType = LedMsgType::Note;
+    uint8_t sendChannel = kChannelAgnostic;   // channel nibble to emit IF the matched LED range is channel-significant; else the MIDI_CHANNEL default is used
     bool hasDesired = false;
     uint8_t desiredValue = 0;
     bool hasLastSent = false;
     uint8_t lastSentValue = 0;
   };
 
-  void applyDesired(uint8_t addr, const char* colorName);
-  LedState& stateFor(uint8_t addr);
+  void applyDesired(uint8_t addr, uint8_t channel, const char* colorName);
+  LedState& stateFor(uint8_t addr, uint8_t stateChannel);
   void pump(float t);
   void sendFor(const LedState& st);
 
