@@ -67,7 +67,7 @@ A device with no `WLED` directives in its show has `glow.wled.*` disabled -- eve
 | 11    | version | always `0x05` |
 | 12-15 | colSec/whiteSec | always 0 (unused) |
 | 16    | effectIntensity | `ix`, 0-255 |
-| 17-18 | transitionDelay | big-endian ms |
+| 17-18 | transitionDelay | little-endian ms |
 | 19    | effectPalette | 0-70 |
 | 20-23 | reserved | always 0 |
 

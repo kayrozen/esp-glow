@@ -22,8 +22,8 @@ void buildWledPacket(const WledPacketParams& p, uint8_t* packet) {
   packet[14] = 0;                                       // colSec[2]
   packet[15] = 0;                                       // whiteSec
   packet[16] = p.intensity;                             // effectIntensity
-  packet[17] = static_cast<uint8_t>((p.transitionMs >> 8) & 0xFF);  // transitionDelay MSB
-  packet[18] = static_cast<uint8_t>(p.transitionMs & 0xFF);         // transitionDelay LSB
+  packet[17] = static_cast<uint8_t>(p.transitionMs & 0xFF);         // transitionDelay LSB
+  packet[18] = static_cast<uint8_t>((p.transitionMs >> 8) & 0xFF);  // transitionDelay MSB
   packet[19] = p.palette;                               // effectPalette
   // bytes 20-23 (reserved) already zeroed by memset above.
 }

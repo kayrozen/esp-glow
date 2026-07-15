@@ -57,8 +57,8 @@ void test_build_packet_effect_changed() {
   CHECK(packet[12] == 0 && packet[13] == 0 && packet[14] == 0);  // colSec
   CHECK(packet[15] == 0);    // whiteSec
   CHECK(packet[16] == 220);  // effectIntensity
-  CHECK(packet[17] == 0x01); // transitionDelay MSB
-  CHECK(packet[18] == 0x02); // transitionDelay LSB
+  CHECK(packet[17] == 0x02); // transitionDelay LSB
+  CHECK(packet[18] == 0x01); // transitionDelay MSB
   CHECK(packet[19] == 12);   // effectPalette
   for (int i = 20; i < 24; i++) CHECK(packet[i] == 0);  // reserved
 }
