@@ -55,7 +55,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Callable, Iterator, Optional
 
 import pytest
 
@@ -67,10 +67,12 @@ QEMU_DIR = Path(__file__).resolve().parent
 
 # TelemetryLine/line_is_crash and the read/assert loop are shared with
 # tests/hil/ (same wire format, different transport) -- see
-# tests/shared/telemetry.py and tests/shared/line_reader.py.
+# tests/shared/telemetry.py and tests/shared/line_reader.py. devcfg.py
+# (CFG1 encoder) is QEMU-only today -- see test_l1_devcfg.py.
 sys.path.insert(0, str(REPO_ROOT / "tests"))
 from shared.telemetry import CRASH_MARKERS, TelemetryLine, line_is_crash  # noqa: E402
 from shared.line_reader import LineReader  # noqa: E402
+from shared.devcfg import DEVCFG_BLOB_SIZE  # noqa: E402
 
 # esp32s3 8 MB flash, matching firmware/sdkconfig.defaults'
 # CONFIG_ESPTOOLPY_FLASHSIZE. QEMU's `-drive if=mtd` backing file must be
@@ -173,6 +175,87 @@ def build_qemu_flash_image(build_dir: Path) -> Path:
             f"merge_bin did not produce a {FLASH_SIZE_BYTES}-byte image at {out_path}"
         )
     logger.info("Merged QEMU flash image: %s (%d bytes)", out_path, out_path.stat().st_size)
+    return out_path
+
+
+def parse_partition_table(data: bytes) -> list:
+    """
+    Parses an ESP-IDF binary partition table (gen_esp32part.py's format:
+    repeated 32-byte little-endian entries, magic 0xAA 0x50, until an
+    all-0xFF/all-0x00 entry or the MD5 checksum entry). Returns
+    [{"type", "subtype", "offset", "size", "label"}, ...]. Python twin of
+    web/provisioner-static/flash.js's parsePartitionTable -- same format,
+    same reason to parse the real table instead of hardcoding offsets (see
+    that function's header comment).
+    """
+    import struct
+
+    entries = []
+    off = 0
+    while off + 32 <= len(data):
+        if data[off] == 0xAA and data[off + 1] == 0x50:
+            ptype, subtype = data[off + 2], data[off + 3]
+            offset, size = struct.unpack_from("<II", data, off + 4)
+            label_bytes = data[off + 12:off + 28]
+            nul = label_bytes.find(b"\x00")
+            label = label_bytes[:nul if nul >= 0 else 16].decode("utf-8", errors="replace")
+            entries.append({"type": ptype, "subtype": subtype, "offset": offset, "size": size, "label": label})
+            off += 32
+        else:
+            break  # MD5 checksum entry (type 0xEB) or end-of-table padding
+    return entries
+
+
+def resolve_partition(build_dir: Path, label: str) -> dict:
+    """
+    Finds `label`'s {offset, size} by parsing the real partition-table.bin
+    this build produced (flasher_args.json points at it) -- not hardcoded,
+    for the same reason findPartitionByLabel in flash.js isn't (a board's
+    actual partition layout, from firmware/partitions.csv, is the only
+    source of truth for where a partition really lives).
+    """
+    flasher_args_path = build_dir / "flasher_args.json"
+    flasher_args = json.loads(flasher_args_path.read_text())
+    flash_files: dict = flasher_args["flash_files"]
+
+    table_path = None
+    for rel_path in flash_files.values():
+        if str(rel_path).endswith("partition-table.bin"):
+            table_path = build_dir / rel_path
+            break
+    if table_path is None or not table_path.exists():
+        raise RuntimeError(f"partition-table.bin not found in {flasher_args_path}'s flash_files")
+
+    entries = parse_partition_table(table_path.read_bytes())
+    for e in entries:
+        if e["label"] == label:
+            return e
+    raise RuntimeError(f"partition '{label}' not found in {table_path} (entries: {[e['label'] for e in entries]})")
+
+
+def patch_devcfg_into_image(base_image: Path, build_dir: Path, devcfg_bytes: bytes, out_name: str) -> Path:
+    """
+    Copies `base_image` (the session-built qemu_flash.bin) to a new file
+    and pokes `devcfg_bytes` at the "devcfg" partition's real offset --
+    a flat 8 MB image is just the whole flash address space, so writing a
+    partition's bytes is a plain seek+write, no re-merge needed. Cheaper
+    than rebuilding firmware per devcfg variant (the whole point of CFG1:
+    the same binary, reconfigured by rewriting a few hundred bytes).
+    """
+    assert len(devcfg_bytes) <= DEVCFG_BLOB_SIZE + 4096, "devcfg_bytes larger than any sane devcfg partition"
+    part = resolve_partition(build_dir, "devcfg")
+    if len(devcfg_bytes) > part["size"]:
+        raise RuntimeError(
+            f"devcfg blob is {len(devcfg_bytes)} bytes, larger than the 'devcfg' partition "
+            f"({part['size']} bytes) -- partitions.csv and this test have drifted apart"
+        )
+
+    out_path = build_dir / out_name
+    data = bytearray(base_image.read_bytes())
+    end = part["offset"] + len(devcfg_bytes)
+    data[part["offset"]:end] = devcfg_bytes
+    out_path.write_bytes(bytes(data))
+    logger.info("Patched %d devcfg bytes into %s at offset 0x%x", len(devcfg_bytes), out_path, part["offset"])
     return out_path
 
 
@@ -326,6 +409,51 @@ def qemu_boot(qemu_flash_image: Path) -> Iterator[QemuReader]:
         if reader.logs:
             logger.info("QEMU serial log (%d lines) captured for this test", len(reader.logs))
         reader.stop()
+
+
+@pytest.fixture
+def qemu_boot_factory(idf_build_dir: Path, qemu_flash_image: Path) -> Iterator[Callable[[Optional[bytes]], QemuReader]]:
+    """
+    Factory fixture for CFG1 devcfg tests (test_l1_devcfg.py): call with
+    `devcfg_bytes=None` for the unmodified session image (same bytes
+    `qemu_boot` itself boots -- proves the "no devcfg" fallback), or with
+    a CFG1 blob to patch into a fresh copy of the image first (see
+    patch_devcfg_into_image). Each call is its own fresh QemuReader/clean
+    boot, same rule as `qemu_boot`; every reader created via this factory
+    is stopped at teardown.
+    """
+    qemu_bin = os.getenv("GLOW_QEMU_BIN", "qemu-system-xtensa")
+    machine = os.getenv("GLOW_QEMU_MACHINE", "esp32s3")
+    psram_mb = int(os.getenv("GLOW_QEMU_PSRAM_MB", "8"))
+    if not shutil.which(qemu_bin):
+        pytest.fail(
+            f"{qemu_bin!r} not found on PATH. Install Espressif's QEMU fork "
+            f"(esp32s3 machine support) or set GLOW_QEMU_BIN -- see README.md."
+        )
+
+    readers = []
+    counter = {"n": 0}
+
+    def _make(devcfg_bytes: Optional[bytes] = None) -> QemuReader:
+        if devcfg_bytes is None:
+            image = qemu_flash_image
+        else:
+            counter["n"] += 1
+            image = patch_devcfg_into_image(
+                qemu_flash_image, idf_build_dir, devcfg_bytes, f"qemu_flash_devcfg_{counter['n']}.bin"
+            )
+        reader = QemuReader(qemu_bin, machine, image, psram_mb)
+        reader.start()
+        readers.append(reader)
+        return reader
+
+    try:
+        yield _make
+    finally:
+        for reader in readers:
+            if reader.logs:
+                logger.info("QEMU serial log (%d lines) captured for this test", len(reader.logs))
+            reader.stop()
 
 
 @pytest.fixture

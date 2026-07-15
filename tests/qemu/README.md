@@ -58,6 +58,28 @@ Be honest about the limits, not just the wins:
 
 A green run means the software starts. It does not mean the rig works.
 
+## `test_l1_devcfg.py` — CFG1 flash-time device config (Wave 2)
+
+Extends the same harness to cover `device_config.h`'s boot-time contract:
+with no "devcfg" partition written, `main.cpp` falls back to the
+compiled-in Kconfig defaults (`cfg source=defaults`); with a valid CFG1
+blob patched into the image, it's read and parsed instead
+(`cfg source=devcfg`, with the telemetry's fields reflecting what was
+written, not the defaults). `qemu_boot_factory` (`conftest.py`) patches a
+blob built by `tests/shared/devcfg.py` (a Python CFG1 encoder, byte-
+identical to `device_config.cpp`/`web/shared/devcfg.js`) directly into a
+copy of the session-built flash image at the "devcfg" partition's real
+offset -- no firmware rebuild per devcfg variant, since the entire point
+of CFG1 is that one binary is reconfigured by rewriting a few hundred
+bytes, not recompiled.
+
+This is also where "QEMU can boot this firmware at all" gets its second,
+more direct proof: `test_skip_wifi_no_stall` sets `skipWifi=1` via an
+explicit devcfg blob (not the `sdkconfig.qemu.defaults` Kconfig fallback
+every other test here relies on) and asserts boot still reaches the
+render task's first `stats` tick -- exercising `main.cpp`'s runtime
+`if (!cfg.skipWifi)` branch directly, not just the compile-time default.
+
 ## How it relates to `tests/hil/`
 
 Deliberately the *same* harness, pointed at a different transport:
