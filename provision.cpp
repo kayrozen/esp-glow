@@ -391,6 +391,25 @@ static bool parseChannelRange(const std::vector<std::string>& tokens, size_t idx
   return true;
 }
 
+// Parses exactly two hex digits (case-insensitive) into a byte -- the
+// token shape `INIT SYSEX <hex bytes>` uses for each opaque byte (FORMAT.md's
+// "INIT Blob Table (v3)"). Anything else (wrong length, non-hex character)
+// is rejected; there is no 0x-prefix form here -- every token is a bare
+// byte, matching how a SysEx dump is normally written in a protocol doc.
+static bool parseHexByteToken(const std::string& s, uint8_t& out) {
+  if (s.size() != 2) return false;
+  uint8_t v = 0;
+  for (char c : s) {
+    v = static_cast<uint8_t>(v << 4);
+    if (c >= '0' && c <= '9') v = static_cast<uint8_t>(v | (c - '0'));
+    else if (c >= 'A' && c <= 'F') v = static_cast<uint8_t>(v | (c - 'A' + 10));
+    else if (c >= 'a' && c <= 'f') v = static_cast<uint8_t>(v | (c - 'a' + 10));
+    else return false;
+  }
+  out = v;
+  return true;
+}
+
 // FADER/ENCODER below use parseIntToken (defined above, near tokenize) not
 // just for genuinely malformed input but as *routine* control flow: peeking
 // at the next token to decide "is this a <to> number, or does the name/mode
@@ -546,6 +565,30 @@ bool parseControllerDef(const std::string& text, ControllerBuilder& out, std::st
       if (!parseIntToken(tokens[2], value)) { err = "COLOR: invalid value"; return false; }
       if (value < 0 || value > 127) { err = "COLOR: value out of range (0..127)"; return false; }
       out.leds[static_cast<size_t>(lastLedIndex)].colors.push_back({tokens[1], static_cast<uint8_t>(value)});
+    } else if (cmd == "INIT") {
+      // `INIT SYSEX <hex bytes...>` -- an opaque outbound MIDI message sent
+      // once, in declaration order, on controller connect (FORMAT.md's
+      // "INIT SYSEX" grammar / controller_init.h). Bytes are never
+      // interpreted here or on-device -- only their hex form is validated.
+      if (tokens.size() < 2 || tokens[1] != "SYSEX") {
+        err = "INIT: expected 'SYSEX <hex bytes...>'";
+        return false;
+      }
+      if (tokens.size() < 3) { err = "INIT SYSEX: missing bytes"; return false; }
+      std::vector<uint8_t> initBlob;
+      for (size_t i = 2; i < tokens.size(); ++i) {
+        uint8_t b;
+        if (!parseHexByteToken(tokens[i], b)) {
+          err = "INIT SYSEX: invalid hex byte '" + tokens[i] + "'";
+          return false;
+        }
+        initBlob.push_back(b);
+      }
+      if (initBlob.size() > static_cast<size_t>(MDEF_MAX_INIT_BLOB_BYTES)) {
+        err = "INIT SYSEX: blob too large (max " + std::to_string(MDEF_MAX_INIT_BLOB_BYTES) + " bytes)";
+        return false;
+      }
+      out.initBlobs.push_back(std::move(initBlob));
     } else if (!cmd.empty()) {
       err = "Unknown command: " + cmd;
       return false;

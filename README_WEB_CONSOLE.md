@@ -50,10 +50,21 @@ device from the binding's `ActionKind` (`CueFlash`/`SceneGo` → `"flash"`,
 { "type": "hello" }                               // request config (auto on connect)
 ```
 
-### Device → UI feedback (optional, Phase 4)
+### Device → UI feedback (Phase 4 -- P1.3: the device's real push, source of truth)
 ```json
-{ "type": "state", "active": [0, 3, 5] }
+{ "type": "state", "active": [0, 3, 5], "master": 0.75 }
 ```
+
+Broadcast from the render task, post-render, whenever the active-cue set or
+master level actually changes (change-detection, same discipline
+`led_feedback.h` uses for MIDI LED output -- a static show emits nothing
+after its first push) and rate-limited to at most 20/sec. A newly-connected
+client gets one unconditionally, bypassing both gates, so it never starts
+out guessing. This is the SAME `ShowController::isActive`/`activeCueIds`
+snapshot MIDI LED feedback reads -- firing a cue from any surface (this
+console, another one, MIDI, OSC, a live-coded `glow.cue.go`) updates the
+controller's pad LEDs and every connected console together, never one
+without the other. See `main.cpp`'s `broadcast_state_if_changed`.
 
 ## Phase 1 — `ws-client.js`
 
@@ -65,7 +76,7 @@ import { WsClient, Status } from "./ws-client.js";
 const client = new WsClient();  // defaults to ws://<page-host>/ws
 client
   .onConfig((cfg) => { /* { cues, scenes, hasMaster } */ })
-  .onState((activeIds) => { /* number[] */ })
+  .onState((activeIds, masterLevel) => { /* number[], number|null -- P1.3 */ })
   .onStatus((status) => { /* "connecting" | "open" | "closed" | "error" */ })
   .connect();
 
@@ -84,7 +95,9 @@ Features:
 - Single callback per channel; UI manages its own listener fan-out if needed.
 
 Node tests: `node scripts/test-ws-client.mjs` (mocks `WebSocket`, exercises
-parse/send/reconnect paths).
+parse/send/reconnect paths, including P1.3's `state`/`master` handling) and
+`node web/console/test-reconcile.mjs` (app.js's `reconcileActiveCues`, the
+optimistic-UI merge). Both run via `make test-console`.
 
 ## Phase 2 — `app.js` + `styles.css`
 
@@ -114,9 +127,15 @@ Interaction model mirrors `LiveControl` binding semantics:
   still releases reliably on touch devices.
 - **`touch-action: none`** on every interactive element to kill the 300ms
   tap delay and prevent the browser from hijacking the gesture as a scroll.
-- **Optimistic local state**: the UI flips active/latched immediately. The
-  device never echoes back for MVP. Phase-4 `state` messages, when wired,
-  override local state.
+- **Optimistic local state, device-reconciled (P1.3)**: the UI flips
+  active/latched immediately for zero-latency feedback (a tapped pad lights
+  before the round trip completes), then the device's `state` push corrects
+  it -- standard optimistic-UI reconciliation (`reconcileActiveCues` in
+  `app.js`). Cue ids are authoritative from the device; scene highlights
+  stay local-only (the device has no "active scene" concept to push -- a
+  scene is just "go every member cue") and survive each reconcile
+  untouched. Multiple consoles open at once all converge on the device's
+  state.
 - **Master fader** is drag-friendly (pointer capture, vertical or
   horizontal drag both work) and arrow-key navigable.
 
@@ -187,8 +206,16 @@ WebSocket text frame. It runs the testable parser, then:
 - `hello` → caller responds by pushing `config` back to this client
 
 `web_input_build_config(buf, bufLen)` serializes the current config into
-the buffer; `web_input_build_state(activeIds, n, buf, bufLen)` does the
-same for Phase-4 state pushes.
+the buffer; `web_input_build_state(activeIds, n, masterLevel, buf, bufLen)`
+does the same for Phase-4 (P1.3) state pushes -- called from `main.cpp`'s
+`broadcast_state_if_changed` (render task, post-render), which owns the
+change-detection and rate-limiting, not `web_input.cpp` itself.
+`web_input_note_new_client()`/`web_input_take_forced_state_broadcast()` are
+the one bit of new cross-task signaling this needed: the WS handshake
+handler (`ws_handler`'s `HTTP_GET` branch, off the render task) marks that
+a client just connected with no idea what's active yet, and the render
+task's next per-frame check sends a full `state` unconditionally, bypassing
+its own change-detection, before going back to normal.
 
 The Phase-2 console bundle (`web/console/**`) is served by a separate
 `httpd` URI handler that maps `/` → `/spiffs/index.html` and so on. The

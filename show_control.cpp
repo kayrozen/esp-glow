@@ -65,10 +65,31 @@ void ShowController::releaseScene(uint16_t sceneId, float t) {
   }
 }
 
+void ShowController::setManualLevel(uint16_t cueId, float level) {
+  Cue* cue = findCue(cueId);
+  if (!cue) return;
+
+  if (level < 0.0f) level = 0.0f;
+  if (level > 1.0f) level = 1.0f;
+
+  if (level > 0.0f) {
+    if (!cue->active) cue->activationSeq = nextActivationSeq_++;
+    cue->active = true;
+    cue->released = false;
+    cue->manualOverride = true;
+    cue->manualLevel = level;
+  } else {
+    cue->manualOverride = false;
+    cue->manualLevel = 0.0f;
+    cue->active = false;
+  }
+}
+
 void ShowController::stopAll() {
   for (auto& cue : cues_) {
     cue.active = false;
     cue.released = false;
+    cue.manualOverride = false;
   }
 }
 
@@ -103,6 +124,13 @@ const ShowController::Cue* ShowController::findCue(uint16_t cueId) const {
 }
 
 std::pair<float, bool> ShowController::weightAndAlive(const Cue& cue, float t) const {
+  // P1.2: a manual level override pins the weight, bypassing the
+  // fade-in/hold/fade-out state machine below entirely (setManualLevel's
+  // own comment explains why this wins over an in-flight release()).
+  if (cue.manualOverride) {
+    return {cue.manualLevel, true};
+  }
+
   if (!cue.active) {
     return {0.0f, false};
   }

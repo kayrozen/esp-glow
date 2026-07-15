@@ -713,17 +713,93 @@ int GlowLuaApi::l_bind_pad_xy(lua_State* L) {
   return 0;
 }
 
+// P1.2: (glow.bind.fader cc :master) | (glow.bind.fader cc :cue-level cue)
+// | (glow.bind.fader cc :param name) -- the same continuous target
+// vocabulary glow.bind.pitchbend/pressure use (resolveContinuousAction),
+// since a fader is just another continuous source ("one binding path, fed
+// by any continuous source" -- live_control.h's ActionKind comment).
 int GlowLuaApi::l_bind_fader(lua_State* L) {
   GlowLuaApi& api = self(L);
   lua_Integer cc = luaL_checkinteger(L, 1);
   if (cc < 0 || cc > 127) return luaL_error(L, "glow.bind.fader: CC out of range (0..127)");
-  const char* target = luaL_checkstring(L, 2);
-  if (std::strcmp(target, "master") != 0) {
-    return luaL_error(L, "glow.bind.fader: only :master is supported, got '%s'", target);
-  }
+
+  ActionKind action;
+  uint16_t target;
+  api.resolveContinuousAction(L, 2, 3, "glow.bind.fader", action, target);
 
   const MidiControllerProfile* profile = api.ledFeedback_ != nullptr ? &api.ledFeedback_->profile() : nullptr;
-  api.liveControl_.bindFader(resolveFaderBindingId(profile, static_cast<uint8_t>(cc)), ActionKind::Master);
+  api.liveControl_.bindFader(resolveFaderBindingId(profile, static_cast<uint8_t>(cc)), action, target);
+  return 0;
+}
+
+// P1.2: shared by glow.bind.pitchbend/pressure -- see glow_lua_api.h's
+// header comment.
+void GlowLuaApi::resolveContinuousAction(lua_State* L, int actionIdx, int targetIdx, const char* fnName,
+                                         ActionKind& actionOut, uint16_t& targetOut) {
+  const char* kind = luaL_checkstring(L, actionIdx);
+  if (std::strcmp(kind, "master") == 0) {
+    actionOut = ActionKind::Master;
+    targetOut = 0;
+    return;
+  }
+  if (std::strcmp(kind, "cue-level") == 0) {
+    const char* cueName = luaL_checkstring(L, targetIdx);
+    uint16_t cueId = 0;
+    if (!cueIdForName(cueName, cueId)) {
+      luaL_error(L, "%s: unknown cue '%s'", fnName, cueName);
+      return;
+    }
+    actionOut = ActionKind::CueLevel;
+    targetOut = cueId;
+    return;
+  }
+  if (std::strcmp(kind, "param") == 0) {
+    const char* paramName = luaL_checkstring(L, targetIdx);
+    actionOut = ActionKind::ParamSet;
+    targetOut = liveControl_.internParam(paramName);
+    return;
+  }
+  luaL_error(L, "%s: action must be :master, :cue-level, or :param, got '%s'", fnName, kind);
+}
+
+// P1.2: the wheel -- always id=0 (parseMidi never reports a channel-
+// significant PitchBend; see live_control.h). Same target vocabulary as
+// glow.bind.pressure below -- both are "any continuous source" (FORMAT.md's
+// P1.2 design), just fed by a different MIDI message.
+int GlowLuaApi::l_bind_pitchbend(lua_State* L) {
+  GlowLuaApi& api = self(L);
+  ActionKind action;
+  uint16_t target;
+  api.resolveContinuousAction(L, 1, 2, "glow.bind.pitchbend", action, target);
+  api.liveControl_.bindPitchBend(action, target);
+  return 0;
+}
+
+// P1.2: channel pressure -- always id=0 (poly aftertouch on a specific
+// note is parsed as the same ControlType::Aftertouch but a different id,
+// and is not addressable through this convenience wrapper -- see
+// live_control.h's bindPressure comment).
+int GlowLuaApi::l_bind_pressure(lua_State* L) {
+  GlowLuaApi& api = self(L);
+  ActionKind action;
+  uint16_t target;
+  api.resolveContinuousAction(L, 1, 2, "glow.bind.pressure", action, target);
+  api.liveControl_.bindPressure(action, target);
+  return 0;
+}
+
+// P1.2: Program Change as a scene selector -- "program N -> scene N".
+// Only :scene is meaningful here (there is no fixed target to resolve --
+// the incoming program number IS the scene id, see LiveControl::handle),
+// same restrictive-single-keyword convention as glow.bind.fader's
+// :master-only check above.
+int GlowLuaApi::l_bind_program(lua_State* L) {
+  GlowLuaApi& api = self(L);
+  const char* mode = luaL_checkstring(L, 1);
+  if (std::strcmp(mode, "scene") != 0) {
+    return luaL_error(L, "glow.bind.program: only :scene is supported, got '%s'", mode);
+  }
+  api.liveControl_.bindProgram();
   return 0;
 }
 
@@ -764,6 +840,15 @@ int GlowLuaApi::l_led_auto(lua_State* L) {
   if (api.ledFeedback_ == nullptr) return 0;  // no LED capability on this device -- no-op
   api.ledFeedback_->setAuto(static_cast<uint8_t>(addr), cueId, activeColor, inactiveColor);
   return 0;
+}
+
+// --- glow.param.* -- P1.2's ParamSet read side (LiveControl::paramValue) ---
+
+int GlowLuaApi::l_param_get(lua_State* L) {
+  GlowLuaApi& api = self(L);
+  const char* name = luaL_checkstring(L, 1);
+  lua_pushnumber(L, api.liveControl_.paramValue(name));
+  return 1;
 }
 
 // --- glow.wled.* ---------------------------------------------------------
@@ -921,6 +1006,9 @@ void GlowLuaApi::install() {
   registerFn(L, -1, "pad", &GlowLuaApi::l_bind_pad, this);
   registerFn(L, -1, "pad-xy", &GlowLuaApi::l_bind_pad_xy, this);
   registerFn(L, -1, "fader", &GlowLuaApi::l_bind_fader, this);
+  registerFn(L, -1, "pitchbend", &GlowLuaApi::l_bind_pitchbend, this);
+  registerFn(L, -1, "pressure", &GlowLuaApi::l_bind_pressure, this);
+  registerFn(L, -1, "program", &GlowLuaApi::l_bind_program, this);
   registerFn(L, -1, "clear", &GlowLuaApi::l_bind_clear, this);
   lua_setfield(L, glowIdx, "bind");
 
@@ -928,6 +1016,10 @@ void GlowLuaApi::install() {
   registerFn(L, -1, "set", &GlowLuaApi::l_led_set, this);
   registerFn(L, -1, "auto", &GlowLuaApi::l_led_auto, this);
   lua_setfield(L, glowIdx, "led");
+
+  lua_newtable(L);  // glow.param
+  registerFn(L, -1, "get", &GlowLuaApi::l_param_get, this);
+  lua_setfield(L, glowIdx, "param");
 
   lua_newtable(L);  // glow.wled
   registerFn(L, -1, "fx", &GlowLuaApi::l_wled_fx, this);

@@ -30,8 +30,12 @@ bool parseMidiController(const uint8_t* data, size_t len, MidiControllerProfile&
   if (data[0] != 'M' || data[1] != 'D' || data[2] != 'F' || data[3] != '1') return false;
 
   uint8_t version = data[4];
-  if (version != 1 && version != 2) return false;
-  bool v2 = (version == 2);
+  if (version != 1 && version != 2 && version != 3) return false;
+  // v2 and v3 both use the wider (channel-carrying) pad/fader/LED record
+  // shape -- v3 is additive on top of v2 (an init-blob table), not a
+  // separate shape, same convention as v2 was additive on top of v1.
+  bool wideRecords = (version >= 2);
+  bool v3 = (version == 3);
 
   uint8_t flags = data[5];
   if (flags != 0) return false;
@@ -52,22 +56,52 @@ bool parseMidiController(const uint8_t* data, size_t len, MidiControllerProfile&
   if (ledCount > MDEF_MAX_LED_RANGES) return false;
   if (colorCount > MDEF_MAX_COLORS) return false;
 
+  // v3 header field: initCount, inserted right before the name (same
+  // convention PFX2 uses for rangeCount -- FORMAT.md).
+  uint8_t initCount = 0;
   size_t pos = 13;
+  if (v3) {
+    if (len < pos + 1) return false;
+    initCount = data[pos];
+    if (initCount > MDEF_MAX_INIT_BLOBS) return false;
+    pos += 1;
+  }
+
   if (len < pos + nameLen) return false;
   pos += nameLen;  // controller name: parsed over, never stored (see mdef.h)
 
   // v1 record sizes: pad 2B, fader 4B, LED 7B (no channel fields).
-  // v2 record sizes: pad 4B, fader 6B, LED 9B (+2 channel bytes each).
-  size_t padRecSize = v2 ? 4u : 2u;
-  size_t faderRecSize = v2 ? 6u : 4u;
-  size_t ledRecSize = v2 ? 9u : 7u;
+  // v2/v3 record sizes: pad 4B, fader 6B, LED 9B (+2 channel bytes each).
+  size_t padRecSize = wideRecords ? 4u : 2u;
+  size_t faderRecSize = wideRecords ? 6u : 4u;
+  size_t ledRecSize = wideRecords ? 9u : 7u;
 
   size_t padTableOffset = pos;
   size_t faderTableOffset = padTableOffset + padRecSize * padCount;
   size_t encoderTableOffset = faderTableOffset + faderRecSize * faderCount;
   size_t ledTableOffset = encoderTableOffset + 3u * encoderCount;
   size_t colorTableOffset = ledTableOffset + ledRecSize * ledCount;
-  size_t nameBlobOffset = colorTableOffset + 3u * colorCount;
+  size_t initTableOffset = colorTableOffset + 3u * colorCount;
+
+  // v3 init-blob table: initCount entries of (u8 len, len bytes), between
+  // the colour table and the trailing name blob. Parsed into a local array
+  // first (not `out`, which isn't touched on any failure path) -- same
+  // discipline as every other table below.
+  MdefInitBlob initBlobsLocal[MDEF_MAX_INIT_BLOBS];
+  size_t blobPos = initTableOffset;
+  if (v3) {
+    for (uint8_t i = 0; i < initCount; ++i) {
+      if (len < blobPos + 1) return false;
+      uint8_t blobLen = data[blobPos];
+      if (blobLen > MDEF_MAX_INIT_BLOB_BYTES) return false;
+      blobPos += 1;
+      if (len < blobPos + blobLen) return false;
+      initBlobsLocal[i].len = blobLen;
+      if (blobLen > 0) std::memcpy(initBlobsLocal[i].data, data + blobPos, blobLen);
+      blobPos += blobLen;
+    }
+  }
+  size_t nameBlobOffset = blobPos;
 
   if (len < nameBlobOffset) return false;
   size_t nameBlobLen = len - nameBlobOffset;
@@ -84,7 +118,7 @@ bool parseMidiController(const uint8_t* data, size_t len, MidiControllerProfile&
     uint8_t to = data[o + 1];
     if (from > 127 || to > 127 || from > to) return false;
     uint8_t chFrom = kChannelAgnostic, chTo = kChannelAgnostic;
-    if (v2) {
+    if (wideRecords) {
       chFrom = data[o + 2];
       chTo = data[o + 3];
       if (!validChannelRange(chFrom, chTo)) return false;
@@ -108,7 +142,7 @@ bool parseMidiController(const uint8_t* data, size_t len, MidiControllerProfile&
       if (!hasNulWithin(data, nameBlobOffset + nameOff, nameBlobLen - nameOff)) return false;
     }
     uint8_t chFrom = kChannelAgnostic, chTo = kChannelAgnostic;
-    if (v2) {
+    if (wideRecords) {
       chFrom = data[o + 4];
       chTo = data[o + 5];
       if (!validChannelRange(chFrom, chTo)) return false;
@@ -152,7 +186,7 @@ bool parseMidiController(const uint8_t* data, size_t len, MidiControllerProfile&
     if (static_cast<size_t>(colorOffset) + rangeColorCount > colorCount) return false;
 
     uint8_t chFrom = kChannelAgnostic, chTo = kChannelAgnostic;
-    if (v2) {
+    if (wideRecords) {
       chFrom = data[o + 7];
       chTo = data[o + 8];
       if (!validChannelRange(chFrom, chTo)) return false;
@@ -185,6 +219,9 @@ bool parseMidiController(const uint8_t* data, size_t len, MidiControllerProfile&
   if (nameBlobLen > 0) {
     std::memcpy(result.nameBlob, data + nameBlobOffset, nameBlobLen);
   }
+
+  result.initCount = initCount;
+  for (uint8_t i = 0; i < initCount; ++i) result.initBlobs[i] = initBlobsLocal[i];
 
   out = result;
   return true;

@@ -54,6 +54,31 @@ function toggleInSet(set, id) {
   return next;
 }
 
+// P1.3: reconciles the local (optimistic) active-cue set against a
+// device-pushed `state` message. Exported as a pure function (no Preact,
+// no DOM) so it's unit-testable on its own -- see test-reconcile.mjs.
+//
+// Cue ids (< SCENE_MARKER_BASE) are authoritative from the device: the
+// returned set's cue-id membership is exactly `deviceIds`, full stop --
+// this is what corrects a client whose optimistic guess drifted (dropped
+// a WS message, another console/MIDI/OSC fired the same cue, etc.).
+//
+// Scene markers (id >= SCENE_MARKER_BASE, see onScenePointerDown) are
+// local-only and preserved untouched: the device has no "active scene"
+// concept to push in the first place (a scene is just "go every member
+// cue" -- see SceneRow's comment), so a `state` message was never going
+// to mention them, and wiping them on every reconcile would make scene
+// highlighting flicker off on every unrelated cue-state change.
+export const SCENE_MARKER_BASE = 0x10000;
+
+export function reconcileActiveCues(prev, deviceIds) {
+  const next = new Set(deviceIds);
+  for (const id of prev) {
+    if (id >= SCENE_MARKER_BASE) next.add(id);
+  }
+  return next;
+}
+
 // --- top-level App component --------------------------------------------
 
 function App() {
@@ -92,9 +117,16 @@ function App() {
           setMaster(1.0);
         }
       })
-      .onState((ids) => {
-        // Phase 4: device-pushed active-cue ids override local state.
-        setActiveCues(new Set(ids));
+      .onState((ids, masterLevel) => {
+        // P1.3: the device is source of truth. Standard optimistic-UI
+        // reconciliation (reconcileActiveCues, above) -- a tapped pad
+        // already lit locally (onCuePointerDown's optimistic setActiveCues)
+        // the instant it was pressed; this push (arriving shortly after,
+        // whether it originated from THIS console, another one, MIDI, OSC,
+        // or a live-coded glow.cue.go) corrects any drift instead of
+        // trusting the local guess forever.
+        setActiveCues((prev) => reconcileActiveCues(prev, ids));
+        if (masterLevel !== null) setMaster(masterLevel);
       });
     client.connect();
     return () => client.disconnect();
@@ -138,10 +170,10 @@ function App() {
       // Use the scene id as the local-active key; the device knows which
       // cues to fire. We don't try to track individual scene member cues
       // locally — the device's state push (Phase 4) is the source of truth.
-      setActiveCues((s) => new Set(s).add(0x10000 + scene.id));
+      setActiveCues((s) => new Set(s).add(SCENE_MARKER_BASE + scene.id));
       sendScene(scene.id, true);
     } else {
-      setActiveCues((s) => toggleInSet(s, 0x10000 + scene.id));
+      setActiveCues((s) => toggleInSet(s, SCENE_MARKER_BASE + scene.id));
       sendScene(scene.id, true);
     }
   }, [sendScene]);
@@ -150,7 +182,7 @@ function App() {
     if (mode === "flash") {
       setActiveCues((s) => {
         const next = new Set(s);
-        next.delete(0x10000 + scene.id);
+        next.delete(SCENE_MARKER_BASE + scene.id);
         return next;
       });
       sendScene(scene.id, false);
@@ -298,7 +330,7 @@ function SceneRow({ scenes, activeCues, onPointerDown, onPointerUp }) {
         ${scenes.map((scene) => html`
           <button key=${scene.id}
                   class=${classList("scene-btn",
-                                    activeCues.has(0x10000 + scene.id) && "scene-active")}
+                                    activeCues.has(SCENE_MARKER_BASE + scene.id) && "scene-active")}
                   onPointerDown=${() => onPointerDown(scene, mode)}
                   onPointerUp=${() => onPointerUp(scene, mode)}
                   onPointerLeave=${() => onPointerUp(scene, mode)}
@@ -385,4 +417,9 @@ function MasterFader({ value, onChange }) {
 
 // --- mount --------------------------------------------------------------
 
-render(html`<${App} />`, document.getElementById("app"));
+// Guarded so this module can be imported from a plain Node test (see
+// test-reconcile.mjs, which imports reconcileActiveCues/SCENE_MARKER_BASE
+// above) without a DOM to mount into.
+if (typeof document !== "undefined") {
+  render(html`<${App} />`, document.getElementById("app"));
+}

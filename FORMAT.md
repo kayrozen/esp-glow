@@ -263,13 +263,21 @@ driven. Bindings alone (`glow.bind.pad`/`glow.bind.fader`) need no format at
 all: they address a note/CC number directly, exactly like `parseMidi`
 already does (`live_control.h`).
 
+`.mdef` also carries an optional **INIT SYSEX** blob table (v3, below): a
+controller like the Akai APC40 needs a SysEx handshake sent on connect
+before its pads/LEDs behave the way the rest of this file assumes (its
+"Generic Mode" mode-set message -- see "INIT Blob Table (v3)"). The
+firmware never interprets these bytes, only sends them -- this is what
+keeps a controller's own init handshake a `.mdef` fact instead of a C++
+special case (`controller_init.h`).
+
 The on-device runtime type is `MidiControllerProfile` (`mdef.h`): fixed-size
 arrays, no heap, copied by value into `LoadedShow::controllers`
 (`show_bundle.h`) -- the same discipline as `FixtureProfile`. The text
 grammar (`.mdef`, see `provision.h`) and its encoder (`controller_encoder.h`'s
 `ControllerBuilder`) are host-tool-only and never linked into firmware.
 
-The format has two versions, both sharing the `"MDF1"` magic (the version
+The format has three versions, all sharing the `"MDF1"` magic (the version
 byte, not the magic, is what changes) -- the same convention PFX1/PFX2 use:
 
 - **Version 1**: every PAD/FADER/LED range is channel-agnostic -- the
@@ -283,22 +291,31 @@ byte, not the magic, is what changes) -- the same convention PFX1/PFX2 use:
   physical controls -- e.g. the APC40's clip-launch grid, which shares 5
   note values across 8 channels/tracks instead of using 40 distinct notes.
   See "Per-Range Channel Significance (v2)" below.
+- **Version 3**: adds an optional init-blob table (`INIT SYSEX` lines,
+  P1.1) -- zero or more opaque outbound MIDI messages sent, in order, once
+  the controller's MIDI-out path is up. v3 always uses v2's wider
+  (channel-carrying) PAD/FADER/LED records too, even if no range is
+  actually channel-significant -- v3 is additive on top of v2's record
+  shape, not a parallel format, so the parser only ever needs one
+  "wide vs. narrow records" branch, not a version-by-version matrix. See
+  "INIT Blob Table (v3)" below.
 
-`parseMidiController` accepts both versions. `ControllerBuilder::encode`
+`parseMidiController` accepts all three versions. `ControllerBuilder::encode`
 emits version 1 bytes -- byte-identical to the original format -- for any
-controller with no `CH` ranges, and only emits version 2 once at least one
-range has one.
+controller with no `CH` ranges and no `INIT` lines; version 2 once at least
+one range has a `CH`; version 3 once at least one `INIT SYSEX` line exists
+(regardless of whether any `CH` range is also present).
 
 ## Format Specification
 
 Little-endian throughout, like PFX1.
 
-### Header (13 bytes + name)
+### Header (13 bytes, +1 for v3, + name)
 
 | Offset | Size | Name         | Type    | Description |
 |--------|------|--------------|---------|-------------|
 | 0      | 4    | magic        | uint8[] | ASCII "MDF1" |
-| 4      | 1    | version      | uint8   | Format version: 1 or 2 |
+| 4      | 1    | version      | uint8   | Format version: 1, 2, or 3 |
 | 5      | 1    | flags        | uint8   | Reserved, must be 0 |
 | 6      | 1    | midiChannel  | uint8   | 0 = any/unset, 1..16 = a fixed channel (1-indexed). Used only as `LedFeedback`'s default outgoing LED channel when the matched LED range is NOT itself channel-significant (`led_feedback.cpp`) -- it does not filter `parseMidi`'s input, which reports every message's channel regardless of this field (see "Per-Range Channel Significance" below for the 0-indexed field that actually does) |
 | 7      | 1    | nameLen      | uint8   | Length of controller name (0 allowed) |
@@ -307,26 +324,27 @@ Little-endian throughout, like PFX1.
 | 10     | 1    | encoderCount | uint8   | 0..MDEF_MAX_ENCODERS=16 |
 | 11     | 1    | ledCount     | uint8   | 0..MDEF_MAX_LED_RANGES=8 |
 | 12     | 1    | colorCount   | uint8   | Total COLOR entries across every LED range, 0..MDEF_MAX_COLORS=96 |
-| 13     | nameLen | name      | uint8[] | UTF-8 controller name, NOT null-terminated. Parsed over but never stored in `MidiControllerProfile` (debugging/tooling only, same convention as PFX1's fixture name) |
+| 13     | 1    | initCount    | uint8   | **v3 only.** Number of `INIT SYSEX` blobs, 0..MDEF_MAX_INIT_BLOBS=8 -- inserted here, same convention as PFX2's `rangeCount` insertion before its name field. Absent entirely in v1/v2 (`name` starts at offset 13 instead) |
+| 13 (v1/v2) / 14 (v3) | nameLen | name | uint8[] | UTF-8 controller name, NOT null-terminated. Parsed over but never stored in `MidiControllerProfile` (debugging/tooling only, same convention as PFX1's fixture name) |
 
-### Pad Records (padCount entries; 2 bytes each in v1, 4 in v2)
+### Pad Records (padCount entries; 2 bytes each in v1, 4 in v2/v3)
 
 | Byte | Type  | Name     | Description |
 |------|-------|----------|-------------|
 | 0    | uint8 | noteFrom | 0..127 |
 | 1    | uint8 | noteTo   | 0..127, inclusive, >= noteFrom. A single pad has noteFrom == noteTo |
-| 2    | uint8 | channelFrom | **v2 only.** 0..15, or `kChannelAgnostic` (0xFF) -- see "Per-Range Channel Significance" |
-| 3    | uint8 | channelTo   | **v2 only.** 0..15 inclusive (>= channelFrom), or 0xFF -- must match channelFrom's agnostic-ness |
+| 2    | uint8 | channelFrom | **v2/v3 only.** 0..15, or `kChannelAgnostic` (0xFF) -- see "Per-Range Channel Significance" |
+| 3    | uint8 | channelTo   | **v2/v3 only.** 0..15 inclusive (>= channelFrom), or 0xFF -- must match channelFrom's agnostic-ness |
 
-### Fader Records (faderCount entries; 4 bytes each in v1, 6 in v2)
+### Fader Records (faderCount entries; 4 bytes each in v1, 6 in v2/v3)
 
 | Byte | Type   | Name    | Description |
 |------|--------|---------|-------------|
 | 0    | uint8  | ccFrom  | 0..127 |
 | 1    | uint8  | ccTo    | 0..127, inclusive, >= ccFrom |
 | 2-3  | uint16 | nameOff | Offset into the trailing name blob, or 0xFFFF if unnamed |
-| 4    | uint8  | channelFrom | **v2 only.** Same convention as the pad record's |
-| 5    | uint8  | channelTo   | **v2 only.** |
+| 4    | uint8  | channelFrom | **v2/v3 only.** Same convention as the pad record's |
+| 5    | uint8  | channelTo   | **v2/v3 only.** |
 
 ### Encoder Records (3 bytes each, encoderCount entries)
 
@@ -342,7 +360,7 @@ is the safe default when unsure: it degrades to a plain fader instead of
 jumping wildly or running backwards. Encoders have no channel-significance
 field -- unaffected by v2.
 
-### LED Records (ledCount entries; 7 bytes each in v1, 9 in v2)
+### LED Records (ledCount entries; 7 bytes each in v1, 9 in v2/v3)
 
 | Byte | Type   | Name        | Description |
 |------|--------|-------------|-------------|
@@ -352,8 +370,8 @@ field -- unaffected by v2.
 | 3    | uint8  | semantic    | 0 = velocity (data byte selects a colour from the palette below), 1 = value (data byte is a raw level, e.g. an LED ring) |
 | 4-5  | uint16 | colorOffset | Index into the profile-wide colour table (below) where this range's palette starts |
 | 6    | uint8  | colorCount  | Number of colour entries in this range's palette |
-| 7    | uint8  | channelFrom | **v2 only.** Same convention as the pad record's -- the LED-OUTPUT side of channel significance, independent of the PAD/FADER range's own flag (see below) |
-| 8    | uint8  | channelTo   | **v2 only.** |
+| 7    | uint8  | channelFrom | **v2/v3 only.** Same convention as the pad record's -- the LED-OUTPUT side of channel significance, independent of the PAD/FADER range's own flag (see below) |
+| 8    | uint8  | channelTo   | **v2/v3 only.** |
 
 An LED record declares how a block of pads/faders (typically the same
 address range as a preceding PAD/FADER record, though this isn't enforced)
@@ -368,15 +386,28 @@ slice.
 | 0-1  | uint16 | nameOff | Offset into the trailing name blob; always present (COLOR always names its colour) |
 | 2    | uint8   | value   | MIDI data byte (0..127) that selects this colour when sent as the LED message's velocity/value byte |
 
+### INIT Blob Table (v3)
+
+Immediately after the colour records, `initCount` entries (v3 only; absent
+entirely in v1/v2):
+
+| Byte | Type  | Name | Description |
+|------|-------|------|-------------|
+| 0    | uint8 | len  | Number of bytes in this blob, 0..MDEF_MAX_INIT_BLOB_BYTES=64 |
+| 1..len | uint8[] | data | Opaque bytes -- never interpreted by `parseMidiController`, `sendControllerInit` (`controller_init.h`), or anything else on-device. Typically a complete `F0...F7` SysEx frame, but the format does not require or check that framing |
+
+Entries are sent in declaration order, on connect -- see "INIT SYSEX" under
+the `.mdef` grammar below and `controller_init.h`'s `sendControllerInit`.
+
 ### Name Blob
 
-Immediately after the colour records: the rest of the blob is a UTF-8,
-NUL-separated name blob (fader names and colour names share it, in
-declaration order, undeduplicated -- same convention as PFX2's range name
-blob). Its length is not stored explicitly -- it is every remaining byte to
-the end of the buffer.
+Immediately after the colour records (v1/v2) or the init blob table (v3):
+the rest of the blob is a UTF-8, NUL-separated name blob (fader names and
+colour names share it, in declaration order, undeduplicated -- same
+convention as PFX2's range name blob). Its length is not stored explicitly
+-- it is every remaining byte to the end of the buffer.
 
-**Total blob size:** `13 + nameLen + padRecSize*padCount + faderRecSize*faderCount + 3*encoderCount + ledRecSize*ledCount + 3*colorCount + nameBlobLen` bytes, where `padRecSize`/`faderRecSize`/`ledRecSize` are 2/4/7 (v1) or 4/6/9 (v2).
+**Total blob size:** `13 + (1 if v3) + nameLen + padRecSize*padCount + faderRecSize*faderCount + 3*encoderCount + ledRecSize*ledCount + 3*colorCount + initTableSize + nameBlobLen` bytes, where `padRecSize`/`faderRecSize`/`ledRecSize` are 2/4/7 (v1) or 4/6/9 (v2/v3), and `initTableSize` is 0 (v1/v2) or the sum of `1 + len` over every init blob (v3).
 
 ## Per-Range Channel Significance (v2)
 
@@ -431,14 +462,15 @@ scene row) -- it is a convention on top of the format, not a distinct field.
 `parseMidiController` enforces (same strict, never-reads-out-of-bounds
 security-boundary contract as `parseProfile`):
 
-1. Buffer at least 13 bytes; magic "MDF1"; version 1 or 2; flags 0; midiChannel <= 16.
+1. Buffer at least 13 bytes; magic "MDF1"; version 1, 2, or 3; flags 0; midiChannel <= 16.
 2. Each of padCount/faderCount/encoderCount/ledCount/colorCount within its MDEF_MAX_*.
 3. Buffer at least the declared header + table sizes (record sizes depend on version -- see above).
 4. Every pad/fader/encoder/LED `addrFrom`/`ccFrom` <= its `addrTo`/`ccTo`, both <= 127.
 5. Encoder `mode` in {0,1,2}; LED `msgType` in {0,1}; LED `semantic` in {0,1}.
 6. LED `colorOffset`/`colorCount` fits within the profile-wide colour table.
 7. Every fader (if not 0xFFFF) and colour `nameOff` lands on a NUL-terminated string within the trailing name blob.
-8. **v2 only:** every pad/fader/LED `channelFrom`/`channelTo` is either both `kChannelAgnostic` (0xFF), or both a valid 0..15 value with `channelFrom <= channelTo`. A v1 blob has no channel fields at all -- every range parses as `kChannelAgnostic`.
+8. **v2/v3 only:** every pad/fader/LED `channelFrom`/`channelTo` is either both `kChannelAgnostic` (0xFF), or both a valid 0..15 value with `channelFrom <= channelTo`. A v1 blob has no channel fields at all -- every range parses as `kChannelAgnostic`.
+9. **v3 only:** `initCount` within MDEF_MAX_INIT_BLOBS; every init blob's declared `len` within MDEF_MAX_INIT_BLOB_BYTES and not running past the end of the buffer. A v1/v2 blob has no init table at all -- `initCount` parses as 0 (same no-op `sendControllerInit` gives an empty table -- see `controller_init.h`).
 
 ## `.mdef` Text Grammar
 
@@ -465,6 +497,7 @@ LED CC 48 55 value              # fader LED rings driven by CC value 0..127
 LED NOTE 53 57 velocity CH 0 7  # LED-output channel significance (independent of the PAD's own CH -- see above)
   COLOR off 0
   COLOR on  1
+INIT SYSEX F0 47 7F 29 60 00 04 40 00 00 00 F7  # opaque bytes, sent on connect (v3)
 ```
 
 `CH <lo> <hi>` (0..15, 0-indexed -- NOT `MIDI_CHANNEL`'s 1-indexed "any"
@@ -474,6 +507,21 @@ channel-agnostic, unchanged. See "Per-Range Channel Significance (v2)"
 above for what it means and `samples/apc40.mdef`/`samples/apc40-original.mdef`
 for a worked, protocol-doc-cited example (the full 8-track x 5-scene
 clip-launch grid).
+
+`INIT SYSEX <hex bytes...>` (P1.1) is a top-level line, zero or more,
+order preserved -- each is one complete outbound MIDI message (typically a
+full `F0...F7` SysEx frame) sent verbatim, in declaration order, once the
+controller's MIDI-out path comes up (`controller_init.h`'s
+`sendControllerInit`, wired from `midi_uart_task`/`usb_midi_input.cpp`'s
+device-connect handler). Each byte token is exactly two hex digits
+(case-insensitive); the grammar validates the hex encoding and the
+MDEF_MAX_INIT_BLOB_BYTES-per-line size limit, but never the message's own
+framing or meaning -- that stays opaque all the way to the wire, which is
+what makes one controller's mode-set handshake and another's LED-enable
+message the same mechanism with different data. Omitting `INIT` (every
+`.mdef` written before it existed) sends nothing, unchanged. See
+`samples/apc40.mdef`/`samples/apc40-original.mdef` for the APC40's real
+"Generic Mode" (Mode 0) handshake, cited against Akai's own protocol docs.
 
 A `.show` file embeds one with `CONTROLLER <deffile>` (mirrors `FIXTURE
 <deffile> <universe> <address>`), folding the compiled MDF1 blob into the SHW1
@@ -501,14 +549,17 @@ full writeup and the compiler's validation/overlap-detection rules.
 - MIDI 2.0 / MPE. 14-bit CC (RPN/NRPN). Running status (handled in
   `MidiByteReader`, `midi_realtime.h`, not this format). MIDI Clock/transport
   (`BeatClock`).
-- SysEx (device inquiry, the APC40's own mode-switch handshake). **Follow-up
-  flag:** Akai's protocol puts the APC40 into "Generic Mode" (Mode 0) --
-  the note/CC layout this format and `samples/apc40*.mdef` assume -- via a
-  SysEx message on connect; a real unit left in its default Ableton-Live
-  mode may not respond with these addresses until that handshake is sent.
-  Not implemented here; out of scope for this parser/format, but worth
-  wiring into the USB-MIDI device bring-up path (`usb_midi_input.cpp`)
-  before shipping real APC40 support.
+- **Inbound/bidirectional SysEx** (device inquiry replies, any handshake
+  that reads a response back) -- `INIT SYSEX` (v3, above) is send-only, by
+  design: the firmware emits the declared bytes and never waits for or
+  parses a reply. This is what let the APC40's "Generic Mode" (Mode 0)
+  handshake -- previously a documented follow-up flag here -- become a
+  `.mdef` fact instead of a C++ special case: `samples/apc40*.mdef` now
+  declare the real Mode-0 `INIT SYSEX` line (cited against Akai's own
+  protocol docs), sent from `controller_init.h`'s `sendControllerInit` via
+  `midi_uart_task` (DIN, at boot) or `usb_midi_input.cpp`'s device-connect
+  handler (USB-MIDI hot-plug). A device inquiry response, or any other
+  reply a controller might send back, is still out of scope.
 
 # CFG1 Device Config Format
 

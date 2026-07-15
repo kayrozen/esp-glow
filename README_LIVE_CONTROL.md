@@ -52,12 +52,12 @@ struct ControlEvent {
 };
 ```
 
-Events are type-checked during dispatch: a Button event sent to a Fader binding (or vice versa) is silently ignored. `Aftertouch`/`PitchBend`/`Program` events are parsed and queued like any other `ControlEvent`, but `LiveControl` has no built-in `ActionKind` binding for them yet -- they're reported for a future binding to consume (e.g. via `glow.bind.*`), not silently dropped at the parser.
+Events are type-checked during dispatch: a Button event sent to a Fader binding (or vice versa) is silently ignored. `Aftertouch`/`PitchBend`/`Program` events are parsed and queued like any other `ControlEvent`, and (P1.2) each has a binding path now: `Fader`/`PitchBend`/`Aftertouch` all feed the same continuous `ActionKind`s (see below), and `Program` is a scene selector -- see "Continuous vs. Discrete (P1.2)".
 
 ## Action Types
 
 ```cpp
-enum class ActionKind : uint8_t { CueFlash, CueToggle, SceneGo, SceneToggle, Master };
+enum class ActionKind : uint8_t { CueFlash, CueToggle, SceneGo, SceneToggle, Master, CueLevel, ParamSet };
 ```
 
 ### CueFlash (Button-only)
@@ -86,26 +86,61 @@ Latch scene toggle:
 - **Press (latched)** → `releaseScene(sceneId, t)`, set latched=false
 - **Release** → ignored (no-op)
 
-### Master (Fader-only)
-Grandmaster level:
-- **Fader change** → store `value` clamped to [0,1]
-- **Read** → `LiveControl::masterLevel()` returns the last stored level
+### Master / CueLevel / ParamSet (continuous -- Fader, PitchBend, or Aftertouch)
+P1.2: these three `ActionKind`s are the "continuous" side of the split
+below -- any source that reports a normalized `value ∈ [0,1]` (Fader,
+PitchBend, poly/channel Aftertouch) can drive any of them, through the one
+shared dispatch path (`LiveControl::handleContinuous`):
+- **Master** -- store `value` clamped to [0,1]; read via `LiveControl::masterLevel()`. The control layer only tracks the level; the firmware applies it (e.g., as a global brightness scale).
+- **CueLevel** -- `ShowController::setManualLevel(cueId, value)`: pins the cue's weight at `value`, bypassing its normal fade-in/hold/fade-out state machine while held. `value <= 0` releases manual control and deactivates the cue immediately (no fade) -- "fader down" means "off". A fader, the pitch wheel, or channel pressure can all "bump" a cue this way.
+- **ParamSet** -- writes into a named parameter slot (`LiveControl::internParam`/`paramValue`), read back from Fennel via `glow.param.get`. This is how a continuous source drives an *effect's* parameter (e.g. hue, a chorus depth) rather than a cue or the grandmaster.
 
-The control layer only tracks the master level; the firmware applies it (e.g., as a global brightness scale).
+## Continuous vs. Discrete (P1.2)
+
+Rather than one `ActionKind` per MIDI event type, bindings split by control
+**shape**, not event type:
+
+- **Continuous** (`Fader`, `PitchBend`, `Aftertouch` -- poly or channel
+  pressure, both parsed as `Aftertouch`, see the MIDI Parsing table above)
+  all target `Master`/`CueLevel`/`ParamSet` through one binding path
+  (`LiveControl::bindContinuous`, called by `bindFader`/`bindPitchBend`/
+  `bindPressure`). An APC40's fader, a keyboard's pitch wheel, and a
+  breath controller's channel pressure all drive the exact same actions --
+  there is no per-controller or per-event-type branch anywhere in this
+  dispatch.
+- **Discrete** (`Button`, and `Program` as a **scene selector**) target
+  `CueFlash`/`CueToggle`/`SceneGo`/`SceneToggle`. Program Change is
+  naturally a preset selector: `LiveControl::bindProgram()` enables
+  "program N → `ShowController::goScene(N, t)`" -- the incoming program
+  number *is* the target scene id, so there's no per-value binding to
+  register (unlike every other `bind*` call, `bindProgram()` takes no
+  controlId/targetId at all).
+
+`PitchBend` and channel-`Aftertouch` events always carry `id == 0`
+(`parseMidi` never reports a channel-significant one) -- `bindPitchBend`/
+`bindPressure` take no `controlId` for that reason, unlike `bindButton`/
+`bindFader` which address a specific note/CC number.
 
 ## Binding Model
 
 ```cpp
 LiveControl live(showController);
 
-// Button binding
+// Button binding (discrete)
 live.bindButton(controlId, ActionKind::CueFlash, targetCueId);
 live.bindButton(controlId, ActionKind::CueToggle, targetCueId);
 live.bindButton(controlId, ActionKind::SceneGo, targetSceneId);
 live.bindButton(controlId, ActionKind::SceneToggle, targetSceneId);
 
-// Fader binding (only Master supported here)
+// Continuous bindings -- one path (bindContinuous), three convenience wrappers
 live.bindFader(controlId, ActionKind::Master);
+live.bindFader(controlId, ActionKind::CueLevel, targetCueId);
+live.bindFader(controlId, ActionKind::ParamSet, live.internParam("hue"));
+live.bindPitchBend(ActionKind::ParamSet, live.internParam("hue"));  // no controlId -- id is always 0
+live.bindPressure(ActionKind::CueLevel, targetCueId);               // channel pressure, id always 0
+
+// Program Change as a scene selector (discrete, no controlId/targetId)
+live.bindProgram();
 
 // Dispatch
 ControlEvent ev = {...};
@@ -113,15 +148,17 @@ live.handle(ev, timeInSeconds);
 
 // Query
 float level = live.masterLevel();
+float hue = live.paramValue("hue");  // 0.0f if never bound/set
 ```
 
 Bindings are stored in a vector that grows at setup time only. No heap allocation during dispatch. Unbound ids and type mismatches are silently ignored.
 
-## Fennel API: `glow.bind.*` / `glow.led.*`
+## Fennel API: `glow.bind.*` / `glow.param.*` / `glow.led.*`
 
-`LiveControl::bindButton`/`bindFader`/`clear` are also reachable from Fennel
-(see `glow_lua_api.h`), so a show's bindings can be defined live in
-`boot.fnl` instead of hardcoded C++:
+`LiveControl::bindButton`/`bindFader`/`bindPitchBend`/`bindPressure`/
+`bindProgram`/`clear` are also reachable from Fennel (see `glow_lua_api.h`),
+so a show's bindings can be defined live in `boot.fnl` instead of
+hardcoded C++:
 
 ```fennel
 (glow.bind.pad 53 :flash :chorus)      ; note 53 -> momentary cue (CueFlash)
@@ -131,13 +168,25 @@ Bindings are stored in a vector that grows at setup time only. No heap allocatio
                                         ; declarations (FORMAT.md's resolvePadXY) --
                                         ; the APC40's clip-launch grid, e.g.
 (glow.bind.fader 48 :master)           ; CC 48 -> grandmaster level
-(glow.bind.clear)                       ; wipe every binding (and every
+(glow.bind.fader 7 :cue-level :chorus) ; CC 7 -> hold :chorus at this fader's level
+(glow.bind.fader 8 :param :depth)      ; CC 8 -> drive a named effect parameter
+(glow.bind.pitchbend :param :hue)      ; the wheel drives a parameter -- any
+                                        ; controller with a wheel
+(glow.bind.pressure :cue-level :chorus); channel pressure holds a cue's level
+(glow.bind.program :scene)             ; program-change = scene selector
+(glow.param.get :hue)                  ; read back whatever last drove :hue (0 if unset)
+(glow.bind.clear)                       ; wipe every binding (and every ParamSet
+                                         ; slot, the Program selector, and every
                                          ; glow.led.auto tracker -- see below)
 ```
 
 `glow.bind.pad`'s cue name must already be defined (`glow.cue.define`); an
-unknown name is a Lua error, same as `glow.cue.go`. `glow.bind.fader` only
-supports `:master` today (the only fader `ActionKind` `LiveControl` has).
+unknown name is a Lua error, same as `glow.cue.go`. `glow.bind.fader`/
+`glow.bind.pitchbend`/`glow.bind.pressure` all share the same target
+vocabulary: `:master` (no target argument), `:cue-level <cue-name>`, or
+`:param <name>` -- an unknown action keyword, or an unknown cue name for
+`:cue-level`, is a Lua error. `glow.bind.program` only accepts `:scene`
+(there is no other discrete target Program Change could reasonably mean).
 
 `glow.bind.pad-xy` is a no-op (not an error) when there's no `.mdef`/LED
 capability wired at all, or the `(col, row)` coordinate is out of range for
@@ -245,29 +294,37 @@ else) -- not a blanket "len < 3":
 
 - Web UI frontend (HTML/CSS/JS) — separate project
 - Full OSC spec (bundles, all type tags, timetags) — address + one scalar arg only
-- Bidirectional web state reflection — input-only for now (MIDI LED feedback
-  IS implemented, see `glow.led.*` above and FORMAT.md's MDF1 section)
-- Fader crossfaders for manual cue mixing — requires `setManualLevel(cueId, level)` on ShowController
 - MIDI clock, beat sync, tap tempo — separate concern
-- SysEx (device inquiry, the APC40's mode-switch handshake) — see FORMAT.md's
-  MDF1 "Out of Scope" for the follow-up flag on the APC40 specifically.
+- Inbound/bidirectional SysEx (device inquiry replies, a handshake that
+  reads a response back) — `INIT SYSEX` (FORMAT.md's MDF1 v3) is send-only:
+  a controller's own mode-switch handshake (e.g. the APC40's "Generic
+  Mode") is now a `.mdef` fact, sent on connect via `controller_init.h`'s
+  `sendControllerInit` — see FORMAT.md's "INIT Blob Table (v3)".
 - MPE, 14-bit CC (RPN/NRPN), running status (that's `MidiByteReader`,
   `midi_realtime.h`) — not this parser's job.
-- `Aftertouch`/`PitchBend`/`Program` events are parsed but have no built-in
-  `ActionKind`/binding yet (see "Control Types and Events" above) — a future
-  `glow.bind.*` addition, not implemented here.
-- Modifying `ShowController` or other existing modules
+- Modifying `ShowController` or other existing modules, with one deliberate
+  P1.2 exception: `ShowController::setManualLevel` (a small, additive
+  method backing `ActionKind::CueLevel` -- see "Master / CueLevel /
+  ParamSet" above), since "hold a cue at a manual level" has no way to
+  exist without ShowController itself knowing how to pin a cue's weight.
+  Nothing about `go`/`release`/`goScene`/`releaseScene`/`evaluate`'s
+  existing behavior changed.
 - USB-MIDI host — implemented (`usb_midi_input.cpp`), gated behind
   `CONFIG_GLOW_USB_MIDI_HOST` (Kconfig.projbuild), OFF by default. `.mdef`/
   LED feedback/MIDI OUT still only work over the DIN transport -- USB-MIDI
-  is input-only here, structurally identical to `midi_input.cpp`: strip
-  USB-MIDI event packets to raw MIDI bytes, call the existing host-tested
-  `parseMidi`, push onto the same control queue. Nothing else. Enabling it
-  is still a board decision, not just a firmware flag: USB host mode means
-  the ESP32 must supply 5V VBUS to the controller (a USB-A receptacle, a
-  power path able to source a few hundred mA, ideally with over-current
-  protection) -- a board wired for DIN-MIDI only has no VBUS path to offer
-  a controller. A USB-host-to-DIN adapter (~$20) remains the lower-risk
+  is input-only for ordinary control/LED traffic, structurally identical to
+  `midi_input.cpp`: strip USB-MIDI event packets to raw MIDI bytes, call
+  the existing host-tested `parseMidi`, push onto the same control queue.
+  The one exception is `INIT SYSEX` send-on-connect (P1.1): if the loaded
+  `.mdef` declares init blobs and the hot-plugged device's MIDIStreaming
+  interface has a bulk OUT endpoint, they're packed into USB-MIDI event
+  packets (`usb_midi_packetizer.h`) and sent once, the same handshake DIN
+  gets from `midi_uart_task`. Enabling USB-MIDI host at all is still a
+  board decision, not just a firmware flag: USB host mode means the ESP32
+  must supply 5V VBUS to the controller (a USB-A receptacle, a power path
+  able to source a few hundred mA, ideally with over-current protection)
+  -- a board wired for DIN-MIDI only has no VBUS path to offer a
+  controller. A USB-host-to-DIN adapter (~$20) remains the lower-risk
   option if that board change isn't worth it yet.
 
 ## Testing
@@ -293,5 +350,17 @@ The test suite covers:
    fixes (`test_channel_significant_pads_fire_independently`)
 8. `glow.bind.pad-xy` grid resolution and graceful degradation
    (`test_glow_lua_api.cpp`)
+9. P1.2: every continuous source (Fader/PitchBend/Aftertouch) reaching
+   every continuous `ActionKind` (Master/CueLevel/ParamSet) through the one
+   `bindContinuous` path; Program Change selecting a scene by number;
+   `glow.bind.fader`/`pitchbend`/`pressure`/`program`/`glow.param.get`'s
+   Fennel surface, including their error paths (`test_live_control.cpp`,
+   `test_glow_lua_api.cpp`); `ShowController::setManualLevel`'s weight-pin/
+   clamp/deactivate/`stopAll()` behavior (`test_show_control.cpp`) -- and
+   the controller-agnostic regression test itself: two controllers running
+   the same bindings, one with a wheel and one without, where the wheel
+   binding simply never fires on the controller that never sends PitchBend
+   (`test_two_controllers_same_show_wheel_only_fires_on_one`,
+   `test_two_controllers_pitchbend_inert_without_wheel`).
 
 All tests link against the real `ShowController` with proper fixture profiles and effect evaluation.

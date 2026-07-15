@@ -75,6 +75,18 @@ std::vector<uint8_t> encodeProfile(const FixtureDef& def);
 // several distinct physical controls (see FORMAT.md's "Per-range channel
 // significance" and samples/apc40.mdef). Omitting CH (every existing .mdef)
 // keeps that range channel-agnostic, unchanged from before CH existed.
+//
+// INIT SYSEX <hex bytes...>   # opaque, zero or more, order preserved (v3)
+//
+// Each INIT SYSEX line is one complete outbound MIDI message (typically a
+// full F0...F7 SysEx frame, but the grammar and MDF1 v3 never check that --
+// the bytes are opaque), sent verbatim, once, in declaration order, when
+// the controller's MIDI-out path comes up (controller_init.h). This is
+// what makes a controller's own mode-set/LED-enable handshake (e.g. the
+// APC40's "Generic Mode" SysEx) a `.mdef` fact instead of a C++ special
+// case -- see FORMAT.md's "INIT Blob Table (v3)" and samples/apc40*.mdef
+// for a real, protocol-doc-cited example. Omitting INIT (every .mdef
+// written before it existed) sends nothing, unchanged.
 
 // Parse a .mdef text and populate `out`. Returns false on any parse error.
 // On failure, sets `err` to a non-empty error message.

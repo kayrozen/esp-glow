@@ -12,8 +12,11 @@
 
 #include "usb_midi_input.h"
 
-#include "control_queue.h"  // IControlEventQueue, ControlEvent (transitively)
-#include "live_control.h"   // parseMidi
+#include "control_queue.h"        // IControlEventQueue, ControlEvent (transitively)
+#include "live_control.h"         // parseMidi
+#include "mdef.h"                 // MidiControllerProfile
+#include "controller_init.h"      // IRawMidiOutput, sendControllerInit (P1.1)
+#include "usb_midi_packetizer.h"  // packUsbMidiEventPackets (P1.1)
 
 #include "usb/usb_host.h"
 #include "usb/usb_helpers.h"
@@ -25,6 +28,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <vector>
 
 static const char* TAG = "usb_midi";
 
@@ -53,6 +57,7 @@ constexpr size_t kInBufferSize = 64;
 enum class State { WaitingForDevice, Connected, Error };
 
 IControlEventQueue* g_queue = nullptr;
+const MidiControllerProfile* g_controllerProfile = nullptr;  // P1.1: INIT SYSEX source
 usb_host_client_handle_t g_clientHdl = nullptr;
 usb_device_handle_t g_devHdl = nullptr;
 usb_transfer_t* g_inTransfer = nullptr;
@@ -71,6 +76,59 @@ void teardown_device() {
     g_devHdl = nullptr;
   }
   g_state = State::WaitingForDevice;
+}
+
+// P1.1: fire-and-forget OUT transfer completion -- INIT SYSEX is a one-shot
+// send, nothing downstream is waiting on it, so the callback's only job is
+// to report a failure and free the transfer (the IN transfer above is
+// reused across the device's whole session; this one is not).
+void init_out_transfer_cb(usb_transfer_t* transfer) {
+  if (transfer->status != USB_TRANSFER_STATUS_COMPLETED) {
+    ESP_LOGW(TAG, "INIT SYSEX OUT transfer finished with status=%d", (int)transfer->status);
+  }
+  usb_host_transfer_free(transfer);
+}
+
+// P1.1: pack every INIT SYSEX blob in `g_controllerProfile` (mdef.h) into
+// USB-MIDI event packets and submit one OUT transfer to `outEpAddr`.
+// No-op if there's no controller profile, it declared no init blobs, or
+// `outEpAddr` is 0 (the device's MIDIStreaming interface has no bulk OUT
+// endpoint -- input-only hardware, same no-op as DIN's txGpio < 0).
+class UsbInitPacketSink : public IRawMidiOutput {
+public:
+  void sendRaw(const uint8_t* bytes, size_t len) override {
+    packUsbMidiEventPackets(bytes, len, packets);
+  }
+  std::vector<uint8_t> packets;
+};
+
+void send_controller_init_over_usb(usb_device_handle_t dev, uint8_t outEpAddr) {
+  if (g_controllerProfile == nullptr || outEpAddr == 0) return;
+
+  UsbInitPacketSink sink;
+  sendControllerInit(*g_controllerProfile, sink);  // no-op loop if initCount == 0
+  if (sink.packets.empty()) return;
+
+  usb_transfer_t* outTransfer;
+  if (usb_host_transfer_alloc(sink.packets.size(), 0, &outTransfer) != ESP_OK) {
+    ESP_LOGW(TAG, "INIT SYSEX: OUT transfer_alloc failed; controller init skipped");
+    return;
+  }
+  std::memcpy(outTransfer->data_buffer, sink.packets.data(), sink.packets.size());
+  outTransfer->device_handle = dev;
+  outTransfer->bEndpointAddress = outEpAddr;
+  outTransfer->callback = init_out_transfer_cb;
+  outTransfer->context = nullptr;
+  outTransfer->num_bytes = sink.packets.size();
+
+  esp_err_t err = usb_host_transfer_submit(outTransfer);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "INIT SYSEX: OUT transfer_submit failed (%d)", (int)err);
+    usb_host_transfer_free(outTransfer);
+    return;
+  }
+  ESP_LOGI(TAG, "INIT SYSEX: sent %u blob(s) (%u USB-MIDI packet bytes) to ep=0x%02x",
+           (unsigned)g_controllerProfile->initCount, (unsigned)sink.packets.size(), (unsigned)outEpAddr);
 }
 
 // Called from usb_host_client_handle_events() (our own task's context, not
@@ -100,9 +158,14 @@ void in_transfer_cb(usb_transfer_t* transfer) {
 }
 
 // USB Audio Class parsing: walk the device's active configuration for an
-// Audio/MIDIStreaming interface with a bulk IN endpoint. Returns true and
-// fills outIntfNum/outEpAddr on success.
-bool find_midistreaming_bulk_in(const usb_config_desc_t* cfg, uint8_t& outIntfNum, uint8_t& outEpAddr) {
+// Audio/MIDIStreaming interface with a bulk IN endpoint (required -- this
+// transport is input-first) and, on the same interface, a bulk OUT
+// endpoint (optional -- P1.1's INIT SYSEX send-on-connect only; see
+// usb_midi_input.h's header note on why this never grows into general
+// MIDI OUT). Returns true and fills outIntfNum/outInEpAddr on success;
+// outOutEpAddr is 0 if the interface has no bulk OUT endpoint at all.
+bool find_midistreaming_endpoints(const usb_config_desc_t* cfg, uint8_t& outIntfNum,
+                                  uint8_t& outInEpAddr, uint8_t& outOutEpAddr) {
   for (int i = 0; i < cfg->bNumInterfaces; ++i) {
     int offset = 0;
     const usb_intf_desc_t* intf = usb_parse_interface_descriptor(cfg, i, 0, &offset);
@@ -110,17 +173,22 @@ bool find_midistreaming_bulk_in(const usb_config_desc_t* cfg, uint8_t& outIntfNu
     if (intf->bInterfaceClass != kUsbClassAudio || intf->bInterfaceSubClass != kUsbSubclassMidiStreaming) {
       continue;
     }
+    uint8_t inEp = 0, outEp = 0;
     for (int e = 0; e < intf->bNumEndpoints; ++e) {
       int epOffset = offset;
       const usb_ep_desc_t* ep = usb_parse_endpoint_descriptor_by_index(intf, e, cfg->wTotalLength, &epOffset);
       if (ep == nullptr) break;
       bool isIn = (ep->bEndpointAddress & kUsbEndpointDirInMask) != 0;
       bool isBulk = (ep->bmAttributes & kUsbEndpointXferTypeMask) == kUsbEndpointXferBulk;
-      if (isIn && isBulk) {
-        outIntfNum = intf->bInterfaceNumber;
-        outEpAddr = ep->bEndpointAddress;
-        return true;
-      }
+      if (!isBulk) continue;
+      if (isIn && inEp == 0) inEp = ep->bEndpointAddress;
+      else if (!isIn && outEp == 0) outEp = ep->bEndpointAddress;
+    }
+    if (inEp != 0) {
+      outIntfNum = intf->bInterfaceNumber;
+      outInEpAddr = inEp;
+      outOutEpAddr = outEp;
+      return true;
     }
   }
   return false;
@@ -148,8 +216,8 @@ void handle_new_device(uint8_t addr) {
     return;
   }
 
-  uint8_t intfNum = 0, epAddr = 0;
-  if (!find_midistreaming_bulk_in(cfg, intfNum, epAddr)) {
+  uint8_t intfNum = 0, epAddr = 0, outEpAddr = 0;
+  if (!find_midistreaming_endpoints(cfg, intfNum, epAddr, outEpAddr)) {
     ESP_LOGW(TAG, "device addr=%d has no MIDIStreaming bulk-IN interface; ignoring (not a class-compliant USB-MIDI device)", (int)addr);
     usb_host_device_close(g_clientHdl, dev);
     return;
@@ -188,6 +256,13 @@ void handle_new_device(uint8_t addr) {
 
   g_state = State::Connected;
   ESP_LOGI(TAG, "device connected: addr=%d intf=%d ep=0x%02x -- streaming USB-MIDI", (int)addr, (int)intfNum, (int)epAddr);
+
+  // P1.1: controller init handshake -- IN streaming is already submitted
+  // above, so this can't delay it; a failed/skipped init send never blocks
+  // ordinary input. outEpAddr == 0 (no bulk OUT endpoint on this device)
+  // or no controller profile wired is a silent no-op, same contract as
+  // DIN MIDI OUT's txGpio < 0 (see send_controller_init_over_usb).
+  send_controller_init_over_usb(dev, outEpAddr);
 }
 
 void handle_device_gone(usb_device_handle_t devHdl) {
@@ -223,8 +298,9 @@ void usb_lib_daemon_task(void* /*ctx*/) {
 
 }  // namespace
 
-void usb_midi_input_init(IControlEventQueue& queue) {
+void usb_midi_input_init(IControlEventQueue& queue, const MidiControllerProfile* controllerProfile) {
   g_queue = &queue;
+  g_controllerProfile = controllerProfile;
 }
 
 void usb_midi_input_handle_packet(const uint8_t packet[4]) {

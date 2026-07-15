@@ -34,9 +34,30 @@
 # channel 8 is the master-track alias). The original APC40's clip grid uses
 # a fixed green/red/yellow LED palette (not the mkII's RGB velocity table)
 # but the same note/channel addressing underneath.
+#
+# INIT SYSEX (P1.1): the doc states the unit "defaults to Mode 0 on startup",
+# but a unit previously switched to Ableton (Live) Mode by a DAW stays there
+# until told otherwise -- this line is that handshake. Transcribed
+# byte-for-byte from "Outbound APC40 Sysex Message Types" / "Outbound
+# Message Type 0: Introduction" / "Format of Type 0 outbound message"
+# (Rev 1 protocol doc, pages 6-7):
+#   byte:  F0   47   <DeviceID> 73   60   00 04      <mode>  <verHi> <verLo> <bugfix> F7
+#   field: SysEx Akai  device   model  msg  datalen    App/Cfg  PC application  SysEx
+#          start  ID    ID      ID    type  (0x0004)   ID       software ver.  end
+# Manufacturers ID Byte 0x47 and Message type identifier 0x60 ("Introduction")
+# are direct field values from that table; <DeviceID> uses the doc's own
+# recommendation (page 4's general SysEx format section): "a value of 0x7F
+# (broadcast) should be used" since only one APC40 is ever connected at a
+# time. Product model ID 0x73 is this doc's own header-table value for the
+# APC40 (distinct from the mkII's 0x29 -- see samples/apc40.mdef). <mode>
+# 0x40 is "Generic Mode" (Mode 0) -- this doc's own Mode table: "0 | 0x40 |
+# Generic Mode". The trailing three bytes are this host's own
+# PC-application version (major/minor/bugfix), which the unit's firmware
+# never validates against anything -- 0/0/0 is used here.
 
 CONTROLLER Akai APC40
 MIDI_CHANNEL 0
+INIT SYSEX F0 47 7F 73 60 00 04 40 00 00 00 F7
 
 # --- Pads (Note-on buttons) -------------------------------------------
 # Per-track button rows: RECORD ARM, SOLO, ACTIVATOR, TRACK SELECTION,

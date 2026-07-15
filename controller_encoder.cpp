@@ -32,15 +32,28 @@ std::vector<uint8_t> ControllerBuilder::encode(std::string& err) const {
     err = "too many COLOR entries across all LED ranges (max " + std::to_string(MDEF_MAX_COLORS) + ")";
     return {};
   }
+  if (initBlobs.size() > static_cast<size_t>(MDEF_MAX_INIT_BLOBS)) {
+    err = "too many INIT SYSEX lines (max " + std::to_string(MDEF_MAX_INIT_BLOBS) + ")";
+    return {};
+  }
+  for (const auto& b : initBlobs) {
+    if (b.size() > static_cast<size_t>(MDEF_MAX_INIT_BLOB_BYTES)) {
+      err = "INIT SYSEX blob too large (max " + std::to_string(MDEF_MAX_INIT_BLOB_BYTES) + " bytes)";
+      return {};
+    }
+  }
 
-  // Version 2 only once at least one pad/fader/LED range declares a channel
-  // range -- otherwise emit version 1, byte-identical to before v2 existed
-  // (same convention as PFX1/PFX2's function-range table, FORMAT.md).
+  // Version 2 once at least one pad/fader/LED range declares a channel
+  // range; version 3 once at least one INIT SYSEX line exists (v3 is
+  // additive on top of v2's wider records, so it implies them too --
+  // otherwise emit version 1, byte-identical to before v2/v3 existed (same
+  // convention as PFX1/PFX2's function-range table, FORMAT.md).
   bool anyChannelRange = false;
   for (const auto& p : pads) if (p.channelFrom != kChannelAgnostic) anyChannelRange = true;
   for (const auto& f : faders) if (f.channelFrom != kChannelAgnostic) anyChannelRange = true;
   for (const auto& l : leds) if (l.channelFrom != kChannelAgnostic) anyChannelRange = true;
-  uint8_t version = anyChannelRange ? 2 : 1;
+  bool hasInit = !initBlobs.empty();
+  uint8_t version = hasInit ? 3 : (anyChannelRange ? 2 : 1);
 
   // Header
   blob.push_back('M');
@@ -56,13 +69,16 @@ std::vector<uint8_t> ControllerBuilder::encode(std::string& err) const {
   blob.push_back(static_cast<uint8_t>(encoders.size()));
   blob.push_back(static_cast<uint8_t>(leds.size()));
   blob.push_back(static_cast<uint8_t>(totalColors));
+  if (version == 3) {
+    blob.push_back(static_cast<uint8_t>(initBlobs.size()));
+  }
 
   for (char c : name) blob.push_back(static_cast<uint8_t>(c));
 
   for (const auto& p : pads) {
     blob.push_back(p.noteFrom);
     blob.push_back(p.noteTo);
-    if (version == 2) {
+    if (version >= 2) {
       blob.push_back(p.channelFrom);
       blob.push_back(p.channelTo);
     }
@@ -89,7 +105,7 @@ std::vector<uint8_t> ControllerBuilder::encode(std::string& err) const {
     blob.push_back(f.ccTo);
     blob.push_back(faderNameOffs[i] & 0xFF);
     blob.push_back((faderNameOffs[i] >> 8) & 0xFF);
-    if (version == 2) {
+    if (version >= 2) {
       blob.push_back(f.channelFrom);
       blob.push_back(f.channelTo);
     }
@@ -114,7 +130,7 @@ std::vector<uint8_t> ControllerBuilder::encode(std::string& err) const {
     blob.push_back(colorCursor & 0xFF);
     blob.push_back((colorCursor >> 8) & 0xFF);
     blob.push_back(static_cast<uint8_t>(l.colors.size()));
-    if (version == 2) {
+    if (version >= 2) {
       blob.push_back(l.channelFrom);
       blob.push_back(l.channelTo);
     }
@@ -132,6 +148,16 @@ std::vector<uint8_t> ControllerBuilder::encode(std::string& err) const {
     blob.push_back(c.first & 0xFF);
     blob.push_back((c.first >> 8) & 0xFF);
     blob.push_back(c.second);
+  }
+
+  // v3 init-blob table: sits between the colour table and the trailing
+  // name blob (mdef.cpp mirrors this exact layout) -- each entry a 1-byte
+  // length followed by that many raw bytes, in declaration order.
+  if (version == 3) {
+    for (const auto& b : initBlobs) {
+      blob.push_back(static_cast<uint8_t>(b.size()));
+      for (uint8_t byte : b) blob.push_back(byte);
+    }
   }
 
   if (nameBlob.size() > static_cast<size_t>(MDEF_MAX_NAME_BLOB)) {

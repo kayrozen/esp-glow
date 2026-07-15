@@ -33,9 +33,32 @@
 # controllers": the TRACK FADER control's MIDI Channel column reads "0-8 =
 # Tracks 1-8, Master" -- one CC number (7), channel 0..7 selects the track
 # fader, channel 8 is the master-track alias.
+#
+# INIT SYSEX (P1.1): the mkII defaults to Mode 0 on startup already, per the
+# doc, but a real unit previously switched into Ableton Live Mode by a DAW
+# needs this sent to return to Generic Mode -- without it, none of the
+# note/CC addressing above is guaranteed. Transcribed byte-for-byte from
+# "Outbound APC40 Mk2 Sysex Message Types" / "Outbound Message Type 0:
+# Introduction" / "Format of Type 0 outbound message" (protocol doc pages
+# 10-12):
+#   byte:  F0   47   <DeviceID> 29   60   00 04      <mode>  <verHi> <verLo> <bugfix> F7
+#   field: SysEx Akai  device   model  msg  datalen    App/Cfg  PC application  SysEx
+#          start  ID    ID      ID    type  (0x0004)   ID       software ver.  end
+# Manufacturers ID Byte 0x47 and Message type identifier 0x60 ("Introduction")
+# are direct field values from that table. <DeviceID> uses the doc's own
+# recommendation from "General Format of MIDI System Exclusive message"
+# (page 4): "a value of 0x7F (broadcast) should be used" since only one
+# APC40 Mk2 is ever connected at a time. Product model ID 0x29 is this
+# table's own row for the mkII. <mode> 0x40 is "Generic Mode" (Mode 0) --
+# see the Mode table right above that section: "0 | 0x40 | Generic Mode".
+# The trailing three bytes are this host's own PC-application version
+# (major/minor/bugfix), which the mkII's firmware never validates against
+# anything -- 0/0/0 is used here, matching the worked example already given
+# in this project's task spec for this exact grammar line.
 
 CONTROLLER Akai APC40 mkII
 MIDI_CHANNEL 0
+INIT SYSEX F0 47 7F 29 60 00 04 40 00 00 00 F7
 
 # --- Pads (Note-on buttons) -------------------------------------------
 # 8-track x 5-scene RGB clip-launch grid: CLIP LAUNCH note = scene row

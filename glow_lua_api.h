@@ -69,6 +69,23 @@ public:
 //                                 (no .mdef) or the coordinate is out of
 //                                 range, same graceful-degradation contract
 //                                 as glow.led.*.
+//   glow.bind.pitchbend/pressure — P1.2: the same continuous-action
+//                                 vocabulary as glow.bind.fader (:master,
+//                                 :cue-level <cue>, :param <name>), fed by
+//                                 the pitch wheel / channel pressure instead
+//                                 of a CC number -- "any controller with a
+//                                 wheel" drives the same binding, no
+//                                 per-controller code (see live_control.h's
+//                                 ActionKind comment). No-op, not an error,
+//                                 on a controller that never sends the
+//                                 underlying message.
+//   glow.bind.program           — P1.2: Program Change as a scene selector
+//                                 ("program N -> scene N"); only :scene is
+//                                 valid (live_control.h's bindProgram).
+//   glow.param.get               — P1.2's ParamSet read side: an effect
+//                                 reads back whatever value a continuous
+//                                 binding last drove into a named parameter
+//                                 slot (0.0 if never bound/set).
 //   glow.led.set/auto          — wraps LedFeedback (nullable): LED feedback
 //                                 for a controller with a .mdef. No-op, not
 //                                 an error, when null or the addressed pad/
@@ -170,9 +187,13 @@ private:
   static int l_bind_pad(lua_State* L);
   static int l_bind_pad_xy(lua_State* L);
   static int l_bind_fader(lua_State* L);
+  static int l_bind_pitchbend(lua_State* L);
+  static int l_bind_pressure(lua_State* L);
+  static int l_bind_program(lua_State* L);
   static int l_bind_clear(lua_State* L);
   static int l_led_set(lua_State* L);
   static int l_led_auto(lua_State* L);
+  static int l_param_get(lua_State* L);
 
   static int l_wled_fx(lua_State* L);
   static int l_wled_color(lua_State* L);
@@ -181,6 +202,16 @@ private:
   static int l_wled_fx_broadcast(lua_State* L);
 
   static GlowLuaApi& self(lua_State* L);
+
+  // P1.2: shared target-vocabulary parser for glow.bind.pitchbend/pressure
+  // (and, in principle, any future continuous source) -- reads a
+  // ":master" | ":cue-level" | ":param" keyword at stack index `actionIdx`
+  // and (for cue-level/param) a target name at `targetIdx`, resolving it
+  // to the (ActionKind, targetId) pair LiveControl::bindContinuous expects.
+  // lua_error()s (never returns) on an unknown action keyword or an
+  // unknown cue name -- `fnName` names the call site in that message.
+  void resolveContinuousAction(lua_State* L, int actionIdx, int targetIdx, const char* fnName,
+                               ActionKind& actionOut, uint16_t& targetOut);
 
   // Resolves each entry of the Lua array-table on top of the stack (either
   // a Lua function, wrapped in a freshly-owned LuaEffect, or a

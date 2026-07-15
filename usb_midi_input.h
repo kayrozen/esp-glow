@@ -3,16 +3,26 @@
 #include <cstdint>
 
 class IControlEventQueue;
+struct MidiControllerProfile;
 
 //
 // USB-MIDI host input -- device transport (see usb_midi_input.cpp).
 //
-// Structurally identical to midi_input.cpp: parses MIDI bytes into
-// ControlEvents with the same host-tested parseMidi (live_control.h) and
-// pushes them onto the same control queue. The render task is the only
-// consumer of that queue; this transport never touches
-// LiveControl/ShowController/the Lua VM directly -- same invariant as
-// every other input (see control_queue.h's rationale).
+// Structurally identical to midi_input.cpp for its INPUT direction: parses
+// MIDI bytes into ControlEvents with the same host-tested parseMidi
+// (live_control.h) and pushes them onto the same control queue. The
+// render task is the only consumer of that queue; this transport never
+// touches LiveControl/ShowController/the Lua VM directly -- same
+// invariant as every other input (see control_queue.h's rationale).
+//
+// P1.1 added one OUTPUT capability, deliberately narrow: INIT SYSEX
+// send-on-connect (usb_midi_input_init's controllerProfile param, below).
+// This is NOT general MIDI OUT -- there is no LED-feedback IMidiOutput
+// wired to a USB-MIDI OUT endpoint, and there won't be until a real need
+// justifies claiming an OUT endpoint continuously instead of once at
+// connect time (a real APC40 is USB-only hardware, and Mode 0 must be set
+// before its pads/LEDs behave as the .mdef assumes -- FORMAT.md's
+// "INIT SYSEX" -- which is exactly why this one exception exists).
 //
 // WHERE THIS DIFFERS FROM midi_input.cpp
 //   DIN-MIDI is a raw byte stream over UART that this project frames
@@ -45,7 +55,17 @@ class IControlEventQueue;
 
 // Initialize the USB-MIDI input layer: the queue it pushes parsed
 // ControlEvents to. Must be called before usb_midi_host_task starts.
-void usb_midi_input_init(IControlEventQueue& queue);
+//
+// P1.1: `controllerProfile` (nullptr by default) is the loaded .mdef's
+// init blobs (controller_init.h) -- when non-null, every time a
+// class-compliant device hot-plugs AND the driver finds a bulk OUT
+// endpoint on its MIDIStreaming interface, this transport packs each
+// INIT SYSEX blob into USB-MIDI event packets (usb_midi_packetizer.h,
+// per the USB-MIDI 1.0 SysEx CIN convention) and submits one OUT
+// transfer, once. A device with no OUT endpoint (input-only hardware) or
+// a profile with no init blobs is a silent no-op -- same graceful-
+// degradation contract as DIN MIDI OUT's txGpio < 0 (midi_input.h).
+void usb_midi_input_init(IControlEventQueue& queue, const MidiControllerProfile* controllerProfile = nullptr);
 
 // Parses one 4-byte USB-MIDI event packet (byte 0: cable number + Code
 // Index Number: bytes 1..3: the raw MIDI message, zero-padded if shorter

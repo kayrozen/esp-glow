@@ -13,7 +13,12 @@
 //
 //   Device -> UI:
 //     { type: "config", cues: [{id,label,color,mode}], scenes: [{id,label}], hasMaster }
-//     { type: "state",  active: [0,3,5] }
+//     { type: "state",  active: [0,3,5], master: 0.75 }
+//     // P1.3: `state` is the device's source of truth for which cues are
+//     // active and the current grandmaster level -- pushed on change, and
+//     // in full to a client right after it connects. See app.js's onState
+//     // handler for how the UI reconciles its own optimistic guesses
+//     // against it.
 //     { type: "eval_result", seq: 7, ok: true|false, err?: "..." }
 //     { type: "scripts", names: ["boot","verse"] }
 //     { type: "script",  name: "verse", src: "..." }
@@ -92,7 +97,9 @@ export class WsClient {
     // listener fan-out if needed.
     this.cb = {
       config:     null,  // (cfg)  -> void
-      state:      null,  // (activeIds) -> void
+      state:      null,  // (activeIds, masterLevel|null) -> void -- P1.3: masterLevel
+                         // is null only if the device omitted the field entirely
+                         // (never happens from a real device; defensive for hand-built test frames)
       status:     null,  // (status, info?) -> void
       evalResult: null,  // ({seq, ok, err}) -> void
       scripts:    null,  // (names: string[]) -> void
@@ -240,7 +247,10 @@ export class WsClient {
       const active = Array.isArray(msg.active)
         ? msg.active.filter((x) => Number.isInteger(x) && x >= 0 && x <= 65535)
         : [];
-      if (this.cb.state) this.cb.state(active);
+      const master = typeof msg.master === "number" && isFinite(msg.master)
+        ? clamp01(msg.master)
+        : null;
+      if (this.cb.state) this.cb.state(active, master);
       return;
     }
     if (msg.type === "eval_result") {

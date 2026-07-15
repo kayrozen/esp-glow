@@ -51,6 +51,11 @@ struct ControllerBuilder {
   std::vector<ControllerFaderSpec> faders;
   std::vector<ControllerEncoderSpec> encoders;
   std::vector<ControllerLedSpec> leds;
+  // P1.1: `INIT SYSEX <hex bytes>` lines, in declaration order -- opaque,
+  // send-on-connect messages (mdef.h's MdefInitBlob). Empty (the default)
+  // keeps encode() emitting version 1/2 bytes exactly as before this field
+  // existed -- see FORMAT.md's "INIT Blob Table (v3)".
+  std::vector<std::vector<uint8_t>> initBlobs;
 
   // Encodes an MDF1 blob. Fails (returns an empty vector) if any count
   // exceeds its MDEF_MAX_* or the combined name/colour text overruns

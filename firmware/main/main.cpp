@@ -28,6 +28,7 @@
 //     MatrixMap entries.
 //   - Status LED: double-pulse (WiFi up) + fast blink (render).
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -209,13 +210,20 @@ static glow::IBeatEventQueue* g_beatQueue = nullptr;
 // bundle-loaded show has no cue metadata to expose yet either --
 // applyLoadedShow patches fixtures directly, it doesn't wrap them in cues
 // -- so richer per-bundle cue/scene metadata for the console remains a
-// natural follow-up, not solved here. web_input_init/send_state_to_ws
+// natural follow-up, not solved here. web_input_init/broadcast_state_if_changed
 // below stay written against this general (N cues, not just 0 or 1) shape
 // for whenever that follow-up lands.
-static WebCueInfo g_wsCues[1];
+static constexpr size_t kMaxWsCues = 1;
+static WebCueInfo g_wsCues[kMaxWsCues];
 static size_t     g_nWsCues = 0;
-static uint16_t   g_demoShowCueId = 0;  // ShowController cue id (isActive() takes this)
-static bool       g_hasDemoCue = false;
+// P1.3: g_wsCues[i]'s ShowController target cue id (the SECOND id space --
+// g_wsCues[i].id is the control id shared with MIDI/OSC via
+// LiveControl::bindButton's first argument; this is bindButton's THIRD
+// argument, the id ShowController::isActive/activeCueIds actually knows
+// about). broadcast_state_if_changed translates through this array to
+// report `state.active` in the control-id space the UI's config.cues[].id
+// already matches -- see web_protocol.h's WebCueInfo comment.
+static uint16_t   g_wsCueShowIds[kMaxWsCues];
 
 // Same controlId (0) is bound across web/MIDI/OSC -- one LiveControl
 // binding serves all three transports, since parseWebCommand/parseMidi/
@@ -523,18 +531,80 @@ static void send_eval_result_to_ws(void* /*ctx*/, uint32_t requestId, bool ok, c
   web_ws_broadcast(buf, n);
 }
 
-// Periodic `state` broadcast (Phase-4 feedback, web_protocol.h): lets every
-// connected console reflect the demo cue's actual on/off state even when
-// it was toggled from a different client, MIDI, or OSC. This is a UI
-// indicator, not a control path, so a once-a-second cadence (see
-// render_tick_hooks' frame counter) is plenty.
-static void send_state_to_ws() {
-  if (!g_hasDemoCue) return;
-  uint16_t activeId = g_wsCues[0].id;
-  bool active = g_controller.isActive(g_demoShowCueId);
+// P1.3: `state` (device-pushed active-cue ids + master level, web_protocol.h)
+// is source of truth -- every connected console reflects the real
+// ShowController/LiveControl state even when a cue was fired from a
+// DIFFERENT console, MIDI, or OSC, or from glow.cue.go in a live-coded
+// script. This is the same active-cue snapshot MIDI LED feedback reads
+// (g_ledFeedback->refresh, above, via ShowController::isActive) -- one
+// state, every surface mirrors it, by construction (both read
+// g_controller directly, no separate cache to drift out of sync).
+//
+// Two independent gates on whether an actual send happens:
+//  - CHANGE DETECTION (led_feedback.h's discipline, extended to WS): a
+//    static show emits nothing, forever, once its first state has been
+//    sent -- g_lastBroadcast* below tracks exactly what was last put on
+//    the wire, and a frame whose recomputed state matches it verbatim is
+//    a no-op.
+//  - RATE LIMIT: an ordinary change (e.g. the web UI's master fader being
+//    dragged at ~30 Hz) is capped to at most 20 sends/sec -- delayed to
+//    the next frame past the interval, never dropped (same "retried, not
+//    lost" contract as LedFeedback::pump's token bucket).
+// A forced send (web_input_note_new_client -- a client just connected and
+// has no idea what's active yet) bypasses the rate limit: it's a one-shot
+// correctness requirement for that client, not recurring traffic to
+// throttle.
+static bool activeIdSetsEqual(const uint16_t* a, size_t na, const uint16_t* b, size_t nb) {
+  if (na != nb) return false;
+  for (size_t i = 0; i < na; ++i) {
+    bool found = false;
+    for (size_t j = 0; j < nb; ++j) {
+      if (a[i] == b[j]) { found = true; break; }
+    }
+    if (!found) return false;
+  }
+  return true;
+}
+
+static uint16_t g_lastBroadcastActive[kMaxWsCues];
+static size_t   g_lastBroadcastActiveCount = 0;
+static float    g_lastBroadcastMaster = -1.0f;  // -1: never sent -- guarantees the first check differs
+static float    g_lastStateBroadcastT = -1.0f;
+
+static void broadcast_state_if_changed(float t) {
+  uint16_t active[kMaxWsCues];
+  size_t n = 0;
+  // Translate ShowController's own cue-id space to the web control-id
+  // space config.cues[].id already uses (see g_wsCueShowIds's comment) --
+  // the same translation the old single-demo-cue code did, generalized to
+  // every g_wsCues entry.
+  for (size_t i = 0; i < g_nWsCues && n < kMaxWsCues; ++i) {
+    if (g_controller.isActive(g_wsCueShowIds[i])) active[n++] = g_wsCues[i].id;
+  }
+  float master = g_liveControl.masterLevel();
+
+  // Always consumed, exactly once per frame, regardless of whether this
+  // check ends up sending -- see web_input_note_new_client's comment.
+  bool forced = web_input_take_forced_state_broadcast();
+
+  bool changed = forced ||
+                !activeIdSetsEqual(active, n, g_lastBroadcastActive, g_lastBroadcastActiveCount) ||
+                std::fabs(master - g_lastBroadcastMaster) > 0.0005f;
+  if (!changed) return;
+
+  constexpr float kMinIntervalSec = 0.05f;  // rate limit: at most 20 state broadcasts/sec
+  if (!forced && g_lastStateBroadcastT >= 0.0f && (t - g_lastStateBroadcastT) < kMinIntervalSec) {
+    return;  // still changed next frame (g_lastBroadcast* not updated) -- retried, not lost
+  }
+
   static char buf[128];
-  size_t n = web_input_build_state(active ? &activeId : nullptr, active ? 1 : 0, buf, sizeof(buf));
-  web_ws_broadcast(buf, n);
+  size_t len = web_input_build_state(n ? active : nullptr, n, master, buf, sizeof(buf));
+  web_ws_broadcast(buf, len);
+
+  std::memcpy(g_lastBroadcastActive, active, n * sizeof(uint16_t));
+  g_lastBroadcastActiveCount = n;
+  g_lastBroadcastMaster = master;
+  g_lastStateBroadcastT = t;
 }
 
 // The render task's two hook points, and what must run at each. This is
@@ -549,6 +619,17 @@ static void send_state_to_ws() {
 // adding one call in the right case below, not remembering to also wire a
 // new call-site into on_pre_render/on_post_render separately.
 enum class RenderTickPhase { Pre, Post };
+
+// P1.3: the render task's own notion of elapsed time, cached each frame so
+// on_post_render's render_tick_hooks(..., RenderTickPhase::Post, ...) call
+// (whose own `t` parameter is always 0 -- see that call site) has a real
+// time basis for broadcast_state_if_changed's rate limit. Pre and Post run
+// back-to-back on the same task for the same frame (render_task.cpp), so
+// this is never stale by more than one frame's worth of rendering. Declared
+// here (not down by on_pre_render, where it's written) since
+// render_tick_hooks -- defined immediately below, reading it in the Post
+// case -- needs it in scope first.
+static float g_lastRenderT = 0.0f;
 
 static void render_tick_hooks(RenderTickPhase phase, float t, uint32_t slack_us) {
   switch (phase) {
@@ -600,13 +681,19 @@ static void render_tick_hooks(RenderTickPhase phase, float t, uint32_t slack_us)
       if (wifi_is_connected()) ota_manager_note_wifi_connected();
       ota_manager_tick();
 
-      // State doesn't touch the Lua VM, so this runs regardless of
-      // g_luaReady -- a broken boot.fnl shouldn't also take down
-      // cue-state feedback.
+      // P1.3: every frame, unconditionally -- change-detection and its own
+      // internal rate limit decide whether anything actually goes out
+      // (broadcast_state_if_changed's own header comment). `t` is the
+      // frame's real elapsed time, cached from this frame's on_pre_render
+      // call (Post's own `t` parameter is always 0 -- render_task.h's
+      // post_render hook carries no time argument; see on_post_render).
+      // Doesn't touch the Lua VM, so this runs regardless of g_luaReady --
+      // a broken boot.fnl shouldn't also take down cue-state feedback.
+      broadcast_state_if_changed(g_lastRenderT);
+
       static uint32_t frameCounter = 0;
       if (++frameCounter >= 44) {  // ~once/sec at the render task's 44 Hz
         frameCounter = 0;
-        send_state_to_ws();
         send_blackout_status_to_ws();
 #ifdef CONFIG_GLOW_SELFTEST
         uint32_t frames = 0, behind = 0, dropped = 0;
@@ -638,6 +725,7 @@ static void render_tick_hooks(RenderTickPhase phase, float t, uint32_t slack_us)
 }
 
 static void on_pre_render(void* /*ctx*/, float t, Show* show) {
+  g_lastRenderT = t;
   if (!show) return;
 
   render_tick_hooks(RenderTickPhase::Pre, t, 0);
@@ -778,9 +866,8 @@ static void setup_selftest_fixture() {
 
   g_liveControl.bindButton(0, ActionKind::CueToggle, cueId);
   g_wsCues[0] = { /*id=*/0, "Selftest", "#ff0000", ActionKind::CueToggle };
+  g_wsCueShowIds[0] = cueId;
   g_nWsCues = 1;
-  g_demoShowCueId = cueId;
-  g_hasDemoCue = true;
 }
 #endif  // CONFIG_GLOW_SELFTEST
 
@@ -1193,8 +1280,14 @@ extern "C" void app_main(void) {
   // MIDI DIN is a UART, not a network transport -- always up, independent
   // of cfg.skipWifi. Needs the same g_liveControl-bindings-already-
   // in-place guarantee as the transports above (see their comment).
+  //
+  // P1.1: pass g_controllerProfile (already populated by
+  // setup_show_from_bundle, above) so midi_uart_task can send its INIT
+  // SYSEX blobs, if any, the moment the UART finishes installing --
+  // nullptr when there's no wired controller, same no-op as an empty
+  // init table.
   midi_input_init(*g_controlQueue, g_beatQueue, CONFIG_GLOW_MIDI_UART_NUM, CONFIG_GLOW_MIDI_RX_GPIO,
-                  CONFIG_GLOW_MIDI_TX_GPIO);
+                  CONFIG_GLOW_MIDI_TX_GPIO, g_hasController ? &g_controllerProfile : nullptr);
   xTaskCreatePinnedToCore(midi_uart_task, "midi", 4096 / sizeof(StackType_t),
                           nullptr, 5, nullptr, 0);
 
@@ -1209,7 +1302,9 @@ extern "C" void app_main(void) {
   if (cfg.usbMidiHost) {
     // Core 0 (with WiFi), same as every other network/USB transport task;
     // watch render_task's `dropped` stat for coexistence regressions.
-    usb_midi_input_init(*g_controlQueue);
+    // P1.1: same g_controllerProfile as the DIN wiring above -- INIT SYSEX
+    // fires on hot-plug here (usb_midi_input.cpp), not just at boot.
+    usb_midi_input_init(*g_controlQueue, g_hasController ? &g_controllerProfile : nullptr);
     xTaskCreatePinnedToCore(usb_midi_host_task, "usb_midi", 4096 / sizeof(StackType_t),
                             nullptr, 5, nullptr, 0);
   } else {

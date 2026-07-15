@@ -99,6 +99,41 @@ test("sendMaster clamps to [0,1]", () => {
   assert.deepEqual(lastSent(ws), { type: "master", value: 0 });
 });
 
+// --- state (P1.3: device-pushed active cues + master level) ---------------
+
+test("onState delivers active ids and master level", () => {
+  let received = null;
+  const { client, ws } = makeClient();
+  client.onState((ids, master) => { received = { ids, master }; });
+  ws.message(JSON.stringify({ type: "state", active: [0, 3, 5], master: 0.75 }));
+  assert.deepEqual(received, { ids: [0, 3, 5], master: 0.75 });
+});
+
+test("onState filters out-of-range/non-integer active ids", () => {
+  let received = null;
+  const { client, ws } = makeClient();
+  client.onState((ids) => { received = ids; });
+  ws.message(JSON.stringify({ type: "state", active: [0, -1, 1.5, 70000, "x", 3], master: 1 }));
+  assert.deepEqual(received, [0, 3]);
+});
+
+test("onState clamps an out-of-range master level", () => {
+  const received = [];
+  const { client, ws } = makeClient();
+  client.onState((_ids, master) => received.push(master));
+  ws.message(JSON.stringify({ type: "state", active: [], master: 1.5 }));
+  ws.message(JSON.stringify({ type: "state", active: [], master: -0.5 }));
+  assert.deepEqual(received, [1, 0]);
+});
+
+test("onState reports null master when the device omits the field", () => {
+  let received = "unset";
+  const { client, ws } = makeClient();
+  client.onState((_ids, master) => { received = master; });
+  ws.message(JSON.stringify({ type: "state", active: [1] }));
+  assert.equal(received, null);
+});
+
 // --- eval channel ------------------------------------------------------
 
 test("sendEval sends type/src/seq", () => {

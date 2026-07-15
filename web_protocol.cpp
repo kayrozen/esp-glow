@@ -397,7 +397,9 @@ const char* modeFromAction(ActionKind a) {
     case ActionKind::SceneToggle:
       return "toggle";
     case ActionKind::Master:
-      return "flash";  // unreachable: Master is fader-only, never a cue
+    case ActionKind::CueLevel:
+    case ActionKind::ParamSet:
+      return "flash";  // unreachable: these are continuous-only (P1.2), never a Button-shaped cue
   }
   return "flash";
 }
@@ -409,6 +411,16 @@ size_t appendUInt(char* buf, size_t bufLen, size_t written, uint32_t v) {
   // -Wformat on one of the two -- cast to the type the format string
   // actually names (every uint32_t value fits in unsigned int on both).
   int n = std::snprintf(tmp, sizeof(tmp), "%u", static_cast<unsigned int>(v));
+  if (n <= 0) return written;
+  return appendRaw(buf, bufLen, written, tmp);
+}
+
+// P1.3: `master` in `state`. Fixed 4-decimal precision -- masterLevel is
+// always in [0,1] (LiveControl clamps it), so this never needs scientific
+// notation or more than a handful of significant digits.
+size_t appendFloat(char* buf, size_t bufLen, size_t written, float v) {
+  char tmp[32];
+  int n = std::snprintf(tmp, sizeof(tmp), "%.4f", static_cast<double>(v));
   if (n <= 0) return written;
   return appendRaw(buf, bufLen, written, tmp);
 }
@@ -465,7 +477,7 @@ size_t buildConfigJson(const WebCueInfo* cues, size_t nCues,
   return w;
 }
 
-size_t buildStateJson(const uint16_t* activeIds, size_t nActive,
+size_t buildStateJson(const uint16_t* activeIds, size_t nActive, float masterLevel,
                       char* buf, size_t bufLen) {
   size_t w = 0;
   w = appendRaw(buf, bufLen, w, "{\"type\":\"state\",\"active\":[");
@@ -473,7 +485,9 @@ size_t buildStateJson(const uint16_t* activeIds, size_t nActive,
     if (i > 0) w = appendChar(buf, bufLen, w, ',');
     w = appendUInt(buf, bufLen, w, activeIds[i]);
   }
-  w = appendRaw(buf, bufLen, w, "]}");
+  w = appendRaw(buf, bufLen, w, "],\"master\":");
+  w = appendFloat(buf, bufLen, w, masterLevel);
+  w = appendChar(buf, bufLen, w, '}');
 
   if (buf != nullptr && bufLen > 0) {
     size_t termPos = w < bufLen ? w : bufLen - 1;

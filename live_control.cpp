@@ -100,12 +100,45 @@ void LiveControl::bindButton(uint16_t controlId, ActionKind action, uint16_t tar
   bindings_.push_back({ControlType::Button, controlId, action, targetId, false});
 }
 
-void LiveControl::bindFader(uint16_t controlId, ActionKind action) {
-  bindings_.push_back({ControlType::Fader, controlId, action, 0, false});
+void LiveControl::bindFader(uint16_t controlId, ActionKind action, uint16_t targetId) {
+  bindContinuous(ControlType::Fader, controlId, action, targetId);
+}
+
+void LiveControl::bindPitchBend(ActionKind action, uint16_t targetId) {
+  bindContinuous(ControlType::PitchBend, 0, action, targetId);
+}
+
+void LiveControl::bindPressure(ActionKind action, uint16_t targetId) {
+  bindContinuous(ControlType::Aftertouch, 0, action, targetId);
+}
+
+void LiveControl::bindContinuous(ControlType type, uint16_t controlId, ActionKind action, uint16_t targetId) {
+  bindings_.push_back({type, controlId, action, targetId, false});
+}
+
+void LiveControl::bindProgram() {
+  programSceneEnabled_ = true;
+}
+
+uint16_t LiveControl::internParam(const std::string& name) {
+  for (size_t i = 0; i < params_.size(); ++i) {
+    if (params_[i].name == name) return static_cast<uint16_t>(i);
+  }
+  params_.push_back({name, 0.0f});
+  return static_cast<uint16_t>(params_.size() - 1);
+}
+
+float LiveControl::paramValue(const std::string& name) const {
+  for (const auto& p : params_) {
+    if (p.name == name) return p.value;
+  }
+  return 0.0f;
 }
 
 void LiveControl::clear() {
   bindings_.clear();
+  params_.clear();
+  programSceneEnabled_ = false;
 }
 
 LiveControl::Binding* LiveControl::find(ControlType type, uint16_t controlId) {
@@ -132,7 +165,22 @@ uint16_t LiveControl::effectiveId(const ControlEvent& ev) const {
   return ev.id;
 }
 
+namespace {
+bool isContinuousType(ControlType type) {
+  return type == ControlType::Fader || type == ControlType::PitchBend || type == ControlType::Aftertouch;
+}
+}  // namespace
+
 void LiveControl::handle(const ControlEvent& ev, float t) {
+  // P1.2: Program Change is a scene SELECTOR, not a (controlId -> fixed
+  // target) binding like everything else here -- the event's own `id`
+  // (the program number) names which scene to go to, so there is no
+  // per-value Binding to look up. See bindProgram()'s header comment.
+  if (ev.type == ControlType::Program) {
+    if (programSceneEnabled_) ctrl_.goScene(ev.id, t);
+    return;
+  }
+
   Binding* binding = find(ev.type, effectiveId(ev));
   if (!binding) return;
 
@@ -170,12 +218,28 @@ void LiveControl::handle(const ControlEvent& ev, float t) {
         }
       }
     }
-  } else if (ev.type == ControlType::Fader) {
-    if (binding->action == ActionKind::Master) {
-      master_ = ev.value;
-      if (master_ < 0.0f) master_ = 0.0f;
-      if (master_ > 1.0f) master_ = 1.0f;
-    }
+  } else if (isContinuousType(ev.type)) {
+    handleContinuous(*binding, ev.value);
+  }
+}
+
+void LiveControl::handleContinuous(Binding& binding, float value) {
+  float v = value;
+  if (v < 0.0f) v = 0.0f;
+  if (v > 1.0f) v = 1.0f;
+
+  switch (binding.action) {
+    case ActionKind::Master:
+      master_ = v;
+      break;
+    case ActionKind::CueLevel:
+      ctrl_.setManualLevel(binding.targetId, v);
+      break;
+    case ActionKind::ParamSet:
+      if (binding.targetId < params_.size()) params_[binding.targetId].value = v;
+      break;
+    default:
+      break;  // a discrete ActionKind bound to a continuous source: no-op
   }
 }
 
