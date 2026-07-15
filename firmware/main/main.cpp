@@ -901,6 +901,36 @@ extern "C" void app_main(void) {
          cfgSource, (unsigned)cfg.dmxTxGpio, (int)cfg.usbMidiHost, (int)cfg.skipWifi);
 #endif
 
+  // --- F5: OTA self-validation wiring. Set the callbacks and check
+  // whether this boot is a pending-verify OTA slot BEFORE anything else --
+  // ota_manager_tick starts getting called from the very first rendered
+  // frame (render_tick_hooks), so the callbacks must already be in place
+  // by then (see ota_manager.h).
+  //
+  // ORDER MATTERS (boot-stall fix): ota_manager_init() performs the first
+  // memory-mapped flash read of boot -- esp_ota_get_state_partition() ->
+  // esp_partition_mmap() of the otadata partition. Keep it here, while
+  // app_main is still the ONLY application task, so the mmap's flash-cache-
+  // disable never has to stall a second core mid-flight. This mirrors why
+  // storage_load_devcfg()'s esp_partition_read() above is 100% reliable:
+  // single-task window. Measured: with this mmap left after led_status_init
+  // (i.e. with the blinker task already alive on another core) the QEMU boot
+  // hung ~33% of the time (4/12); pinning the blinker only masked it down to
+  // ~5% (1/20); moving the mmap into this single-task window drove it to
+  // 0/50. See tests/qemu/ and the boot-stall investigation.
+  //
+  // NOTE: the multi-task mmap hang was only ever reproduced under QEMU's
+  // esp32s3 model. Whether real silicon's esp_partition_mmap has the same
+  // fragility under cross-core flash contention is UNVERIFIED (no hardware in
+  // CI) -- treat as an open question for L7 hardware bring-up, not as proven
+  // QEMU-only. Reordering is correct either way. ---
+  OtaCallbacks otaCb = {};
+  otaCb.onRollbackImminent = ota_cb_rollback_imminent;
+  otaCb.cuesActive = ota_cb_cues_active;
+  otaCb.broadcast = ota_cb_broadcast;
+  ota_manager_set_callbacks(&otaCb);
+  ota_manager_init();
+
   led_status_init(cfg.ledGpio);
   led_status_set(LED_BLINK_SLOW);
 
@@ -909,18 +939,6 @@ extern "C" void app_main(void) {
     nvs_flash_erase();
     nvs_flash_init();
   }
-
-  // --- F5: OTA self-validation wiring. Set the callbacks and check
-  // whether this boot is a pending-verify OTA slot BEFORE anything else --
-  // ota_manager_tick starts getting called from the very first rendered
-  // frame (render_tick_hooks), so the callbacks must already be in place
-  // by then (see ota_manager.h). ---
-  OtaCallbacks otaCb = {};
-  otaCb.onRollbackImminent = ota_cb_rollback_imminent;
-  otaCb.cuesActive = ota_cb_cues_active;
-  otaCb.broadcast = ota_cb_broadcast;
-  ota_manager_set_callbacks(&otaCb);
-  ota_manager_init();
 
   // CFG1 §6: same "refuse while cues are active" gate as OTA (a reconfigure
   // reboot mid-show helps nobody either); GET /devcfg serializes `cfg` as
