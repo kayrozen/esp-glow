@@ -281,7 +281,6 @@ static void test_wled_targets_skipped_when_manager_null() {
   ApplyResult r = applyLoadedShow(ls, show, fact);  // wled defaults to nullptr
   CHECK(r.wledTargetsApplied == 0);
 }
-}
 
 int main() {
   test_basic_patch_and_sink_routing();
