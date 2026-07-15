@@ -62,7 +62,23 @@ void led_status_init(int gpio) {
   set_led(0);
 
   if (s_task == nullptr) {
-    xTaskCreate(blinker_task, "led", 1024, nullptr, tskIDLE_PRIORITY + 1, &s_task);
+    // Pin to core 0 (PRO_CPU, the same core app_main runs on), NOT
+    // tskNO_AFFINITY. Architectural invariant for this project: core 1
+    // (APP_CPU) runs the 44 Hz render/DMX task and NOTHING else; every other
+    // task -- network, MIDI, OSC, this blinker, wifi reconnect -- lives on
+    // core 0 (see the CI guard that fails on a bare xTaskCreate in
+    // .github/workflows/). A trivial status blinker has no business sharing
+    // the real-time core.
+    //
+    // This is HYGIENE, not the boot-stall fix: the actual QEMU boot stall was
+    // the otadata esp_partition_mmap running with a second task already alive
+    // on another core, and it is fixed by ordering ota_manager_init() into
+    // the single-task boot window (see main.cpp). Pinning this blinker alone
+    // only masked that stall (~33% -> ~5%); the reorder closed it (0/50).
+    // Pinning still matters so a flash op this task's cached loop body might
+    // trigger later can never contend across cores mid-show.
+    xTaskCreatePinnedToCore(blinker_task, "led", 1024, nullptr,
+                            tskIDLE_PRIORITY + 1, &s_task, 0);
   }
 }
 

@@ -183,8 +183,15 @@ bool wifi_start_sta(const WifiStaConfig* cfg) {
   ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wc));
   ESP_ERROR_CHECK(esp_wifi_start());
 
-  xTaskCreate(reconnect_task, "wifi_rc", 2560, nullptr,
-              tskIDLE_PRIORITY + 1, nullptr);
+  // Core 0 (PRO_CPU), never tskNO_AFFINITY: same invariant as every other
+  // task in this project -- core 1 is the render/DMX real-time core and
+  // nothing else runs there. wifi_rc can trigger flash ops (NVS credential
+  // re-reads on reconnect); leaving it unpinned risks a cross-core flash-
+  // cache contention with the render task mid-show -- the same failure class
+  // as the boot-stall mmap, but harder to spot (a transient DMX frame jitter
+  // instead of a boot hang). See led_status.cpp and the CI xTaskCreate guard.
+  xTaskCreatePinnedToCore(reconnect_task, "wifi_rc", 2560, nullptr,
+                          tskIDLE_PRIORITY + 1, nullptr, 0);
   return true;
 }
 
