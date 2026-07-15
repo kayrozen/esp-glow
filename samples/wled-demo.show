@@ -1,0 +1,162 @@
+;; ============================================================
+;; WLED UDP Notifier Example Show for esp-glow
+;; ============================================================
+;; This show demonstrates control of WLED fixtures via the UDP
+;; Notifier protocol (port 21324). See README_WLED_UDP.md for
+;; full documentation.
+;;
+;; Prerequisites:
+;;   - WLED devices on your network (v0.8.0+ recommended)
+;;   - Devices configured with sync group 1 (default)
+;;   - Compile with GLOW_WLED_UDP_NOTIFIER=1 to enable support
+;;
+;; Usage:
+;;   Load this show, then use the glow.wled.* API in scripts:
+;;     (glow.wled.fx "main_matrix" :rainbow {:speed 150})
+;;     (glow.wled.color "accent_strip" 255 0 0)
+;;     (glow.wled.fx-broadcast :pacifica {:palette :ocean})
+;; ============================================================
+
+SHOW 2
+UNIVERSE 1 DMX
+UNIVERSE 2 ARTNET
+
+;; WLED fixture declarations
+;; Syntax: WLED "<name>" "<ip_or_hostname>" [sync_group]
+WLED "main_matrix" "192.168.1.100" 1
+WLED "accent_strip" "192.168.1.101" 1
+WLED "christmas_tree" "wled-tree.local" 1
+WLED "room_ambient" "255.255.255.255" 1  ;; Broadcast to all WLEDs in group 1
+
+;; Regular DMX fixtures can coexist with WLED
+FIXTURE samples/head.fdef 1 22
+POS 2.0 1.0 0.0
+
+;; ============================================================
+;; Example Cue Definitions
+;; ============================================================
+
+(glow.cue.define :matrix-rainbow
+  {:effects [(fn [t]
+               (glow.wled.fx "main_matrix" :rainbow
+                 {:speed 150
+                  :intensity 200
+                  :brightness 255
+                  :palette :rainbow-bands}))]
+   :fade-in 2.0})
+
+(glow.cue.define :tree-fire
+  {:effects [(fn [t]
+               (glow.wled.fx "christmas_tree" :fire-2012
+                 {:speed 180
+                  :intensity 220
+                  :brightness 200
+                  :palette :fire}))]
+   :fade-in 1.0})
+
+(glow.cue.define :accent-red
+  {:effects [(fn [t]
+               (glow.wled.color "accent_strip" 255 0 0
+                 {:brightness 255
+                  :transition 500}))]
+   :fade-in 0.5})
+
+(glow.cue.define :ambient-pacifica
+  {:effects [(fn [t]
+               (glow.wled.fx "room_ambient" :pacifica
+                 {:speed 100
+                  :intensity 150
+                  :brightness 180
+                  :palette :ocean}))]
+   :fade-in 3.0})
+
+;; ============================================================
+;; Complex Show: DMX + WLED Integration
+;; ============================================================
+
+(glow.cue.define :full-show
+  {:effects [(fn [t]
+               ;; DMX moving head
+               (glow.aim "head1" 45.0 30.0)
+               (glow.slot "head1" :red-spot)
+               
+               ;; WLED ambient matrix
+               (glow.wled.fx "main_matrix" :plasma
+                 {:speed 120
+                  :intensity 255
+                  :palette :plasma})
+               
+               ;; WLED accent strip
+               (glow.wled.fx "accent_strip" :twinklefox
+                 {:speed 80
+                  :intensity 150
+                  :palette :c9})
+               
+               ;; WLED tree fire effect
+               (glow.wled.fx "christmas_tree" :fire-2012
+                 {:speed 160
+                  :intensity 200
+                  :palette :fire}))]
+   :fade-in 2.0})
+
+;; ============================================================
+;; Power Control Examples
+;; ============================================================
+
+;; Turn off specific fixtures
+(glow.wled.off "main_matrix")
+(glow.wled.off "accent_strip")
+
+;; Turn on specific fixtures
+(glow.wled.on "main_matrix")
+(glow.wled.on "accent_strip")
+
+;; ============================================================
+;; Broadcast Examples
+;; ============================================================
+
+;; Broadcast an effect to ALL WLED devices on the network
+;; (Each device filters by its configured sync group)
+(glow.wled.fx-broadcast :meteor-rain
+  {:speed 150
+   :intensity 180
+   :brightness 200
+   :palette :colorful})
+
+;; ============================================================
+;; Effect and Palette Reference
+;; ============================================================
+;; 
+;; Available effects (partial list, see wled_effect_map.h):
+;;   :solid, :blink, :breathe, :wipe, :random-colors, :sweep
+;;   :dynamic, :colorloop, :rainbow, :scan, :dual-scan, :fade
+;;   :theater, :running, :twinkle, :dissolve, :sparkle, :strobe
+;;   :chase, :android, :aurora, :stream, :scanner, :lighthouse
+;;   :fireworks, :rain, :fire-flicker, :police, :lightning
+;;   :juggle, :fire-2012, :colorwaves, :bpm, :noise-*, :ripple
+;;   :twinklefox, :glitter, :candle, :plasma, :heartbeat
+;;   :pacifica, :sunrise, :flow, :matrix, :meteor-rain, :dna
+;;   ... and 140+ more (see EFFECT_MAP in wled_effect_map.h)
+;;
+;; Available palettes (all 71 built-in WLED palettes):
+;;   :default, :random-cycle, :party, :cloud, :lava, :ocean
+;;   :forest, :rainbow, :rainbow-bands, :sunset, :rivendell
+;;   :breeze, :red-blue, :analogous, :splash, :pastel, :beach
+;;   :vintage, :departure, :landscape, :sherbet, :hult, :drywet
+;;   :grintage, :tertiary, :fire, :icefire, :cyane, :autumn
+;;   :magenta, :orange-teal, :tiamat, :aurora, :atlantica
+;;   :temperature, :retro-clown, :candy, :toxy-reef, :fairy-reef
+;;   :sakura, :c9, :c9-new, :pink-candy, :red-reef, :aqua-flash
+;;   ... and 40+ more (see PALETTE_MAP in wled_effect_map.h)
+;;
+;; Effect parameters:
+;;   :speed      0-255 (default 128) - animation speed
+;;   :intensity  0-255 (default 128) - effect intensity
+;;   :brightness 0-255 (default 255) - master brightness
+;;   :palette    keyword (default :default) - color palette
+;;   :transition milliseconds (default 0) - fade duration
+;;
+;; Color parameters:
+;;   r, g, b     0-255 - RGB color values
+;;   :brightness 0-255 (default 255)
+;;   :transition milliseconds (default 0)

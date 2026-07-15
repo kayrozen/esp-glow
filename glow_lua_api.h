@@ -152,6 +152,14 @@ private:
   static int l_led_set(lua_State* L);
   static int l_led_auto(lua_State* L);
 
+  // WLED UDP Notifier fixtures (wled_manager.h) -- nullable, no-op if not
+  // compiled in; same pattern as glow.led.* for devices without WLED support.
+  static int l_wled_fx(lua_State* L);
+  static int l_wled_color(lua_State* L);
+  static int l_wled_on(lua_State* L);
+  static int l_wled_off(lua_State* L);
+  static int l_wled_fx_broadcast(lua_State* L);
+
   static GlowLuaApi& self(lua_State* L);
 
   // Resolves each entry of the Lua array-table on top of the stack (either

@@ -11,6 +11,9 @@
 #include "pixel_patterns.h"
 #include "show_control.h"
 #include "vec_math.h"
+#ifdef GLOW_WLED_UDP_NOTIFIER
+#include "wled_manager.h"
+#endif
 
 namespace {
 
@@ -777,6 +780,16 @@ void GlowLuaApi::install() {
   registerFn(L, -1, "auto", &GlowLuaApi::l_led_auto, this);
   lua_setfield(L, glowIdx, "led");
 
+  // WLED UDP Notifier fixtures (see wled_manager.h) -- nullable, no-op if
+  // not compiled in; same pattern as glow.led for devices without WLED support.
+  lua_newtable(L);  // glow.wled
+  registerFn(L, -1, "fx", &GlowLuaApi::l_wled_fx, this);
+  registerFn(L, -1, "color", &GlowLuaApi::l_wled_color, this);
+  registerFn(L, -1, "on", &GlowLuaApi::l_wled_on, this);
+  registerFn(L, -1, "off", &GlowLuaApi::l_wled_off, this);
+  registerFn(L, -1, "fx-broadcast", &GlowLuaApi::l_wled_fx_broadcast, this);
+  lua_setfield(L, glowIdx, "wled");
+
   lua_setglobal(L, "glow");
 }
 
@@ -788,3 +801,126 @@ void GlowLuaApi::pollNewlyDisabledEffects(std::vector<std::pair<std::string, std
     }
   }
 }
+
+// --- glow.wled.* -- WLED UDP Notifier fixtures (nullable, no-op if not
+// compiled in; same pattern as glow.led.*) -----------------------------------
+
+#ifdef GLOW_WLED_UDP_NOTIFIER
+
+namespace {
+
+// Helper to get the global WledManager instance. In a real device build this
+// would be wired through dependency injection or a singleton accessor. For now
+// we assume it's available as an extern when GLOW_WLED_UDP_NOTIFIER is defined.
+extern WledManager& getWledManager();
+
+}  // namespace
+
+int GlowLuaApi::l_wled_fx(lua_State* L) {
+  const char* name = luaL_checkstring(L, 1);
+  const char* effect = luaL_checkstring(L, 2);
+
+  uint8_t speed = 128, intensity = 128, brightness = 255;
+  const char* palette = "default";
+  uint16_t transition = 0;
+
+  if (lua_istable(L, 3)) {
+    lua_getfield(L, 3, "speed");
+    if (lua_isnumber(L, -1)) speed = static_cast<uint8_t>(luaL_checkinteger(L, -1));
+    lua_pop(L, 1);
+
+    lua_getfield(L, 3, "intensity");
+    if (lua_isnumber(L, -1)) intensity = static_cast<uint8_t>(luaL_checkinteger(L, -1));
+    lua_pop(L, 1);
+
+    lua_getfield(L, 3, "brightness");
+    if (lua_isnumber(L, -1)) brightness = static_cast<uint8_t>(luaL_checkinteger(L, -1));
+    lua_pop(L, 1);
+
+    lua_getfield(L, 3, "palette");
+    if (lua_isstring(L, -1)) palette = luaL_checkstring(L, -1);
+    lua_pop(L, 1);
+
+    lua_getfield(L, 3, "transition");
+    if (lua_isnumber(L, -1)) transition = static_cast<uint16_t>(luaL_checkinteger(L, -1));
+    lua_pop(L, 1);
+  }
+
+  getWledManager().setEffect(name, effect, speed, intensity, brightness, palette, transition);
+  return 0;
+}
+
+int GlowLuaApi::l_wled_color(lua_State* L) {
+  const char* name = luaL_checkstring(L, 1);
+  uint8_t r = static_cast<uint8_t>(luaL_checkinteger(L, 2));
+  uint8_t g = static_cast<uint8_t>(luaL_checkinteger(L, 3));
+  uint8_t b = static_cast<uint8_t>(luaL_checkinteger(L, 4));
+
+  uint8_t brightness = 255;
+  uint16_t transition = 0;
+
+  if (lua_istable(L, 5)) {
+    lua_getfield(L, 5, "brightness");
+    if (lua_isnumber(L, -1)) brightness = static_cast<uint8_t>(luaL_checkinteger(L, -1));
+    lua_pop(L, 1);
+
+    lua_getfield(L, 5, "transition");
+    if (lua_isnumber(L, -1)) transition = static_cast<uint16_t>(luaL_checkinteger(L, -1));
+    lua_pop(L, 1);
+  }
+
+  getWledManager().setSolidColor(name, r, g, b, brightness, transition);
+  return 0;
+}
+
+int GlowLuaApi::l_wled_on(lua_State* L) {
+  const char* name = luaL_checkstring(L, 1);
+  getWledManager().setPower(name, true);
+  return 0;
+}
+
+int GlowLuaApi::l_wled_off(lua_State* L) {
+  const char* name = luaL_checkstring(L, 1);
+  getWledManager().setPower(name, false);
+  return 0;
+}
+
+int GlowLuaApi::l_wled_fx_broadcast(lua_State* L) {
+  const char* effect = luaL_checkstring(L, 1);
+
+  uint8_t speed = 128, intensity = 128, brightness = 255;
+  const char* palette = "default";
+
+  if (lua_istable(L, 2)) {
+    lua_getfield(L, 2, "speed");
+    if (lua_isnumber(L, -1)) speed = static_cast<uint8_t>(luaL_checkinteger(L, -1));
+    lua_pop(L, 1);
+
+    lua_getfield(L, 2, "intensity");
+    if (lua_isnumber(L, -1)) intensity = static_cast<uint8_t>(luaL_checkinteger(L, -1));
+    lua_pop(L, 1);
+
+    lua_getfield(L, 2, "brightness");
+    if (lua_isnumber(L, -1)) brightness = static_cast<uint8_t>(luaL_checkinteger(L, -1));
+    lua_pop(L, 1);
+
+    lua_getfield(L, 2, "palette");
+    if (lua_isstring(L, -1)) palette = luaL_checkstring(L, -1);
+    lua_pop(L, 1);
+  }
+
+  getWledManager().broadcastEffect(effect, speed, intensity, brightness, palette);
+  return 0;
+}
+
+#else  // !GLOW_WLED_UDP_NOTIFIER
+
+// Stub implementations when WLED support is not compiled in -- these become
+// silent no-ops (same policy as glow.led.* on devices without LED feedback).
+int GlowLuaApi::l_wled_fx(lua_State*) { return 0; }
+int GlowLuaApi::l_wled_color(lua_State*) { return 0; }
+int GlowLuaApi::l_wled_on(lua_State*) { return 0; }
+int GlowLuaApi::l_wled_off(lua_State*) { return 0; }
+int GlowLuaApi::l_wled_fx_broadcast(lua_State*) { return 0; }
+
+#endif  // GLOW_WLED_UDP_NOTIFIER

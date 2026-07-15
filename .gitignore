@@ -1,100 +1,98 @@
-# Prerequisites
-*.d
-
-# Compiled Object files
-*.slo
-*.lo
+```
+# Compiled and build artifacts
 *.o
 *.obj
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Linker files
-*.ilk
-
-# Debugger Files
-*.pdb
-
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
-*.so.*
-
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
-
-# Executables
-*.exe
 *.out
-*.app
-test_aim
 
-# Build directories
+# Dependencies
 build/
-Build/
-build-*/
+dist/
 
-# CMake generated files
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-Makefile
-install_manifest.txt
-compile_commands.json
-
-# Temporary files & merge cruft
-*.tmp
+# Logs and temp files
 *.log
-*.bak
+*.tmp
 *.swp
-*.rej
-*.orig
 
-# vcpkg
-vcpkg_installed/
+# Environment
+.env
+.env.local
+*.env.*
 
-# debug information files
-*.dwo
+# Editors
+.vscode/
+.idea/
 
-# test output & cache
-Testing/
-.cache/
+# Coverage reports
+coverage/
+htmlcov/
+.coverage
+
+# Python specific
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg-info/
+.eggs/
+.mypy_cache/
+.pytest_cache/
+.tox/
+.coverage*
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.git/modules/
+*.sublime-workspace
 
-# Test executables
-test_*
-!test_*.cpp
-!test_*.c
-!test_*.py
+# C/C++ specific
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.a
+*.dylib
+*.plist
+*.bin
+*.out
+*.pid
+*.seed
+*.prof
 
-# fdef_check: host CLI built from fdef_check.cpp, used by
-# web/shared/importers/test-importers.mjs as its round-trip oracle.
-fdef_check
-!fdef_check.cpp
+# Build directories
+cmake-build-*/
+build-*/
+_build/
+_output/
+dist/
+release/
+target/
+bin/
+obj/
+lib/
 
-# devcfg_check: host CLI built from devcfg_check.cpp, used by
-# web/shared/test-devcfg.mjs as its round-trip oracle.
-devcfg_check
-!devcfg_check.cpp
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+*.swp
+*.swo
 
-# WASM build artifacts (rebuilt in CI, not committed)
-web/provision-wasm/build/
-web/provision-wasm/provision-wasm.js
-web/provision-wasm/provision-wasm.wasm
-web/provisioner-static/wasm/
-
-# Firmware build artifacts (rebuilt in CI, not committed)
-firmware/build/
-firmware/main/data/show.shw1
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+Icon?
+VolumeIcon.icns
+*.nib
+*~.nib
+```
