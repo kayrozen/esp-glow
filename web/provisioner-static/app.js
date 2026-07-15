@@ -16,6 +16,54 @@ import { checkFennelSyntax } from "./fennel-check.js";
 import { buildScriptsImage } from "./boot-image.js";
 import { detectAndParse, listImportModes, buildImportModel, normalizeFixtureUrl, FORMAT_LABEL } from "./import.js";
 import { emitFdef, fitRangeBudget, CAP_NAMES as IMPORT_CAP_NAMES } from "./shared/importers/model.js";
+import { defaultDeviceConfig, encodeDeviceConfig, parseIPv4, formatIPv4 } from "./shared/devcfg.js";
+
+// --- CFG1 device config persistence (localStorage) -----------------------
+//
+// So reflashing a board isn't retyping the WiFi password every time (§5).
+// Stores the plain form fields, not the encoded CFG1 bytes -- the format
+// can gain fields across a browser session; re-encoding from the current
+// devcfg.js on every flash is simpler than migrating a stored blob.
+const DEVCFG_STORAGE_KEY = "esp-glow-devcfg-v1";
+
+// The FORM's shape differs from devcfg.js's wire shape in exactly one
+// field: artnetFallbackIp is kept as the human text ("", "broadcast", or
+// "192.168.1.50"), not the packed uint32 -- so an empty field round-trips
+// as empty instead of turning into the string "0.0.0.0". Converted to the
+// real DeviceConfig shape (via parseIPv4) only at encode time -- see
+// deviceConfigFromForm below.
+function defaultFormDeviceConfig() {
+  const d = defaultDeviceConfig();
+  return { ...d, artnetFallbackIp: formatIPv4(d.artnetFallbackIp) };
+}
+
+function loadStoredDeviceConfig() {
+  try {
+    const raw = localStorage.getItem(DEVCFG_STORAGE_KEY);
+    if (!raw) return defaultFormDeviceConfig();
+    return { ...defaultFormDeviceConfig(), ...JSON.parse(raw) };
+  } catch {
+    return defaultFormDeviceConfig();
+  }
+}
+
+function saveStoredDeviceConfig(formCfg) {
+  try {
+    localStorage.setItem(DEVCFG_STORAGE_KEY, JSON.stringify(formCfg));
+  } catch {
+    // Private browsing / storage disabled -- not fatal, just means the
+    // next flash starts from defaults again.
+  }
+}
+
+// Converts the form's shape (artnetFallbackIp as text) into the real
+// DeviceConfig shape encodeDeviceConfig expects. Throws if the Art-Net
+// field isn't a valid IPv4/blank/"broadcast" (see parseIPv4) -- callers
+// should catch and surface that as a field-level error, not a flash
+// failure discovered after connecting to the device.
+function deviceConfigFromForm(formCfg) {
+  return { ...formCfg, artnetFallbackIp: parseIPv4(formCfg.artnetFallbackIp) };
+}
 
 // --- tiny DOM helper ----------------------------------------------------
 
@@ -321,6 +369,10 @@ const state = {
     includeBoot: false,
     baud: 460800,
   },
+  // CFG1 flash-time device config (§5) -- the form's shape, restored from
+  // localStorage so reflashing isn't retyping the WiFi password every
+  // time. See loadStoredDeviceConfig/deviceConfigFromForm.
+  devcfg: loadStoredDeviceConfig(),
   // Fixture importer (QLC+/OFL/GDTF) -- see import.js for format dispatch,
   // web/shared/importers/ for the actual parsing + Capability/range
   // mapping (shared with the Node test suite).
@@ -1700,9 +1752,26 @@ async function doFlash() {
       appendFlashLog("Building scripts-partition image from boot.fnl...\n");
       scriptsImageBytes = await buildScriptsImage(state.workspace.boot.text);
     }
+
+    // CFG1 (§5): build the devcfg blob from the config form. Not tied to
+    // includeShow/includeBoot -- device config is written every flash
+    // (defaults are safe values, so there's no "skip it" case).
+    saveStoredDeviceConfig(state.devcfg);
+    let devcfg;
+    try {
+      devcfg = deviceConfigFromForm(state.devcfg);
+    } catch (e) {
+      throw new Error(`Device config: ${e.message}`);
+    }
+    if (!devcfg.skipWifi && !devcfg.wifiSsid) {
+      throw new Error("Device config: WiFi SSID is empty. Tick \"No WiFi\" if that's intentional, or fill in an SSID.");
+    }
+    const devcfgBytes = encodeDeviceConfig(devcfg);
+
     await flashDevice({
       bundleBytes,
       scriptsImageBytes,
+      devcfgBytes,
       eraseFirst: f.eraseFirst,
       baudrate: f.baud,
       onLog: (line) => appendFlashLog(line),
@@ -1723,6 +1792,113 @@ async function doFlash() {
     f.busy = false;
     render();
   }
+}
+
+// --- CFG1 device config form (§5) ---------------------------------------
+//
+// Rendered inside the flash modal, below the show/boot/erase options.
+// Every field is pre-filled with a sane default (or the last value saved
+// to localStorage) -- most users never touch the pins/USB-MIDI section.
+function devcfgField(labelText, inputAttrs) {
+  return el(
+    "div",
+    { class: "devcfg-field" },
+    el("label", {}, labelText),
+    el("input", inputAttrs),
+  );
+}
+
+function onDevcfgChange(key, transform) {
+  return (e) => {
+    state.devcfg[key] = transform ? transform(e.target.value, e.target) : e.target.value;
+    render();
+  };
+}
+
+function renderDevcfgForm() {
+  const d = state.devcfg;
+  const f = state.flash;
+
+  return el(
+    "div",
+    { class: "devcfg-form" },
+    el("p", { class: "devcfg-section-title" }, "Device config (written to the board's devcfg partition)"),
+
+    el(
+      "label",
+      { class: "flash-check" },
+      el("input", {
+        type: "checkbox",
+        checked: d.skipWifi,
+        disabled: f.busy,
+        onchange: onDevcfgChange("skipWifi", (_, target) => target.checked),
+      }),
+      el("span", {}, "No WiFi (DMX/Fennel only, no network at all)"),
+    ),
+
+    !d.skipWifi &&
+      el(
+        "div",
+        { class: "devcfg-grid" },
+        devcfgField("WiFi SSID", {
+          type: "text", value: d.wifiSsid, maxlength: 32, disabled: f.busy,
+          oninput: onDevcfgChange("wifiSsid"),
+        }),
+        devcfgField("WiFi password", {
+          type: "password", value: d.wifiPass, maxlength: 64, disabled: f.busy,
+          oninput: onDevcfgChange("wifiPass"),
+        }),
+      ),
+
+    el(
+      "div",
+      { class: "devcfg-grid" },
+      devcfgField("Art-Net fallback destination (blank = broadcast)", {
+        type: "text", value: d.artnetFallbackIp, placeholder: "e.g. 192.168.1.50", disabled: f.busy,
+        oninput: onDevcfgChange("artnetFallbackIp"),
+      }),
+      devcfgField("Art-Net port", {
+        type: "number", value: d.artnetPort, min: 1, max: 65535, disabled: f.busy,
+        oninput: onDevcfgChange("artnetPort", (v) => Number(v) || 6454),
+      }),
+    ),
+
+    el(
+      "div",
+      { class: "devcfg-grid" },
+      devcfgField("DMX TX GPIO", {
+        type: "number", value: d.dmxTxGpio, min: 0, max: 255, disabled: f.busy,
+        oninput: onDevcfgChange("dmxTxGpio", (v) => Number(v) & 0xff),
+      }),
+      devcfgField("DMX RX GPIO", {
+        type: "number", value: d.dmxRxGpio, min: 0, max: 255, disabled: f.busy,
+        oninput: onDevcfgChange("dmxRxGpio", (v) => Number(v) & 0xff),
+      }),
+      devcfgField("DMX RTS GPIO", {
+        type: "number", value: d.dmxRtsGpio, min: 0, max: 255, disabled: f.busy,
+        oninput: onDevcfgChange("dmxRtsGpio", (v) => Number(v) & 0xff),
+      }),
+      devcfgField("Status LED GPIO", {
+        type: "number", value: d.ledGpio, min: 0, max: 255, disabled: f.busy,
+        oninput: onDevcfgChange("ledGpio", (v) => Number(v) & 0xff),
+      }),
+    ),
+
+    el(
+      "label",
+      { class: "flash-check" },
+      el("input", {
+        type: "checkbox",
+        checked: d.usbMidiHost,
+        disabled: f.busy,
+        onchange: onDevcfgChange("usbMidiHost", (_, target) => target.checked),
+      }),
+      el("span", {}, "Enable USB-MIDI host"),
+    ),
+    d.usbMidiHost &&
+      el("p", { class: "devcfg-warn" },
+        "Requires a board with a powered USB-A port (VBUS). Leave off unless your hardware provides it."),
+  );
 }
 
 function renderFlashModal() {
@@ -1806,6 +1982,8 @@ function renderFlashModal() {
         ),
       ),
     );
+
+    body.push(renderDevcfgForm());
 
     if (f.chip) {
       body.push(el("div", { class: "flash-chip" }, `Detected: ${f.chip}`));
