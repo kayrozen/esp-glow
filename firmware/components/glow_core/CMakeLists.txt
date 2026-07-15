@@ -69,6 +69,12 @@ idf_component_register(
         # (host-tested; see mdef.h/led_feedback.h)
         ${GLOW_ROOT}/mdef.cpp
         ${GLOW_ROOT}/led_feedback.cpp
+        # P1.1: MDF1 v3 INIT SYSEX -- send-once-on-connect handshake blobs
+        # (host-tested; see controller_init.h) + the pure USB-MIDI 1.0
+        # SysEx event-packet framing usb_midi_input.cpp's OUT-endpoint path
+        # uses to send them (host-tested; see usb_midi_packetizer.h)
+        ${GLOW_ROOT}/controller_init.cpp
+        ${GLOW_ROOT}/usb_midi_packetizer.cpp
         # F1: host-tested render-pacing math
         ${GLOW_ROOT}/render_pacing.cpp
         # Musical time: PLL-smoothed beat clock (host-tested; the transports
