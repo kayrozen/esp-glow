@@ -94,7 +94,7 @@ private:
   // Resolves an incoming event's raw (type, id, channel) to the id it was
   // (or should have been) bound under: unpacked, unless profile_ is set AND
   // the event's raw id falls in one of its channel-significant PAD/FADER
-  // ranges (mdef.h's isPadChannelSignificant/isFaderChannelSignificant), in
+  // ranges (mdef.h's findPadChannelRange/findFaderChannelRange), in
   // which case it's (channel << 8) | id -- the same packing glow.bind.pad-xy
   // uses (glow_lua_api.cpp). Button ids are notes (0..127); Fader ids already
   // carry parseMidi's +128 offset, so the fader lookup strips it before
