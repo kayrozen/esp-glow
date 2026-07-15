@@ -222,6 +222,41 @@ static void test_fixture_in_unconfigured_universe_skipped() {
   CHECK(show.fixture(0) == nullptr);
 }
 
+static void test_wled_targets_applied_to_manager() {
+  printf("Test: WLED targets are added to the WledManager, keyed by name\n");
+  LoadedShow ls;
+  ls.universeCount = 1;
+  ls.transport[0] = UniverseTransport::Dmx;
+  ls.wledTargets.push_back({"main_matrix", "192.168.1.100", WLED_DEFAULT_PORT, 1});
+  ls.wledTargets.push_back({"tree", "192.168.1.101", WLED_DEFAULT_PORT, 3});
+
+  Show show;
+  MockSinkFactory fact;
+  MockWledSink wledSink;
+  WledManager wled(&wledSink);
+  ApplyResult r = applyLoadedShow(ls, show, fact, &wled);
+
+  CHECK(r.wledTargetsApplied == 2);
+  CHECK(wled.targetCount() == 2);
+  CHECK(wled.target("main_matrix") != nullptr);
+  CHECK(wled.target("main_matrix")->ip == "192.168.1.100");
+  CHECK(wled.target("tree") != nullptr);
+  CHECK(wled.target("tree")->syncGroup == 3);
+}
+
+static void test_wled_targets_skipped_when_manager_null() {
+  printf("Test: a LoadedShow with WLED targets but no WledManager is a safe no-op\n");
+  LoadedShow ls;
+  ls.universeCount = 1;
+  ls.transport[0] = UniverseTransport::Dmx;
+  ls.wledTargets.push_back({"tree", "192.168.1.101", WLED_DEFAULT_PORT, 1});
+
+  Show show;
+  MockSinkFactory fact;
+  ApplyResult r = applyLoadedShow(ls, show, fact);  // wled defaults to nullptr
+  CHECK(r.wledTargetsApplied == 0);
+}
+
 int main() {
   test_basic_patch_and_sink_routing();
   test_head_patch_carries_geometry();
@@ -229,6 +264,8 @@ int main() {
   test_matrix_spans_two_universes();
   test_unsupported_transport_skipped();
   test_fixture_in_unconfigured_universe_skipped();
+  test_wled_targets_applied_to_manager();
+  test_wled_targets_skipped_when_manager_null();
   if (g_fail == 0) {
     printf("All apply_loaded_show tests passed!\n");
     return 0;

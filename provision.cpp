@@ -1,8 +1,10 @@
 #include "provision.h"
 #include "profile_encoder.h"
 #include "show_bundle.h"
+#include "wled_target.h"
 #include <sstream>
 #include <map>
+#include <set>
 #include <algorithm>
 #include <cstring>
 #include <cstdlib>
@@ -68,6 +70,20 @@ static std::string& stripComments(std::string& line) {
     line.erase(pos);
   }
   return line;
+}
+
+// tokenize() splits on whitespace only -- it does not understand quoting.
+// WLED's <name>/<ip> tokens (provision.h's grammar comment) may optionally
+// be written double-quoted for readability; since a quote never appears
+// next to whitespace inside a valid name or IP, stripping one matching pair
+// of leading/trailing quotes here is equivalent to real quote parsing for
+// this grammar without touching tokenize() and every other directive that
+// relies on its plain whitespace-split behavior.
+static std::string stripQuotes(const std::string& s) {
+  if (s.size() >= 2 && s.front() == '"' && s.back() == '"') {
+    return s.substr(1, s.size() - 2);
+  }
+  return s;
 }
 
 // Parses `s` as a base-10 integer without ever throwing. This compiler's
@@ -642,6 +658,8 @@ CompileResult compileShow(const std::string& showText,
   std::vector<std::vector<uint8_t>> profileBlobs;
   std::map<std::string, int> controllerIndexMap;  // defFile -> mdef blob index
   std::vector<std::vector<uint8_t>> controllerBlobs;
+  std::vector<WledTarget> wledTargets;
+  std::set<std::string> wledNames;
 
   uint8_t maxUniverse = 0;
   FixtureInstance* lastFixture = nullptr;
@@ -947,6 +965,51 @@ CompileResult compileShow(const std::string& showText,
         controllerBlobs.push_back(std::move(blob));
       }
 
+    } else if (cmd == "WLED") {
+      if (tokens.size() < 3) {
+        result.err = "WLED: missing name or ip";
+        return result;
+      }
+
+      WledTarget wt;
+      wt.name = stripQuotes(tokens[1]);
+      wt.ip = stripQuotes(tokens[2]);
+      wt.port = WLED_DEFAULT_PORT;
+      wt.syncGroup = 1;
+
+      if (wt.name.empty()) {
+        result.err = "WLED: name must not be empty";
+        return result;
+      }
+      if (wt.ip.empty()) {
+        result.err = "WLED: ip must not be empty";
+        return result;
+      }
+      if (wt.name.size() > 255 || wt.ip.size() > 255) {
+        result.err = "WLED: name/ip must be 255 bytes or shorter";
+        return result;
+      }
+      if (wledNames.count(wt.name)) {
+        result.err = "WLED: duplicate name '" + wt.name + "'";
+        return result;
+      }
+
+      if (tokens.size() >= 4) {
+        int syncGroupInt;
+        if (!parseIntToken(tokens[3], syncGroupInt)) {
+          result.err = "WLED: invalid syncGroup";
+          return result;
+        }
+        if (syncGroupInt < 1 || syncGroupInt > 8) {
+          result.err = "WLED: syncGroup out of range (1..8)";
+          return result;
+        }
+        wt.syncGroup = static_cast<uint8_t>(syncGroupInt);
+      }
+
+      wledNames.insert(wt.name);
+      wledTargets.push_back(std::move(wt));
+
     } else if (!cmd.empty()) {
       result.err = "Unknown command: " + cmd;
       return result;
@@ -1030,12 +1093,20 @@ CompileResult compileShow(const std::string& showText,
   // Build universe count
   uint8_t universeCount = maxUniverse + 1;
 
-  // Write SHW1 bundle. Version 2 (mdefCount + a trailing controller table)
-  // only when at least one CONTROLLER was compiled -- byte-identical to the
-  // original v1 layout otherwise, same "only bump the version once the new
-  // feature is actually used" convention as ProfileBuilder::encode's PFX2.
+  // Write SHW1 bundle. Version bumps only when the new feature that needs
+  // it is actually used -- byte-identical to the smaller layout otherwise,
+  // same convention as ProfileBuilder::encode's PFX2. v2 adds mdefCount +
+  // a trailing controller table (>= 1 CONTROLLER); v3 additionally adds
+  // wledCount + a trailing WLED target table (>= 1 WLED) and always carries
+  // mdefCount too (even if 0), so the header stays self-describing without
+  // a three-way version branch past it (see show_bundle.h).
   std::vector<uint8_t> bundle;
-  uint8_t version = controllerBlobs.empty() ? 1 : 2;
+  uint8_t version = 1;
+  if (!wledTargets.empty()) {
+    version = 3;
+  } else if (!controllerBlobs.empty()) {
+    version = 2;
+  }
 
   // Header
   bundle.push_back('S');
@@ -1049,6 +1120,7 @@ CompileResult compileShow(const std::string& showText,
   uint16_t fixtureCount = static_cast<uint16_t>(fixtures.size());
   uint16_t matrixCount = static_cast<uint16_t>(matrices.size());
   uint16_t mdefCount = static_cast<uint16_t>(controllerBlobs.size());
+  uint16_t wledCount = static_cast<uint16_t>(wledTargets.size());
 
   // Write counts (little-endian u16)
   auto writeU16 = [&](uint16_t v) {
@@ -1072,8 +1144,11 @@ CompileResult compileShow(const std::string& showText,
   writeU16(profileCount);
   writeU16(fixtureCount);
   writeU16(matrixCount);
-  if (version == 2) {
+  if (version >= 2) {
     writeU16(mdefCount);
+  }
+  if (version >= 3) {
+    writeU16(wledCount);
   }
 
   // Universe table
@@ -1128,12 +1203,22 @@ CompileResult compileShow(const std::string& showText,
     writeU16(mi.startChannel);
   }
 
-  // Controller (mdef) table -- v2 only.
+  // Controller (mdef) table -- v2+ only.
   for (const auto& blob : controllerBlobs) {
     writeU16(static_cast<uint16_t>(blob.size()));
     for (uint8_t b : blob) {
       writeU8(b);
     }
+  }
+
+  // WLED target table -- v3 only.
+  for (const auto& wt : wledTargets) {
+    writeU8(static_cast<uint8_t>(wt.name.size()));
+    for (char c : wt.name) writeU8(static_cast<uint8_t>(c));
+    writeU8(static_cast<uint8_t>(wt.ip.size()));
+    for (char c : wt.ip) writeU8(static_cast<uint8_t>(c));
+    writeU16(wt.port);
+    writeU8(wt.syncGroup);
   }
 
   result.ok = true;

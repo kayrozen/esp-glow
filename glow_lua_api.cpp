@@ -1,5 +1,6 @@
 #include "glow_lua_api.h"
 
+#include <algorithm>
 #include <cstring>
 
 #include "effects.h"
@@ -11,6 +12,7 @@
 #include "pixel_patterns.h"
 #include "show_control.h"
 #include "vec_math.h"
+#include "wled_manager.h"
 
 namespace {
 
@@ -125,6 +127,24 @@ uint16_t checkFixtureId(lua_State* L, int idx) {
   return static_cast<uint16_t>(v);
 }
 
+// Clamps an opts-table numeric field (speed/intensity/brightness/palette
+// byte, etc.) into 0..255 before the narrowing cast to uint8_t --
+// float-to-integral conversion of an out-of-range value is undefined
+// behavior in C++, and a Fennel script passing e.g. :speed 999 is exactly
+// the kind of value a live-coding REPL will see in practice.
+uint8_t clampByte(double v) {
+  if (v < 0.0) return 0;
+  if (v > 255.0) return 255;
+  return static_cast<uint8_t>(v);
+}
+
+std::string optStringField(lua_State* L, int idx, const char* key, const char* def) {
+  lua_getfield(L, idx, key);
+  std::string v = lua_isstring(L, -1) ? lua_tostring(L, -1) : def;
+  lua_pop(L, 1);
+  return v;
+}
+
 std::vector<uint16_t> checkFixtureIdList(lua_State* L, int idx) {
   luaL_checktype(L, idx, LUA_TTABLE);
   std::vector<uint16_t> ids;
@@ -144,9 +164,9 @@ std::vector<uint16_t> checkFixtureIdList(lua_State* L, int idx) {
 
 GlowLuaApi::GlowLuaApi(glow::LuaVM& vm, ShowController& show, IMatrixRegistry* matrices,
                        glow::BeatClock& beatClock, LiveControl& liveControl,
-                       IFixtureRegistry* fixtures, LedFeedback* ledFeedback)
+                       IFixtureRegistry* fixtures, LedFeedback* ledFeedback, WledManager* wled)
     : vm_(vm), show_(show), matrices_(matrices), beatClock_(beatClock),
-      liveControl_(liveControl), fixtures_(fixtures), ledFeedback_(ledFeedback) {}
+      liveControl_(liveControl), fixtures_(fixtures), ledFeedback_(ledFeedback), wled_(wled) {}
 
 GlowLuaApi::~GlowLuaApi() = default;
 
@@ -746,6 +766,99 @@ int GlowLuaApi::l_led_auto(lua_State* L) {
   return 0;
 }
 
+// --- glow.wled.* ---------------------------------------------------------
+
+int GlowLuaApi::l_wled_fx(lua_State* L) {
+  GlowLuaApi& api = self(L);
+  if (api.wled_ == nullptr) return luaL_error(L, "glow.wled: no WLED targets on this device");
+
+  const char* name = luaL_checkstring(L, 1);
+  const char* effectName = luaL_checkstring(L, 2);
+  if (!api.wled_->target(name)) {
+    return luaL_error(L, "glow.wled.fx: unknown WLED target '%s'", name);
+  }
+
+  double speed = 128, intensity = 128, brightness = 255, transition = 0;
+  std::string palette = "default";
+  if (lua_gettop(L) >= 3 && !lua_isnil(L, 3)) {
+    luaL_checktype(L, 3, LUA_TTABLE);
+    speed = optNumberField(L, 3, "speed", speed);
+    intensity = optNumberField(L, 3, "intensity", intensity);
+    brightness = optNumberField(L, 3, "brightness", brightness);
+    transition = optNumberField(L, 3, "transition", transition);
+    palette = optStringField(L, 3, "palette", "default");
+  }
+
+  api.wled_->setEffect(name, effectName, clampByte(speed), clampByte(intensity),
+                       clampByte(brightness), palette,
+                       static_cast<uint16_t>(std::clamp(transition, 0.0, 65535.0)));
+  return 0;
+}
+
+int GlowLuaApi::l_wled_color(lua_State* L) {
+  GlowLuaApi& api = self(L);
+  if (api.wled_ == nullptr) return luaL_error(L, "glow.wled: no WLED targets on this device");
+
+  const char* name = luaL_checkstring(L, 1);
+  lua_Integer r = luaL_checkinteger(L, 2);
+  lua_Integer g = luaL_checkinteger(L, 3);
+  lua_Integer b = luaL_checkinteger(L, 4);
+  if (!api.wled_->target(name)) {
+    return luaL_error(L, "glow.wled.color: unknown WLED target '%s'", name);
+  }
+
+  double brightness = 255, transition = 0;
+  if (lua_gettop(L) >= 5 && !lua_isnil(L, 5)) {
+    luaL_checktype(L, 5, LUA_TTABLE);
+    brightness = optNumberField(L, 5, "brightness", brightness);
+    transition = optNumberField(L, 5, "transition", transition);
+  }
+
+  api.wled_->setSolidColor(name, clampByte(static_cast<double>(r)), clampByte(static_cast<double>(g)),
+                           clampByte(static_cast<double>(b)), clampByte(brightness),
+                           static_cast<uint16_t>(std::clamp(transition, 0.0, 65535.0)));
+  return 0;
+}
+
+int GlowLuaApi::l_wled_on(lua_State* L) {
+  GlowLuaApi& api = self(L);
+  if (api.wled_ == nullptr) return luaL_error(L, "glow.wled: no WLED targets on this device");
+  const char* name = luaL_checkstring(L, 1);
+  if (!api.wled_->target(name)) return luaL_error(L, "glow.wled.on: unknown WLED target '%s'", name);
+  api.wled_->setPower(name, true);
+  return 0;
+}
+
+int GlowLuaApi::l_wled_off(lua_State* L) {
+  GlowLuaApi& api = self(L);
+  if (api.wled_ == nullptr) return luaL_error(L, "glow.wled: no WLED targets on this device");
+  const char* name = luaL_checkstring(L, 1);
+  if (!api.wled_->target(name)) return luaL_error(L, "glow.wled.off: unknown WLED target '%s'", name);
+  api.wled_->setPower(name, false);
+  return 0;
+}
+
+int GlowLuaApi::l_wled_fx_broadcast(lua_State* L) {
+  GlowLuaApi& api = self(L);
+  if (api.wled_ == nullptr) return luaL_error(L, "glow.wled: no WLED targets on this device");
+
+  const char* effectName = luaL_checkstring(L, 1);
+
+  double speed = 128, intensity = 128, brightness = 255;
+  std::string palette = "default";
+  if (lua_gettop(L) >= 2 && !lua_isnil(L, 2)) {
+    luaL_checktype(L, 2, LUA_TTABLE);
+    speed = optNumberField(L, 2, "speed", speed);
+    intensity = optNumberField(L, 2, "intensity", intensity);
+    brightness = optNumberField(L, 2, "brightness", brightness);
+    palette = optStringField(L, 2, "palette", "default");
+  }
+
+  api.wled_->broadcastEffect(effectName, clampByte(speed), clampByte(intensity),
+                             clampByte(brightness), palette);
+  return 0;
+}
+
 // --- install -----------------------------------------------------------------
 
 void GlowLuaApi::install() {
@@ -815,6 +928,14 @@ void GlowLuaApi::install() {
   registerFn(L, -1, "set", &GlowLuaApi::l_led_set, this);
   registerFn(L, -1, "auto", &GlowLuaApi::l_led_auto, this);
   lua_setfield(L, glowIdx, "led");
+
+  lua_newtable(L);  // glow.wled
+  registerFn(L, -1, "fx", &GlowLuaApi::l_wled_fx, this);
+  registerFn(L, -1, "color", &GlowLuaApi::l_wled_color, this);
+  registerFn(L, -1, "on", &GlowLuaApi::l_wled_on, this);
+  registerFn(L, -1, "off", &GlowLuaApi::l_wled_off, this);
+  registerFn(L, -1, "fx-broadcast", &GlowLuaApi::l_wled_fx_broadcast, this);
+  lua_setfield(L, glowIdx, "wled");
 
   lua_setglobal(L, "glow");
 }

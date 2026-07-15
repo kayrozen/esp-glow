@@ -35,3 +35,8 @@ MATRIX 3 1 16 8 SERP H RGB
 # An Akai APC40 mkII for MIDI control + LED feedback (see FORMAT.md's MDF1
 # section, glow.bind.*/glow.led.* in README_LIVE_CONTROL.md).
 CONTROLLER samples/apc40.mdef
+
+# A WLED matrix, addressed by name from Fennel as glow.wled.* (see
+# README_WLED.md). Independent of the DMX/Art-Net universes above -- not
+# patched to a channel.
+WLED "wled_matrix" "192.168.1.150" 1

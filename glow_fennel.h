@@ -17,6 +17,7 @@ class IFixtureRegistry;
 class GlowLuaApi;
 class LiveControl;
 class LedFeedback;
+class WledManager;
 namespace glow {
 class LuaVM;
 class BeatClock;
@@ -43,6 +44,9 @@ namespace glow {
 // comment). ledFeedback backs glow.led.*; nullptr makes every glow.led.*
 // call a silent no-op (a controller with no .mdef, or none at all).
 //
+// wled backs glow.wled.*; nullptr makes every glow.wled.* call a clear Lua
+// error (a device with no WLED targets in its .show).
+//
 // Returns false (fills errOut) on failure. The caller's contract per the
 // design doc is: fall back to a safe blackout, never run with a
 // half-initialized VM.
@@ -51,7 +55,8 @@ bool glowLuaInit(ShowController& show, IMatrixRegistry* matrices, BeatClock& bea
                  const char* fennelSrc, size_t fennelSrcLen,
                  char* errOut, size_t errCap,
                  size_t capBytes = 0, int frameInstrBudget = 0, int evalInstrBudget = 0,
-                 IFixtureRegistry* fixtures = nullptr, LedFeedback* ledFeedback = nullptr);
+                 IFixtureRegistry* fixtures = nullptr, LedFeedback* ledFeedback = nullptr,
+                 WledManager* wled = nullptr);
 
 // Host tests only: tears down the singleton so the next glowLuaInit starts
 // clean. Never called on device — there is exactly one VM for the

@@ -13,6 +13,7 @@
 
 #include "show.h"
 #include "show_bundle.h"
+#include "wled_manager.h"
 #include <cstdint>
 
 // Factory that returns the sink to use for a given universe's transport.
@@ -32,6 +33,7 @@ struct ApplyResult {
   uint16_t fixturesPatched     = 0;
   uint16_t headsPatched        = 0;
   uint16_t matrixUniverses     = 0;  // universes marked Raw for a matrix
+  uint16_t wledTargetsApplied  = 0;  // WLED targets added to `wled` (0 if wled is nullptr)
 };
 
 // Apply a LoadedShow to a live Show:
@@ -41,13 +43,20 @@ struct ApplyResult {
 //        - Fixture otherwise (patched fixtures write into these)
 //   3. Configure each universe with its mode + the factory's sink.
 //   4. patch / patchHead every fixture in ls.fixtures.
+//   5. addTarget every ls.wledTargets entry into `wled`, if non-null.
 //
 // Matrices themselves are NOT constructed here (the Show does not own
 // PixelMatrix objects); the caller iterates ls.matrices afterwards to build
 // PixelMatrix instances and feed them via the render pre_render hook. We only
 // ensure their universes are configured Raw with a sink so renderFrame
 // flushes them.
-ApplyResult applyLoadedShow(const LoadedShow& ls, Show& show, ISinkFactory& factory);
+//
+// wled is nullptr on a device with no WLED transport configured (or in
+// tests that don't care about it) -- ls.wledTargets is simply skipped, same
+// "device has none of this" convention as ISinkFactory returning nullptr
+// for an unsupported transport.
+ApplyResult applyLoadedShow(const LoadedShow& ls, Show& show, ISinkFactory& factory,
+                            WledManager* wled = nullptr);
 
 // Helper: how many universes a matrix occupies (same formula as
 // PixelMatrix::universeCount, kept here so applyLoadedShow is self-contained

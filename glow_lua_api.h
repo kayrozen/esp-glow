@@ -20,6 +20,7 @@ class PixelMatrix;
 class IPixelPattern;
 class LuaEffect;
 class LedFeedback;
+class WledManager;
 namespace glow {
 class LuaVM;
 }
@@ -72,6 +73,13 @@ public:
 //                                 for a controller with a .mdef. No-op, not
 //                                 an error, when null or the addressed pad/
 //                                 fader has no LED (see mdef.h/FORMAT.md).
+//   glow.wled.fx/color/on/off/fx-broadcast — wraps WledManager (nullable):
+//                                 named WLED UDP Notifier targets declared
+//                                 by the .show file's WLED directive (see
+//                                 README_WLED.md). Fire-and-forget, not
+//                                 frame-context-gated (unlike glow.set/aim) —
+//                                 callable from anywhere a cue effect or the
+//                                 REPL can run.
 //
 // One instance per LuaVM (see lua_vm.h — there is exactly one VM, owned by
 // the render task; see control_queue.h's rationale, which this reuses).
@@ -87,9 +95,13 @@ public:
   // LiveControl is a fully valid "nothing bound yet" state), so there is no
   // "not present on this device" case to model with a null pointer for
   // either.
+  // wled backs glow.wled.*; nullptr disables it with a clear Lua error, same
+  // "device has none of this" convention as matrices/fixtures above (a
+  // device whose .show has no WLED directive still runs everything else).
   GlowLuaApi(glow::LuaVM& vm, ShowController& show, IMatrixRegistry* matrices,
             glow::BeatClock& beatClock, LiveControl& liveControl,
-            IFixtureRegistry* fixtures = nullptr, LedFeedback* ledFeedback = nullptr);
+            IFixtureRegistry* fixtures = nullptr, LedFeedback* ledFeedback = nullptr,
+            WledManager* wled = nullptr);
   ~GlowLuaApi();
 
   GlowLuaApi(const GlowLuaApi&) = delete;
@@ -162,6 +174,12 @@ private:
   static int l_led_set(lua_State* L);
   static int l_led_auto(lua_State* L);
 
+  static int l_wled_fx(lua_State* L);
+  static int l_wled_color(lua_State* L);
+  static int l_wled_on(lua_State* L);
+  static int l_wled_off(lua_State* L);
+  static int l_wled_fx_broadcast(lua_State* L);
+
   static GlowLuaApi& self(lua_State* L);
 
   // Resolves each entry of the Lua array-table on top of the stack (either
@@ -188,6 +206,7 @@ private:
   LiveControl& liveControl_;
   IFixtureRegistry* fixtures_;
   LedFeedback* ledFeedback_;
+  WledManager* wled_;
 
   float currentT_ = 0.0f;
   std::vector<CapIntent>* frameCaps_ = nullptr;

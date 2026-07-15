@@ -59,6 +59,8 @@
 #include "pixel_patterns.h"
 #include "show_bundle.h"
 #include "apply_loaded_show.h"
+#include "wled_manager.h"
+#include "wled_udp_sink.h"
 
 #include "beat_clock.h"
 #include "beat_queue.h"
@@ -125,6 +127,14 @@ static DeviceConfig defaultDeviceConfigFromKconfig() {
 static Show         g_show;
 static DmxSink*      g_dmx = nullptr;
 static ArtNetSink*   g_artnet = nullptr;
+
+// WLED UDP Notifier targets (see README_WLED.md / wled_manager.h). Same
+// "constructed early, begun once netif is up" split as g_artnet: g_wled is
+// safe to addTarget()/glow.wled.* against from boot (sends are simply
+// dropped -- WledUdpSink::send() no-ops until begin() opens the socket), so
+// setup_show_from_bundle can populate it below before WiFi ever comes up.
+static WledUdpSink  g_wledSink;
+static WledManager  g_wled(&g_wledSink);
 
 // F6: ShowController is itself an IEffect (show_control.h) -- it does not
 // sit "beside" Show, it plugs INTO it as an effect, the same way any other
@@ -653,7 +663,7 @@ static void setup_lua() {
   char err[256];
   g_luaReady = glow::glowLuaInit(g_controller, &g_matrixRegistry, g_beatClock, g_liveControl,
                                  fennelSrc, fennelLen, err, sizeof(err),
-                                 0, 0, 0, &g_fixtureRegistry, g_ledFeedback);
+                                 0, 0, 0, &g_fixtureRegistry, g_ledFeedback, &g_wled);
   if (!g_luaReady) {
     ESP_LOGE(TAG, "Lua/Fennel init failed (scripts disabled this boot): %s", err);
     // F5: whatever a bundle's matrices are doing (e.g. the default rainbow
@@ -767,10 +777,11 @@ static bool setup_show_from_bundle() {
 #endif
 
   DeviceSinkFactory factory;
-  ApplyResult r = applyLoadedShow(ls, g_show, factory);
-  ESP_LOGI(TAG, "applied: %u universes configured, %u skipped, %u fixtures (%u heads), %u matrix universes",
+  ApplyResult r = applyLoadedShow(ls, g_show, factory, &g_wled);
+  ESP_LOGI(TAG, "applied: %u universes configured, %u skipped, %u fixtures (%u heads), "
+                "%u matrix universes, %u WLED targets",
            r.universesConfigured, r.universesSkipped, r.fixturesPatched,
-           r.headsPatched, r.matrixUniverses);
+           r.headsPatched, r.matrixUniverses, r.wledTargetsApplied);
 
   // Build PixelMatrix objects for each matrix entry. Each gets a rainbow
   // pattern by default; a richer config (F4) can map patterns per matrix.
@@ -1072,6 +1083,18 @@ extern "C" void app_main(void) {
     } else {
 #ifdef CONFIG_GLOW_SELFTEST
       printf("GLOW-TEST: artnet tx=ok\n");
+#endif
+    }
+
+    // --- WLED UDP Notifier sink begin() -- same "constructed early, begun
+    // once netif is up" split as Art-Net above. g_wled itself was already
+    // populated by setup_show_from_bundle so glow.wled.* is patchable from
+    // boot.fnl regardless of when/whether the socket comes up. ---
+    if (!g_wledSink.begin()) {
+      ESP_LOGE(TAG, "WLED UDP socket failed; glow.wled.* sends disabled.");
+    } else {
+#ifdef CONFIG_GLOW_SELFTEST
+      printf("GLOW-TEST: wled tx=ok\n");
 #endif
     }
 
