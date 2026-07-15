@@ -87,18 +87,21 @@ bool loadShow(const uint8_t* data, size_t len, LoadedShow& out) {
   // otherwise (a false positive -- the host build's GCC/-O0 doesn't hit it).
   uint8_t version = 0;
   if (!reader.readU8(version)) return false;
-  if (version != 1 && version != 2 && version != 4) return false;
+  if (version != 1 && version != 2 && version != 3 && version != 4) return false;
 
   uint8_t universeCount;
   if (!reader.readU8(universeCount)) return false;
   if (universeCount > 8) return false;
 
-  uint16_t profileCount, fixtureCount, matrixCount, mdefCount = 0;
+  uint16_t profileCount, fixtureCount, matrixCount, mdefCount = 0, wledCount = 0;
   if (!reader.readU16(profileCount)) return false;
   if (!reader.readU16(fixtureCount)) return false;
   if (!reader.readU16(matrixCount)) return false;
   if (version >= 2) {
     if (!reader.readU16(mdefCount)) return false;
+  }
+  if (version >= 3) {
+    if (!reader.readU16(wledCount)) return false;
   }
 
   out.universeCount = universeCount;
@@ -266,6 +269,31 @@ bool loadShow(const uint8_t* data, size_t len, LoadedShow& out) {
     for (int j = 0; j < blobLen; j++) {
       if (!reader.readU8(dummy)) return false;
     }
+  }
+
+  // WLED target table -- v3+ only.
+    uint8_t nameLen;
+    if (!reader.readU8(nameLen)) return false;
+    uint8_t nameBuf[255];
+    if (!reader.readBytes(nameBuf, nameLen)) return false;
+
+    uint8_t ipLen;
+    if (!reader.readU8(ipLen)) return false;
+    uint8_t ipBuf[255];
+    if (!reader.readBytes(ipBuf, ipLen)) return false;
+
+    uint16_t port;
+    if (!reader.readU16(port)) return false;
+
+    uint8_t syncGroup;
+    if (!reader.readU8(syncGroup)) return false;
+
+    WledTarget t;
+    t.name.assign(reinterpret_cast<const char*>(nameBuf), nameLen);
+    t.ip.assign(reinterpret_cast<const char*>(ipBuf), ipLen);
+    t.port = port;
+    t.syncGroup = syncGroup;
+    out.wledTargets.push_back(std::move(t));
   }
 
   return true;

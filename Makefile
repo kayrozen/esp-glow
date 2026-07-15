@@ -37,7 +37,7 @@ GLOW_LUA_SOURCES = lua_vm.cpp glow_lua_api.cpp lua_effect.cpp glow_fennel.cpp ev
                    vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp show.cpp \
                    oscillator.cpp color.cpp effects.cpp show_control.cpp pixel_matrix.cpp \
                    pixel_patterns.cpp beat_clock.cpp live_control.cpp led_feedback.cpp mdef.cpp \
-                   controller_encoder.cpp
+                   controller_encoder.cpp wled_packet.cpp wled_manager.cpp
 
 # --- test_aim: aim/vec_math geometry tests ---
 AIM_SOURCES = vec_math.cpp aim.cpp test_aim.cpp
@@ -296,11 +296,20 @@ $(PACING_TARGET): $(PACING_OBJECTS)
 
 # --- test_apply_loaded_show: F3 patch-routing glue (host-tested) ---
 APPLY_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp mdef.cpp show.cpp show_bundle.cpp \
-                pixel_matrix.cpp apply_loaded_show.cpp test_apply_loaded_show.cpp
+                pixel_matrix.cpp wled_packet.cpp wled_manager.cpp apply_loaded_show.cpp \
+                test_apply_loaded_show.cpp
 APPLY_OBJECTS = $(APPLY_SOURCES:.cpp=.o)
 APPLY_TARGET  = test_apply_loaded_show
 $(APPLY_TARGET): $(APPLY_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(APPLY_OBJECTS) -o $(APPLY_TARGET) -lm
+
+# --- test_wled: WLED UDP Notifier packet layout, effect/palette maps, and
+# WledManager tests (README_WLED.md). ---
+WLED_SOURCES = wled_packet.cpp wled_manager.cpp test_wled.cpp
+WLED_OBJECTS = $(WLED_SOURCES:.cpp=.o)
+WLED_TARGET  = test_wled
+$(WLED_TARGET): $(WLED_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(WLED_OBJECTS) -o $(WLED_TARGET) -lm
 
 # --- test_beat_clock: musical-time PLL beat clock (host-tested; see
 # beat_clock.h's header for why this is the load-bearing test in the
@@ -381,7 +390,7 @@ ARTNET_DISCOVERY_TARGET  = test_artnet_discovery
 $(ARTNET_DISCOVERY_TARGET): $(ARTNET_DISCOVERY_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(ARTNET_DISCOVERY_OBJECTS) -o $(ARTNET_DISCOVERY_TARGET) -lm
 
-test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET) $(LIVE_CONTROL_TARGET) $(MDEF_TARGET) $(LED_FEEDBACK_TARGET) $(WEB_PROTOCOL_TARGET) $(CONTROL_QUEUE_TARGET) $(PACING_TARGET) $(APPLY_TARGET) $(LUA_VM_TARGET) $(LUA_EFFECT_TARGET) $(GLOW_LUA_API_TARGET) $(GLOW_FENNEL_TARGET) $(SCRIPTS_STORAGE_TARGET) $(FX_ERROR_PIPELINE_TARGET) $(OSC_PARSER_TARGET) $(LITTLEFS_IMAGE_TARGET) $(BEAT_CLOCK_TARGET) $(BEAT_QUEUE_TARGET) $(MIDI_REALTIME_TARGET) $(DJLINK_PARSER_TARGET) $(DJLINK_MASTER_TARGET) $(SAFE_BLACKOUT_TARGET) $(DEVICE_CONFIG_TARGET) $(ARTNET_ROUTER_TARGET) $(ARTNET_DISCOVERY_TARGET)
+test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET) $(LIVE_CONTROL_TARGET) $(MDEF_TARGET) $(LED_FEEDBACK_TARGET) $(WEB_PROTOCOL_TARGET) $(CONTROL_QUEUE_TARGET) $(PACING_TARGET) $(APPLY_TARGET) $(WLED_TARGET) $(LUA_VM_TARGET) $(LUA_EFFECT_TARGET) $(GLOW_LUA_API_TARGET) $(GLOW_FENNEL_TARGET) $(SCRIPTS_STORAGE_TARGET) $(FX_ERROR_PIPELINE_TARGET) $(OSC_PARSER_TARGET) $(LITTLEFS_IMAGE_TARGET) $(BEAT_CLOCK_TARGET) $(BEAT_QUEUE_TARGET) $(MIDI_REALTIME_TARGET) $(DJLINK_PARSER_TARGET) $(DJLINK_MASTER_TARGET) $(SAFE_BLACKOUT_TARGET) $(DEVICE_CONFIG_TARGET) $(ARTNET_ROUTER_TARGET) $(ARTNET_DISCOVERY_TARGET)
 	./$(AIM_TARGET)
 	./$(FP_TARGET)
 	./$(SHOW_TARGET)
@@ -396,6 +405,7 @@ test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL
 	./$(CONTROL_QUEUE_TARGET)
 	./$(PACING_TARGET)
 	./$(APPLY_TARGET)
+	./$(WLED_TARGET)
 	./$(LUA_VM_TARGET)
 	./$(LUA_EFFECT_TARGET)
 	./$(GLOW_LUA_API_TARGET)
@@ -460,6 +470,7 @@ clean:
 	      $(CONTROL_QUEUE_TARGET) \
 	      $(PACING_OBJECTS) $(PACING_TARGET) \
 	      $(APPLY_OBJECTS) $(APPLY_TARGET) \
+	      $(WLED_OBJECTS) $(WLED_TARGET) \
 	      $(LUA_VM_OBJECTS) $(LUA_VM_TARGET) \
 	      $(LUA_EFFECT_OBJECTS) $(LUA_EFFECT_TARGET) \
 	      $(GLOW_LUA_API_OBJECTS) $(GLOW_LUA_API_TARGET) \

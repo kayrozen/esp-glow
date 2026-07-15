@@ -96,6 +96,12 @@ idf_component_register(
         # socket/task wiring it onto ArtNetSink (#ifdef ESP_PLATFORM guarded)
         ${GLOW_ROOT}/artnet_discovery.cpp
         ${GLOW_ROOT}/artnet_discovery_task.cpp
+        # WLED UDP Notifier support (README_WLED.md): host-testable packet
+        # builder + named-target manager, plus the device-only UDP transport
+        # (#ifdef ESP_PLATFORM guarded, same split as artnet_sink.cpp above)
+        ${GLOW_ROOT}/wled_packet.cpp
+        ${GLOW_ROOT}/wled_manager.cpp
+        ${GLOW_ROOT}/wled_udp_sink.cpp
         # F6: the Lua/Fennel live-coding layer
         ${GLOW_ROOT}/lua_vm.cpp
         ${GLOW_ROOT}/glow_lua_api.cpp

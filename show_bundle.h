@@ -5,6 +5,7 @@
 #include "pixel_matrix.h"
 #include "mdef.h"
 #include "show.h"
+#include "wled_target.h"
 #include <vector>
 #include <cstdint>
 
@@ -25,11 +26,21 @@
 //   matrixCount   u16
 //   mdefCount     u16   (v2+)
 //
-// Version 4 (Wave 3): same header as v2 (always carries mdefCount), but the
-// universe table entries grow from 1 byte to 7 -- see below. Emitted only
-// when the .show actually used the new `UNIVERSE ... ARTNET <ip>
-// [<wireUniverse>]` grammar (provision.cpp's compileShow); a .show with no
-// explicit Art-Net routing still compiles to v1/v2/v3 bytes, unchanged.
+// Version 3 header inserts one more field after mdefCount, same additive
+// convention -- everything through the controller table is byte-identical
+// to v2. mdefCount is always present at v3+ (0 if the show has no
+// CONTROLLER) so the header stays self-describing without a per-version
+// three-way branch past this point.
+//   ...
+//   mdefCount     u16   (v2+)
+//   wledCount     u16   (v3+)
+//
+// Version 4 (Wave 3): same header as v3 (carries mdefCount + wledCount),
+// but the universe table entries grow from 1 byte to 7 -- see below.
+// Emitted only when the .show actually used the new `UNIVERSE ... ARTNET
+// <ip> [<wireUniverse>]` grammar (provision.cpp's compileShow); a .show
+// with no explicit Art-Net routing still compiles to v1/v2/v3 bytes,
+// unchanged.
 //
 // Universe table (universeCount entries):
 //   v1/v2/v3 -- 1 byte each:
@@ -67,6 +78,13 @@
 // Controller (mdef) table (v2+ only, mdefCount entries):
 //   blobLen       u16
 //   blob          blobLen bytes   (an MDF1 controller definition, mdef.h)
+// WLED target table (v3+ only, wledCount entries):
+//   nameLen       u8
+//   name          nameLen bytes  (UTF-8, not NUL-terminated)
+//   ipLen         u8
+//   ip            ipLen bytes    (UTF-8 IPv4 dotted-quad or 255.255.255.255)
+//   port          u16
+//   syncGroup     u8
 
 enum class UniverseTransport : uint8_t {
   Dmx = 0,
@@ -96,6 +114,7 @@ struct LoadedShow {
   std::vector<PatchEntry> fixtures;
   std::vector<MatrixMap> matrices;
   std::vector<MidiControllerProfile> controllers;  // v2+ only; usually 0 or 1 (see B1)
+  std::vector<WledTarget> wledTargets;              // v3+ only
 };
 
 // Load a SHW1 bundle from a byte buffer.

@@ -1,9 +1,11 @@
 #include "provision.h"
 #include "profile_encoder.h"
 #include "show_bundle.h"
+#include "wled_target.h"
 #include <sstream>
 #include <map>
 #include <utility>
+#include <set>
 #include <algorithm>
 #include <cstring>
 #include <cstdlib>
@@ -69,6 +71,20 @@ static std::string& stripComments(std::string& line) {
     line.erase(pos);
   }
   return line;
+}
+
+// tokenize() splits on whitespace only -- it does not understand quoting.
+// WLED's <name>/<ip> tokens (provision.h's grammar comment) may optionally
+// be written double-quoted for readability; since a quote never appears
+// next to whitespace inside a valid name or IP, stripping one matching pair
+// of leading/trailing quotes here is equivalent to real quote parsing for
+// this grammar without touching tokenize() and every other directive that
+// relies on its plain whitespace-split behavior.
+static std::string stripQuotes(const std::string& s) {
+  if (s.size() >= 2 && s.front() == '"' && s.back() == '"') {
+    return s.substr(1, s.size() - 2);
+  }
+  return s;
 }
 
 // Parses `s` as a base-10 integer without ever throwing. This compiler's
@@ -674,6 +690,8 @@ CompileResult compileShow(const std::string& showText,
   std::vector<std::vector<uint8_t>> profileBlobs;
   std::map<std::string, int> controllerIndexMap;  // defFile -> mdef blob index
   std::vector<std::vector<uint8_t>> controllerBlobs;
+  std::vector<WledTarget> wledTargets;
+  std::set<std::string> wledNames;
 
   // Wave 3: (destIp, wireUniverse) -> the internal universe index that
   // already claimed it. Two ARTNET universes resolving to the same pair is
@@ -1034,6 +1052,51 @@ CompileResult compileShow(const std::string& showText,
         controllerBlobs.push_back(std::move(blob));
       }
 
+    } else if (cmd == "WLED") {
+      if (tokens.size() < 3) {
+        result.err = "WLED: missing name or ip";
+        return result;
+      }
+
+      WledTarget wt;
+      wt.name = stripQuotes(tokens[1]);
+      wt.ip = stripQuotes(tokens[2]);
+      wt.port = WLED_DEFAULT_PORT;
+      wt.syncGroup = 1;
+
+      if (wt.name.empty()) {
+        result.err = "WLED: name must not be empty";
+        return result;
+      }
+      if (wt.ip.empty()) {
+        result.err = "WLED: ip must not be empty";
+        return result;
+      }
+      if (wt.name.size() > 255 || wt.ip.size() > 255) {
+        result.err = "WLED: name/ip must be 255 bytes or shorter";
+        return result;
+      }
+      if (wledNames.count(wt.name)) {
+        result.err = "WLED: duplicate name '" + wt.name + "'";
+        return result;
+      }
+
+      if (tokens.size() >= 4) {
+        int syncGroupInt;
+        if (!parseIntToken(tokens[3], syncGroupInt)) {
+          result.err = "WLED: invalid syncGroup";
+          return result;
+        }
+        if (syncGroupInt < 1 || syncGroupInt > 8) {
+          result.err = "WLED: syncGroup out of range (1..8)";
+          return result;
+        }
+        wt.syncGroup = static_cast<uint8_t>(syncGroupInt);
+      }
+
+      wledNames.insert(wt.name);
+      wledTargets.push_back(std::move(wt));
+
     } else if (!cmd.empty()) {
       result.err = "Unknown command: " + cmd;
       return result;
@@ -1117,16 +1180,23 @@ CompileResult compileShow(const std::string& showText,
   // Build universe count
   uint8_t universeCount = maxUniverse + 1;
 
-  // Write SHW1 bundle. Version 2 (mdefCount + a trailing controller table)
-  // when at least one CONTROLLER was compiled; version 4 (v2's header plus
-  // a 7-byte-per-entry universe table carrying destIp/wireUniverse) when at
-  // least one UNIVERSE ARTNET line gave an explicit ip/wireUniverse -- byte-
-  // identical to v1/v2 otherwise, same "only bump the version once the new
-  // feature is actually used" convention as ProfileBuilder::encode's PFX2.
+  // Write SHW1 bundle. Version bumps only when the new feature that needs it
+  // is actually used -- byte-identical to the smaller layout otherwise, same
+  // convention as ProfileBuilder::encode's PFX2. v2 adds mdefCount + a
+  // trailing controller table (>= 1 CONTROLLER); v3 additionally adds
+  // wledCount + a trailing WLED target table (>= 1 WLED) and always carries
+  // mdefCount too (even if 0); v4 additionally grows the universe table to
+  // 7 bytes/entry carrying destIp/wireUniverse (>= 1 UNIVERSE ARTNET with an
+  // explicit ip/wireUniverse) and always carries mdefCount + wledCount too.
+  // The header stays self-describing without a per-version branch past it
+  // (see show_bundle.h). A .show using both WLED and explicit Art-Net routing
+  // compiles to a single v4 bundle carrying both tables.
   std::vector<uint8_t> bundle;
   uint8_t version = 1;
   if (anyExplicitArtnetRoute) {
     version = 4;
+  } else if (!wledTargets.empty()) {
+    version = 3;
   } else if (!controllerBlobs.empty()) {
     version = 2;
   }
@@ -1143,6 +1213,7 @@ CompileResult compileShow(const std::string& showText,
   uint16_t fixtureCount = static_cast<uint16_t>(fixtures.size());
   uint16_t matrixCount = static_cast<uint16_t>(matrices.size());
   uint16_t mdefCount = static_cast<uint16_t>(controllerBlobs.size());
+  uint16_t wledCount = static_cast<uint16_t>(wledTargets.size());
 
   // Write counts (little-endian u16)
   auto writeU16 = [&](uint16_t v) {
@@ -1175,6 +1246,9 @@ CompileResult compileShow(const std::string& showText,
   writeU16(matrixCount);
   if (version >= 2) {
     writeU16(mdefCount);
+  }
+  if (version >= 3) {
+    writeU16(wledCount);
   }
 
   // Universe table: 1 byte/entry (transport only) for v1/v2/v3, 7 bytes/entry
@@ -1240,6 +1314,15 @@ CompileResult compileShow(const std::string& showText,
     for (uint8_t b : blob) {
       writeU8(b);
     }
+  }
+
+  // WLED target table -- v3+ only.
+    writeU8(static_cast<uint8_t>(wt.name.size()));
+    for (char c : wt.name) writeU8(static_cast<uint8_t>(c));
+    writeU8(static_cast<uint8_t>(wt.ip.size()));
+    for (char c : wt.ip) writeU8(static_cast<uint8_t>(c));
+    writeU16(wt.port);
+    writeU8(wt.syncGroup);
   }
 
   result.ok = true;

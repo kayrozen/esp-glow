@@ -26,7 +26,7 @@ bool glowLuaInit(ShowController& show, IMatrixRegistry* matrices, BeatClock& bea
                  const char* fennelSrc, size_t fennelSrcLen,
                  char* errOut, size_t errCap,
                  size_t capBytes, int frameInstrBudget, int evalInstrBudget,
-                 IFixtureRegistry* fixtures, LedFeedback* ledFeedback) {
+                 IFixtureRegistry* fixtures, LedFeedback* ledFeedback, WledManager* wled) {
   if (g_ready) return true;  // already initialized; not re-entrant per design (one VM)
 
   size_t cap = capBytes != 0 ? capBytes : LUA_DEFAULT_MEM_CAP_BYTES;
@@ -41,7 +41,7 @@ bool glowLuaInit(ShowController& show, IMatrixRegistry* matrices, BeatClock& bea
   }
 
   g_api = std::make_unique<GlowLuaApi>(*g_vm, show, matrices, beatClock, liveControl,
-                                       fixtures, ledFeedback);
+                                       fixtures, ledFeedback, wled);
   g_api->install();
 
   char loadErr[256];
