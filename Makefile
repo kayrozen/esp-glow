@@ -36,7 +36,8 @@ LUA_C_OBJECTS = $(LUA_C_SOURCES:.c=.o)
 GLOW_LUA_SOURCES = lua_vm.cpp glow_lua_api.cpp lua_effect.cpp glow_fennel.cpp eval_queue.cpp \
                    vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp show.cpp \
                    oscillator.cpp color.cpp effects.cpp show_control.cpp pixel_matrix.cpp \
-                   pixel_patterns.cpp beat_clock.cpp live_control.cpp led_feedback.cpp mdef.cpp
+                   pixel_patterns.cpp beat_clock.cpp live_control.cpp led_feedback.cpp mdef.cpp \
+                   controller_encoder.cpp
 
 # --- test_aim: aim/vec_math geometry tests ---
 AIM_SOURCES = vec_math.cpp aim.cpp test_aim.cpp
@@ -94,7 +95,7 @@ FDEF_CHECK_TARGET  = fdef_check
 
 # --- test_live_control: live control layer (MIDI/OSC/web → cues) tests ---
 LIVE_CONTROL_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp show.cpp \
-                       show_control.cpp live_control.cpp test_live_control.cpp
+                       show_control.cpp mdef.cpp controller_encoder.cpp live_control.cpp test_live_control.cpp
 LIVE_CONTROL_OBJECTS = $(LIVE_CONTROL_SOURCES:.cpp=.o)
 LIVE_CONTROL_TARGET  = test_live_control
 
@@ -125,7 +126,7 @@ WEB_PROTOCOL_TARGET  = test_web_protocol
 # command (no .o files) to avoid flag conflicts with the ASan objects.
 CONTROL_QUEUE_CXXFLAGS = -std=c++17 -Wall -Wextra -Werror -fsanitize=thread -g
 CONTROL_QUEUE_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp show.cpp \
-                        show_control.cpp live_control.cpp control_queue.cpp test_control_queue.cpp
+                        show_control.cpp mdef.cpp controller_encoder.cpp live_control.cpp control_queue.cpp test_control_queue.cpp
 CONTROL_QUEUE_TARGET  = test_control_queue
 
 # --- test_lua_vm: LuaVM unit tests (allocator cap, sandbox, GC pacing,

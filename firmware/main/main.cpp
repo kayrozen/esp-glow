@@ -936,6 +936,11 @@ extern "C" void app_main(void) {
   // first boot.fnl eval instead of racing the UART task's startup.
   if (g_hasController) {
     g_ledFeedback = new LedFeedback(g_controllerProfile, &g_midiOutput);
+    // Channel-significant PAD/FADER ranges (the APC40's clip grid/track
+    // faders) need LiveControl to know the profile too, so incoming events
+    // resolve to the same (channel << 8) | id packed key glow.bind.pad-xy
+    // bound under -- see LiveControl::effectiveId (live_control.h).
+    g_liveControl.setControllerProfile(&g_controllerProfile);
   }
 
   if (!from_bundle) {

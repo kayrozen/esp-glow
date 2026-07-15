@@ -51,9 +51,9 @@ void test_fifo() {
   TEST("FIFO: push A,B,C -> pop returns A,B,C in order; then pop -> false");
   RingControlEventQueue q(8);
 
-  q.push({ControlType::Button, 1, true,  0.0f});
-  q.push({ControlType::Button, 2, true,  0.0f});
-  q.push({ControlType::Button, 3, true,  0.0f});
+  q.push({ControlType::Button, 1, 0, true, 0.0f});
+  q.push({ControlType::Button, 2, 0, true, 0.0f});
+  q.push({ControlType::Button, 3, 0, true, 0.0f});
 
   ControlEvent ev;
   CHECK(q.pop(ev) && ev.id == 1);
@@ -70,9 +70,9 @@ void test_full() {
   TEST("Full: capacity 2, push 3 -> third returns false, dropped()==1");
   RingControlEventQueue q(2);
 
-  CHECK(q.push({ControlType::Button, 1, true, 0.0f}));
-  CHECK(q.push({ControlType::Button, 2, true, 0.0f}));
-  CHECK(!q.push({ControlType::Button, 3, true, 0.0f}));  // full
+  CHECK(q.push({ControlType::Button, 1, 0, true, 0.0f}));
+  CHECK(q.push({ControlType::Button, 2, 0, true, 0.0f}));
+  CHECK(!q.push({ControlType::Button, 3, 0, true, 0.0f}));  // full
   CHECK(q.dropped() == 1);
 
   ControlEvent ev;
@@ -111,7 +111,7 @@ void test_pump_dispatch() {
   RingControlEventQueue q(8);
 
   // Enqueue press, pump -> cue active
-  q.push({ControlType::Button, 60, true, 0.0f});
+  q.push({ControlType::Button, 60, 0, true, 0.0f});
   int n = pumpControlEvents(q, live, 0.0f);
   CHECK(n == 1);
   std::vector<CapIntent> caps;
@@ -120,7 +120,7 @@ void test_pump_dispatch() {
   CHECK(ctrl.isActive(cueId));
 
   // Enqueue release, pump -> cue inactive
-  q.push({ControlType::Button, 60, false, 0.0f});
+  q.push({ControlType::Button, 60, 0, false, 0.0f});
   n = pumpControlEvents(q, live, 1.0f);
   CHECK(n == 1);
   caps.clear();
@@ -143,7 +143,7 @@ void test_max_per_frame() {
   RingControlEventQueue q(8);
 
   for (int i = 0; i < 5; i++) {
-    q.push({ControlType::Button, (uint16_t)i, true, 0.0f});
+    q.push({ControlType::Button, (uint16_t)i, 0, true, 0.0f});
   }
 
   int n = pumpControlEvents(q, live, 0.0f, 2);
@@ -177,9 +177,9 @@ void test_equivalence() {
 
   // Event stream: press (latch on), press (latch off), press (latch on)
   std::vector<ControlEvent> events = {
-    {ControlType::Button, 60, true, 0.0f},
-    {ControlType::Button, 60, true, 0.0f},
-    {ControlType::Button, 60, true, 0.0f},
+    {ControlType::Button, 60, 0, true, 0.0f},
+    {ControlType::Button, 60, 0, true, 0.0f},
+    {ControlType::Button, 60, 0, true, 0.0f},
   };
 
   // Path A: direct handle, one event at a time at t=0,1,2
@@ -217,7 +217,7 @@ void test_concurrency() {
 
   std::thread producer([&]() {
     for (int i = 0; i < N; i++) {
-      ControlEvent ev{ControlType::Button, (uint16_t)(i & 0xFFFF), true, 0.0f};
+      ControlEvent ev{ControlType::Button, (uint16_t)(i & 0xFFFF), 0, true, 0.0f};
       while (!q.push(ev)) {
         // Queue full; yield and retry. The yield is important: without
         // it, a tight spin on the mutex would starve the consumer.

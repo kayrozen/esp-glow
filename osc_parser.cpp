@@ -74,6 +74,7 @@ bool parseOsc(const uint8_t* pkt, size_t len, const OscAddressMap& map, ControlE
     if (std::strcmp(address, b.address) != 0) continue;
     out.type = b.type;
     out.id = b.id;
+    out.channel = 0;  // OSC has no MIDI channel concept -- always channel-agnostic
     if (b.type == ControlType::Button) {
       out.pressed = (value != 0.0f);
       out.value = 0.0f;

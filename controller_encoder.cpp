@@ -33,12 +33,21 @@ std::vector<uint8_t> ControllerBuilder::encode(std::string& err) const {
     return {};
   }
 
+  // Version 2 only once at least one pad/fader/LED range declares a channel
+  // range -- otherwise emit version 1, byte-identical to before v2 existed
+  // (same convention as PFX1/PFX2's function-range table, FORMAT.md).
+  bool anyChannelRange = false;
+  for (const auto& p : pads) if (p.channelFrom != kChannelAgnostic) anyChannelRange = true;
+  for (const auto& f : faders) if (f.channelFrom != kChannelAgnostic) anyChannelRange = true;
+  for (const auto& l : leds) if (l.channelFrom != kChannelAgnostic) anyChannelRange = true;
+  uint8_t version = anyChannelRange ? 2 : 1;
+
   // Header
   blob.push_back('M');
   blob.push_back('D');
   blob.push_back('F');
   blob.push_back('1');
-  blob.push_back(1);  // version
+  blob.push_back(version);
   blob.push_back(0);  // flags
   blob.push_back(midiChannel);
   blob.push_back(static_cast<uint8_t>(name.size()));
@@ -53,6 +62,10 @@ std::vector<uint8_t> ControllerBuilder::encode(std::string& err) const {
   for (const auto& p : pads) {
     blob.push_back(p.noteFrom);
     blob.push_back(p.noteTo);
+    if (version == 2) {
+      blob.push_back(p.channelFrom);
+      blob.push_back(p.channelTo);
+    }
   }
 
   // Fader/colour names: one trailing NUL-separated blob, undeduplicated
@@ -76,6 +89,10 @@ std::vector<uint8_t> ControllerBuilder::encode(std::string& err) const {
     blob.push_back(f.ccTo);
     blob.push_back(faderNameOffs[i] & 0xFF);
     blob.push_back((faderNameOffs[i] >> 8) & 0xFF);
+    if (version == 2) {
+      blob.push_back(f.channelFrom);
+      blob.push_back(f.channelTo);
+    }
   }
 
   for (const auto& e : encoders) {
@@ -97,6 +114,10 @@ std::vector<uint8_t> ControllerBuilder::encode(std::string& err) const {
     blob.push_back(colorCursor & 0xFF);
     blob.push_back((colorCursor >> 8) & 0xFF);
     blob.push_back(static_cast<uint8_t>(l.colors.size()));
+    if (version == 2) {
+      blob.push_back(l.channelFrom);
+      blob.push_back(l.channelTo);
+    }
     colorCursor = static_cast<uint16_t>(colorCursor + l.colors.size());
 
     for (const auto& c : l.colors) {
