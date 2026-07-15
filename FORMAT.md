@@ -269,6 +269,26 @@ arrays, no heap, copied by value into `LoadedShow::controllers`
 grammar (`.mdef`, see `provision.h`) and its encoder (`controller_encoder.h`'s
 `ControllerBuilder`) are host-tool-only and never linked into firmware.
 
+The format has two versions, both sharing the `"MDF1"` magic (the version
+byte, not the magic, is what changes) -- the same convention PFX1/PFX2 use:
+
+- **Version 1**: every PAD/FADER/LED range is channel-agnostic -- the
+  note/CC number alone addresses it, and `parseMidi`'s `ControlEvent::channel`
+  is reported but never consulted for binding/LED lookups. Still fully
+  supported -- every `.mdef` written before version 2 existed parses
+  byte-identically.
+- **Version 2**: adds an optional channel range (`channelFrom`/`channelTo`,
+  0..15) to each PAD/FADER/LED record, so one note/CC number can be
+  multiplexed across several MIDI channels to address several distinct
+  physical controls -- e.g. the APC40's clip-launch grid, which shares 5
+  note values across 8 channels/tracks instead of using 40 distinct notes.
+  See "Per-Range Channel Significance (v2)" below.
+
+`parseMidiController` accepts both versions. `ControllerBuilder::encode`
+emits version 1 bytes -- byte-identical to the original format -- for any
+controller with no `CH` ranges, and only emits version 2 once at least one
+range has one.
+
 ## Format Specification
 
 Little-endian throughout, like PFX1.
@@ -278,9 +298,9 @@ Little-endian throughout, like PFX1.
 | Offset | Size | Name         | Type    | Description |
 |--------|------|--------------|---------|-------------|
 | 0      | 4    | magic        | uint8[] | ASCII "MDF1" |
-| 4      | 1    | version      | uint8   | Format version: 1 |
+| 4      | 1    | version      | uint8   | Format version: 1 or 2 |
 | 5      | 1    | flags        | uint8   | Reserved, must be 0 |
-| 6      | 1    | midiChannel  | uint8   | 0 = any (0..16); parseMidi already ignores channel |
+| 6      | 1    | midiChannel  | uint8   | 0 = any/unset, 1..16 = a fixed channel (1-indexed). Used only as `LedFeedback`'s default outgoing LED channel when the matched LED range is NOT itself channel-significant (`led_feedback.cpp`) -- it does not filter `parseMidi`'s input, which reports every message's channel regardless of this field (see "Per-Range Channel Significance" below for the 0-indexed field that actually does) |
 | 7      | 1    | nameLen      | uint8   | Length of controller name (0 allowed) |
 | 8      | 1    | padCount     | uint8   | 0..MDEF_MAX_PADS=32 |
 | 9      | 1    | faderCount   | uint8   | 0..MDEF_MAX_FADERS=16 |
@@ -289,20 +309,24 @@ Little-endian throughout, like PFX1.
 | 12     | 1    | colorCount   | uint8   | Total COLOR entries across every LED range, 0..MDEF_MAX_COLORS=96 |
 | 13     | nameLen | name      | uint8[] | UTF-8 controller name, NOT null-terminated. Parsed over but never stored in `MidiControllerProfile` (debugging/tooling only, same convention as PFX1's fixture name) |
 
-### Pad Records (2 bytes each, padCount entries)
+### Pad Records (padCount entries; 2 bytes each in v1, 4 in v2)
 
 | Byte | Type  | Name     | Description |
 |------|-------|----------|-------------|
 | 0    | uint8 | noteFrom | 0..127 |
 | 1    | uint8 | noteTo   | 0..127, inclusive, >= noteFrom. A single pad has noteFrom == noteTo |
+| 2    | uint8 | channelFrom | **v2 only.** 0..15, or `kChannelAgnostic` (0xFF) -- see "Per-Range Channel Significance" |
+| 3    | uint8 | channelTo   | **v2 only.** 0..15 inclusive (>= channelFrom), or 0xFF -- must match channelFrom's agnostic-ness |
 
-### Fader Records (4 bytes each, faderCount entries)
+### Fader Records (faderCount entries; 4 bytes each in v1, 6 in v2)
 
 | Byte | Type   | Name    | Description |
 |------|--------|---------|-------------|
 | 0    | uint8  | ccFrom  | 0..127 |
 | 1    | uint8  | ccTo    | 0..127, inclusive, >= ccFrom |
 | 2-3  | uint16 | nameOff | Offset into the trailing name blob, or 0xFFFF if unnamed |
+| 4    | uint8  | channelFrom | **v2 only.** Same convention as the pad record's |
+| 5    | uint8  | channelTo   | **v2 only.** |
 
 ### Encoder Records (3 bytes each, encoderCount entries)
 
@@ -315,9 +339,10 @@ Little-endian throughout, like PFX1.
 Relative encoders send deltas, not positions, and the encoding is
 vendor-specific -- see `decodeEncoderDelta` (`mdef.h`/`mdef.cpp`). `absolute`
 is the safe default when unsure: it degrades to a plain fader instead of
-jumping wildly or running backwards.
+jumping wildly or running backwards. Encoders have no channel-significance
+field -- unaffected by v2.
 
-### LED Records (7 bytes each, ledCount entries)
+### LED Records (ledCount entries; 7 bytes each in v1, 9 in v2)
 
 | Byte | Type   | Name        | Description |
 |------|--------|-------------|-------------|
@@ -327,6 +352,8 @@ jumping wildly or running backwards.
 | 3    | uint8  | semantic    | 0 = velocity (data byte selects a colour from the palette below), 1 = value (data byte is a raw level, e.g. an LED ring) |
 | 4-5  | uint16 | colorOffset | Index into the profile-wide colour table (below) where this range's palette starts |
 | 6    | uint8  | colorCount  | Number of colour entries in this range's palette |
+| 7    | uint8  | channelFrom | **v2 only.** Same convention as the pad record's -- the LED-OUTPUT side of channel significance, independent of the PAD/FADER range's own flag (see below) |
+| 8    | uint8  | channelTo   | **v2 only.** |
 
 An LED record declares how a block of pads/faders (typically the same
 address range as a preceding PAD/FADER record, though this isn't enforced)
@@ -339,7 +366,7 @@ slice.
 | Byte | Type   | Name    | Description |
 |------|--------|---------|-------------|
 | 0-1  | uint16 | nameOff | Offset into the trailing name blob; always present (COLOR always names its colour) |
-| 2    | uint8  | value   | MIDI data byte (0..127) that selects this colour when sent as the LED message's velocity/value byte |
+| 2    | uint8   | value   | MIDI data byte (0..127) that selects this colour when sent as the LED message's velocity/value byte |
 
 ### Name Blob
 
@@ -349,20 +376,69 @@ declaration order, undeduplicated -- same convention as PFX2's range name
 blob). Its length is not stored explicitly -- it is every remaining byte to
 the end of the buffer.
 
-**Total blob size:** `13 + nameLen + 2*padCount + 4*faderCount + 3*encoderCount + 7*ledCount + 3*colorCount + nameBlobLen` bytes.
+**Total blob size:** `13 + nameLen + padRecSize*padCount + faderRecSize*faderCount + 3*encoderCount + ledRecSize*ledCount + 3*colorCount + nameBlobLen` bytes, where `padRecSize`/`faderRecSize`/`ledRecSize` are 2/4/7 (v1) or 4/6/9 (v2).
+
+## Per-Range Channel Significance (v2)
+
+Channel significance is a **per-range** flag, not a per-controller one:
+MDF1's existing `midiChannel` header field says which channel the whole
+controller nominally lives on (mostly used for LED output defaults, above)
+-- it has nothing to do with whether an individual note/CC is multiplexed
+across channels. Most controllers are entirely channel-agnostic (every
+PAD/FADER/LED range's `channelFrom`/`channelTo` is `kChannelAgnostic`, both
+fields, the v1-compatible default). A controller like the Akai APC40
+multiplexes several physical controls onto shared note/CC numbers via the
+channel nibble -- e.g. all 40 clip-launch pads share only 5 note numbers
+(one per scene row), the channel selecting the track/column.
+
+`channelFrom`/`channelTo` (0..15 inclusive, or both `kChannelAgnostic`/0xFF)
+name that channel range on a PAD, FADER, or LED record. When set on a PAD or
+FADER range, the internal binding id for an event landing in that range is
+**packed**: `(channel << 8) | id` (where `id` is the note 0..127 for a pad,
+or `128 + cc` for a fader -- the same `+128` offset `parseMidi` already uses
+to keep note and CC ids from colliding). `LiveControl::effectiveId`
+(`live_control.h`/`.cpp`) computes this packing for an incoming
+`ControlEvent` by consulting the wired `MidiControllerProfile`;
+`glow.bind.pad-xy` (`glow_lua_api.cpp`, via `resolvePadXY` in `mdef.h`) binds
+under the same packed id, so an incoming event and its binding always agree.
+A channel-agnostic range's id is never packed -- unpacked, exactly as before
+v2 existed.
+
+**⚠️ LED-output channel significance is independent of the PAD/FADER range's
+own flag, and can be narrower** (this is a real hardware quirk, not
+arbitrary): on the Akai APC40 family, button *input* on notes 0x30-0x49 uses
+the channel nibble to select the track, but LED *output* only honours the
+channel on the narrower 0x30-0x39 span -- everything else's LED lights on a
+fixed channel regardless of which track's button was pressed. This is why
+`MdefLedRange` carries its own `channelFrom`/`channelTo`, set independently
+via the `LED ... CH <lo> <hi>` grammar line, rather than being inherited from
+the PAD/FADER range it happens to overlap. `LedFeedback::set`/`setAuto`'s
+channel-aware overloads (`led_feedback.h`) only honour a supplied channel
+argument when the *matched LED range* is itself channel-significant;
+otherwise they fall back to the ordinary `midiChannel`-derived nibble, same
+as the plain (channel-agnostic) overloads.
+
+`resolvePadXY(profile, col, row, &note, &channel)` (`mdef.h`/`mdef.cpp`) is
+`glow.bind.pad-xy`'s grid resolver: it walks a profile's PAD declarations in
+order, treats each **channel-significant, single-note** one (`noteFrom ==
+noteTo`) as one grid row, and maps `row` to the row-th such declaration and
+`col` to a channel within that row's span. This is exactly the shape
+`samples/apc40.mdef` declares (5 separate `PAD <note> CH 0 7` lines, one per
+scene row) -- it is a convention on top of the format, not a distinct field.
 
 ## Validation Rules
 
 `parseMidiController` enforces (same strict, never-reads-out-of-bounds
 security-boundary contract as `parseProfile`):
 
-1. Buffer at least 13 bytes; magic "MDF1"; version 1; flags 0; midiChannel <= 16.
+1. Buffer at least 13 bytes; magic "MDF1"; version 1 or 2; flags 0; midiChannel <= 16.
 2. Each of padCount/faderCount/encoderCount/ledCount/colorCount within its MDEF_MAX_*.
-3. Buffer at least the declared header + table sizes.
+3. Buffer at least the declared header + table sizes (record sizes depend on version -- see above).
 4. Every pad/fader/encoder/LED `addrFrom`/`ccFrom` <= its `addrTo`/`ccTo`, both <= 127.
 5. Encoder `mode` in {0,1,2}; LED `msgType` in {0,1}; LED `semantic` in {0,1}.
 6. LED `colorOffset`/`colorCount` fits within the profile-wide colour table.
 7. Every fader (if not 0xFFFF) and colour `nameOff` lands on a NUL-terminated string within the trailing name blob.
+8. **v2 only:** every pad/fader/LED `channelFrom`/`channelTo` is either both `kChannelAgnostic` (0xFF), or both a valid 0..15 value with `channelFrom <= channelTo`. A v1 blob has no channel fields at all -- every range parses as `kChannelAgnostic`.
 
 ## `.mdef` Text Grammar
 
@@ -375,8 +451,10 @@ CONTROLLER Akai APC40 mkII
 MIDI_CHANNEL 1                  # 0 = any (default)
 PAD  53 92                      # a contiguous block of pads: note 53..92
 PAD  0                          # a single pad at note 0
+PAD  53 CH 0 7                  # channel-significant: one logical pad per channel 0..7 at note 53
 FADER CC 48 55                  # faders on CC 48..55
 FADER CC 7   master             # a named single fader
+FADER CC 7   track CH 0 8       # channel-significant, named: track faders, channel per track (8 = master)
 ENCODER CC 16 23                # relative encoders default to absolute
 ENCODER CC 16 23 relative-2c    # or: relative-signmag | absolute
 LED NOTE 53 92 velocity         # pads 53..92: LED colour = note-on velocity
@@ -384,7 +462,18 @@ LED NOTE 53 92 velocity         # pads 53..92: LED colour = note-on velocity
   COLOR green  1
   COLOR red    3
 LED CC 48 55 value              # fader LED rings driven by CC value 0..127
+LED NOTE 53 57 velocity CH 0 7  # LED-output channel significance (independent of the PAD's own CH -- see above)
+  COLOR off 0
+  COLOR on  1
 ```
+
+`CH <lo> <hi>` (0..15, 0-indexed -- NOT `MIDI_CHANNEL`'s 1-indexed "any"
+scheme) is an optional trailing modifier on `PAD`, `FADER`, and `LED` lines;
+omitting it (every `.mdef` written before it existed) keeps that range
+channel-agnostic, unchanged. See "Per-Range Channel Significance (v2)"
+above for what it means and `samples/apc40.mdef`/`samples/apc40-original.mdef`
+for a worked, protocol-doc-cited example (the full 8-track x 5-scene
+clip-launch grid).
 
 A `.show` file embeds one with `CONTROLLER <deffile>` (mirrors `FIXTURE
 <deffile> <universe> <address>`), folding the compiled MDF1 blob into the SHW1
@@ -409,7 +498,17 @@ full writeup and the compiler's validation/overlap-detection rules.
 - Binding pads/faders/encoders to cues/scenes -- that's `glow.bind.*`
   (Fennel, live-editable, no file format; see README_LIVE_CONTROL.md).
 - Bidirectional display feedback (text on a controller's own LCD).
-- MIDI 2.0 / MPE.
+- MIDI 2.0 / MPE. 14-bit CC (RPN/NRPN). Running status (handled in
+  `MidiByteReader`, `midi_realtime.h`, not this format). MIDI Clock/transport
+  (`BeatClock`).
+- SysEx (device inquiry, the APC40's own mode-switch handshake). **Follow-up
+  flag:** Akai's protocol puts the APC40 into "Generic Mode" (Mode 0) --
+  the note/CC layout this format and `samples/apc40*.mdef` assume -- via a
+  SysEx message on connect; a real unit left in its default Ableton-Live
+  mode may not respond with these addresses until that handshake is sent.
+  Not implemented here; out of scope for this parser/format, but worth
+  wiring into the USB-MIDI device bring-up path (`usb_midi_input.cpp`)
+  before shipping real APC40 support.
 
 # CFG1 Device Config Format
 

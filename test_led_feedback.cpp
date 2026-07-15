@@ -201,11 +201,103 @@ void test_rate_limit_spreads_a_burst_across_refreshes() {
   CHECK(out.sent.size() == before);
 }
 
+// A note range that's channel-significant for BOTH input (PAD CH) and LED
+// output (LED ... CH), like the APC40's 0x30-0x39: a status byte's channel
+// nibble must match the specific pad addressed.
+MidiControllerProfile buildChannelSignificantProfile(uint8_t note) {
+  ControllerBuilder b;
+  b.name = "Test Channel-Significant Pad";
+  b.pads.push_back({note, note, 0, 7});
+
+  ControllerLedSpec led;
+  led.msgType = LedMsgType::Note;
+  led.addrFrom = note;
+  led.addrTo = note;
+  led.semantic = LedSemantic::Velocity;
+  led.colors.push_back({"off", 0});
+  led.colors.push_back({"on", 1});
+  led.channelFrom = 0;
+  led.channelTo = 7;
+  b.leds.push_back(led);
+
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  MidiControllerProfile p;
+  if (!err.empty() || !parseMidiController(blob.data(), blob.size(), p)) {
+    printf("FATAL: test controller failed to build/parse: %s\n", err.c_str());
+    std::abort();
+  }
+  return p;
+}
+
+void test_channel_aware_set_emits_correct_channel_nibble() {
+  TEST("LED on a channel-multiplexed pad -> correct channel nibble emitted");
+
+  MidiControllerProfile profile = buildChannelSignificantProfile(53);
+  FakeMidiOutput out;
+  LedFeedback lf(profile, &out, 1000.0f);
+  ShowController sc;
+
+  lf.set(53, /*channel=*/3, "on");
+  lf.refresh(sc, 0.0f);
+  CHECK(out.sent.size() == 1);
+  CHECK(out.sent[0].status == (0x90 | 0x03));  // Note On, channel nibble 3
+  CHECK(out.sent[0].data1 == 53 && out.sent[0].data2 == 1);
+  out.sent.clear();
+
+  // A different channel on the SAME note is tracked independently: setting
+  // channel 5 doesn't touch (and doesn't re-send) channel 3's already-sent
+  // state.
+  lf.set(53, /*channel=*/5, "on");
+  lf.refresh(sc, 0.1f);
+  CHECK(out.sent.size() == 1);
+  CHECK(out.sent[0].status == (0x90 | 0x05));
+  out.sent.clear();
+
+  lf.refresh(sc, 0.2f);
+  CHECK(out.sent.empty());  // both channels unchanged -- no re-send
+}
+
+void test_channel_ignored_when_led_range_not_channel_significant() {
+  TEST("A channel argument on an LED range with no CH modifier is ignored (the LED rule)");
+
+  // PAD is channel-significant, but the LED range is NOT (mirrors the
+  // APC40's DEVICE/BANK buttons: input carries a channel, LED output
+  // doesn't) -- see mdef.h's MdefLedRange comment.
+  ControllerBuilder b;
+  b.name = "Input-only channel significance";
+  b.pads.push_back({58, 58, 0, 7});
+  ControllerLedSpec led;
+  led.msgType = LedMsgType::Note;
+  led.addrFrom = 58;
+  led.addrTo = 58;
+  led.semantic = LedSemantic::Velocity;
+  led.colors.push_back({"off", 0});
+  led.colors.push_back({"on", 1});
+  // No CH on the LED line -- channelFrom/channelTo stay kChannelAgnostic.
+  b.leds.push_back(led);
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  MidiControllerProfile profile;
+  CHECK(parseMidiController(blob.data(), blob.size(), profile));
+
+  FakeMidiOutput out;
+  LedFeedback lf(profile, &out, 1000.0f);
+  ShowController sc;
+
+  lf.set(58, /*channel=*/4, "on");  // channel argument should be ignored
+  lf.refresh(sc, 0.0f);
+  CHECK(out.sent.size() == 1);
+  CHECK(out.sent[0].status == 0x90);  // channel nibble 0 (MIDI_CHANNEL default), NOT 4
+}
+
 int main() {
   test_change_detection_static_show_emits_nothing();
   test_direct_set_no_op_on_unknown_led_or_color();
   test_null_output_is_a_no_op_not_a_crash();
   test_rate_limit_spreads_a_burst_across_refreshes();
+  test_channel_aware_set_emits_correct_channel_nibble();
+  test_channel_ignored_when_led_range_not_channel_significant();
 
   if (g_failCount == 0) {
     printf("\nAll tests passed!\n");

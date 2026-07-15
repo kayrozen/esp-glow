@@ -1,32 +1,69 @@
 # samples/apc40.mdef -- Akai APC40 mkII (USB MIDI clip launcher / performance
 # controller). Transcribed from Akai's official "APC40 Mk2 Communications
 # Protocol" v1.2 (January 19, 2015), Generic Mode (Mode 0). See FORMAT.md's
-# "MDF1 Controller Definition Format" section for the full grammar.
+# "MDF1 Controller Definition Format" section for the full grammar, and its
+# "Per-range channel significance" section for what CH means below.
 #
-# MDF1 is single-channel: the mkII multiplexes the track number onto the MIDI
-# channel (the clip grid uses the channel to pick an RGB blink/pulse variant;
-# faders and knobs use channel 0..7 for tracks 1..8 and 8 for master). MDF1's
-# parseMidi ignores the channel, so every control below is addressed purely by
-# its note/CC number and the per-track duplicates collapse to one entry. The
-# note/CC numbers and the RGB colour-velocity palette are Akai's own.
+# THE BUG THIS FILE USED TO BAKE IN: the mkII multiplexes the track number
+# onto the MIDI channel -- the clip grid is 5 note values (one per scene row)
+# times 8 channels (one per track), not 40 distinct notes. An earlier version
+# of this file declared the grid as "PAD 0 39" (40 distinct notes, no
+# channel), which doesn't match the hardware at all: every real APC40 mkII
+# sends notes 0x35-0x39 with the track on the channel nibble, so two pads in
+# the same scene row (same note, different track) collapsed onto the same
+# parseMidi id and could only ever be bound to the same cue. Fixed below by
+# declaring those ranges CH-significant (mdef.h's MdefPadRange, MDF1 v2) --
+# see live_control.h's LiveControl::effectiveId for how a channel-significant
+# incoming event resolves to a distinct (channel << 8) | note binding id, and
+# glow.bind.pad-xy (glow_lua_api.cpp) for the Fennel-side grid binding.
+#
+# Direct quotes from the protocol doc (section "Outbound APC40 Mk2 Sysex
+# Message Types" / "Assignment of Note number messages to LEDs", and the
+# inbound button-note table just before it):
+#   "Assignment of note numbers to buttons. Note 0x30 to 0x49 use MIDI
+#    Channel 0 to 7 to indicate Tracks 1-8. All other note values ignore
+#    the MIDI Channel."
+#   "Assignment of Note number messages to LEDs. Note 0x30 to 0x39 use MIDI
+#    Channel 0 to 7 to indicate Tracks 1-8. All other note values ignore
+#    the MIDI Channel."
+# Note the LED-output span (0x30-0x39) is NARROWER than the button-input span
+# (0x30-0x49) -- that's why channel significance lives on the LED record
+# (MdefLedRange), independent of the PAD record it overlaps (FORMAT.md/A2).
+# Also directly quoted, from "Assignment of controller numbers to absolute
+# controllers": the TRACK FADER control's MIDI Channel column reads "0-8 =
+# Tracks 1-8, Master" -- one CC number (7), channel 0..7 selects the track
+# fader, channel 8 is the master-track alias.
 
 CONTROLLER Akai APC40 mkII
 MIDI_CHANNEL 0
 
 # --- Pads (Note-on buttons) -------------------------------------------
-# 8x5 RGB clip-launch grid: CLIP LAUNCH 1..40 = notes 0x00..0x27 (0..39),
-# row-major.
-PAD 0 39
+# 8-track x 5-scene RGB clip-launch grid: CLIP LAUNCH note = scene row
+# (0x35..0x39 / 53..57), MIDI channel = track (0..7). One PAD line per row,
+# not one contiguous block -- each row is its own channel-multiplexed
+# single-note pad (8 logical pads per row, 40 total).
+PAD 53 CH 0 7   # CLIP LAUNCH row 1 (scene 1), tracks 1-8 via channel
+PAD 54 CH 0 7   # CLIP LAUNCH row 2 (scene 2)
+PAD 55 CH 0 7   # CLIP LAUNCH row 3 (scene 3)
+PAD 56 CH 0 7   # CLIP LAUNCH row 4 (scene 4)
+PAD 57 CH 0 7   # CLIP LAUNCH row 5 (scene 5)
 # Per-track button column: RECORD ARM, SOLO, ACTIVATOR, TRACK SELECT,
-# CLIP STOP -- notes 0x30..0x34 (48..52), one per track via the channel.
-PAD 48 52
+# CLIP STOP -- notes 0x30..0x34 (48..52), one per track via the channel
+# (same 0x30-0x49 input rule as the clip grid above).
+PAD 48 CH 0 7   # RECORD ARM
+PAD 49 CH 0 7   # SOLO
+PAD 50 CH 0 7   # ACTIVATOR
+PAD 51 CH 0 7   # TRACK SELECT
+PAD 52 CH 0 7   # CLIP STOP
 # Device / bank / view buttons + CROSSFADER A/B: DEVICE LEFT/RIGHT,
 # BANK LEFT/RIGHT, DEVICE ON-OFF, DEVICE LOCK, CLIP-DEVICE VIEW,
-# DETAIL VIEW, CROSSFADER A/B -- 0x3A..0x42 (58..66).
+# DETAIL VIEW, CROSSFADER A/B -- 0x3A..0x42 (58..66). Single physical
+# buttons, not per-track duplicates -- channel-agnostic.
 PAD 58 66
 # MASTER select + STOP ALL CLIPS -- 0x50..0x51 (80..81).
 PAD 80 81
-# SCENE LAUNCH 1..5 (RGB) -- 0x52..0x56 (82..86).
+# SCENE LAUNCH 1..5 (RGB) -- 0x52..0x56 (82..86). One button per scene,
+# not per track -- channel-agnostic.
 PAD 82 86
 # Track-control, transport and navigation block: PAN, SENDS, USER,
 # METRONOME, PLAY, STOP, RECORD, UP, DOWN, RIGHT, LEFT, SHIFT, TAP TEMPO,
@@ -34,11 +71,16 @@ PAD 82 86
 PAD 87 103
 
 # --- Faders / absolute knobs (CC) -------------------------------------
-FADER CC 7   track      # 9 track faders (0x07, track = MIDI channel)
-FADER CC 14  master     # master fader (0x0E)
-FADER CC 15  crossfader # crossfader (0x0F)
-FADER CC 16 23          # 8 DEVICE CONTROL knobs (0x10..0x17), absolute
-FADER CC 48 55          # 8 TRACK CONTROL knobs (0x30..0x37), absolute
+FADER CC 7   track CH 0 8   # 9 track faders (0x07): channel 0-7 = tracks 1-8, channel 8 = master
+FADER CC 14  master         # master fader (0x0E) -- a separate physical fader, not track-multiplexed
+FADER CC 15  crossfader     # crossfader (0x0F)
+FADER CC 16 23               # 8 DEVICE CONTROL knobs (0x10..0x17): one physical knob each, absolute.
+                              # The protocol doc's MIDI Channel column on these carries which track is
+                              # currently selected (context, since only one track is selected at a
+                              # time) rather than addressing 9 independent faders per knob -- unlike
+                              # the clip grid/track fader above, there is exactly one physical control
+                              # to bind here regardless of channel, so these stay channel-agnostic.
+FADER CC 48 55                # 8 TRACK CONTROL knobs (0x30..0x37), same reasoning, absolute
 
 # --- Relative encoders (CC) -------------------------------------------
 # TEMPO (0x0D) and CUE LEVEL (0x2F) report two's-complement deltas:
@@ -48,10 +90,10 @@ ENCODER CC 47 relative-2c   # cue level
 
 # --- LED feedback -----------------------------------------------------
 # RGB clip grid: note-on velocity selects a colour from the mkII's 128-entry
-# palette (a representative subset here). Blink/pulse variants are chosen by
-# the note's MIDI channel (channel 0 = solid primary colour), not by velocity,
-# so they aren't encoded in this single-channel profile.
-LED NOTE 0 39 velocity
+# palette (a representative subset here); CH 0 7 because LED output on
+# 0x30-0x39 IS channel-significant (the protocol quote above) -- each
+# track's copy of a row lights independently.
+LED NOTE 53 57 velocity CH 0 7
   COLOR off       0
   COLOR grey-dim  1
   COLOR grey      2
@@ -69,19 +111,22 @@ LED NOTE 0 39 velocity
   COLOR violet    49
   COLOR magenta   53
   COLOR pink      57
-# SCENE LAUNCH buttons share the RGB palette (subset).
+# SCENE LAUNCH buttons share the RGB palette (subset). Note 82-86 is OUTSIDE
+# the 0x30-0x39 LED-channel-significant span -- one LED per scene, agnostic.
 LED NOTE 82 86 velocity
   COLOR off   0
   COLOR white 3
   COLOR red   5
   COLOR green 21
   COLOR blue  41
-# CLIP STOP LEDs: off / on / tempo-synced blink (0x34).
-LED NOTE 52 52 velocity
+# CLIP STOP LEDs: off / on / tempo-synced blink (0x34). Inside 0x30-0x39 --
+# channel-significant, one LED per track's copy.
+LED NOTE 52 52 velocity CH 0 7
   COLOR off   0
   COLOR on    1
   COLOR blink 2
-# CROSSFADER A/B LED: off / yellow / orange (0x42).
+# CROSSFADER A/B LED: off / yellow / orange (0x42). Outside 0x30-0x39 --
+# agnostic (a single physical LED, not per-track).
 LED NOTE 66 66 velocity
   COLOR off    0
   COLOR yellow 1
