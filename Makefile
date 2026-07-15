@@ -212,6 +212,17 @@ $(PROVISION_TARGET): $(PROVISION_OBJECTS)
 $(FDEF_CHECK_TARGET): $(FDEF_CHECK_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(FDEF_CHECK_OBJECTS) -o $(FDEF_CHECK_TARGET) -lm
 
+# --- devcfg_check: host CLI round-trip oracle for the browser CFG1 encoder
+# (web/shared/devcfg.js) -- not part of `test`; see
+# web/shared/test-devcfg.mjs, which spawns this on a JS-encoded blob and
+# asserts on the JSON it prints. Same parser as the firmware links
+# (device_config.cpp).
+DEVCFG_CHECK_SOURCES = device_config.cpp devcfg_check.cpp
+DEVCFG_CHECK_OBJECTS = $(DEVCFG_CHECK_SOURCES:.cpp=.o)
+DEVCFG_CHECK_TARGET  = devcfg_check
+$(DEVCFG_CHECK_TARGET): $(DEVCFG_CHECK_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(DEVCFG_CHECK_OBJECTS) -o $(DEVCFG_CHECK_TARGET) -lm
+
 $(LIVE_CONTROL_TARGET): $(LIVE_CONTROL_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(LIVE_CONTROL_OBJECTS) -o $(LIVE_CONTROL_TARGET) -lm
 
@@ -343,7 +354,15 @@ SAFE_BLACKOUT_TARGET  = test_safe_blackout
 $(SAFE_BLACKOUT_TARGET): $(SAFE_BLACKOUT_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(SAFE_BLACKOUT_OBJECTS) -o $(SAFE_BLACKOUT_TARGET) -lm
 
-test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET) $(LIVE_CONTROL_TARGET) $(MDEF_TARGET) $(LED_FEEDBACK_TARGET) $(WEB_PROTOCOL_TARGET) $(CONTROL_QUEUE_TARGET) $(PACING_TARGET) $(APPLY_TARGET) $(LUA_VM_TARGET) $(LUA_EFFECT_TARGET) $(GLOW_LUA_API_TARGET) $(GLOW_FENNEL_TARGET) $(SCRIPTS_STORAGE_TARGET) $(FX_ERROR_PIPELINE_TARGET) $(OSC_PARSER_TARGET) $(LITTLEFS_IMAGE_TARGET) $(BEAT_CLOCK_TARGET) $(BEAT_QUEUE_TARGET) $(MIDI_REALTIME_TARGET) $(DJLINK_PARSER_TARGET) $(DJLINK_MASTER_TARGET) $(SAFE_BLACKOUT_TARGET)
+# --- test_device_config: CFG1 flash-time device config parser/CRC
+# round-trip tests (host-tested) ---
+DEVICE_CONFIG_SOURCES = device_config.cpp device_config_encoder.cpp test_device_config.cpp
+DEVICE_CONFIG_OBJECTS = $(DEVICE_CONFIG_SOURCES:.cpp=.o)
+DEVICE_CONFIG_TARGET  = test_device_config
+$(DEVICE_CONFIG_TARGET): $(DEVICE_CONFIG_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(DEVICE_CONFIG_OBJECTS) -o $(DEVICE_CONFIG_TARGET) -lm
+
+test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET) $(LIVE_CONTROL_TARGET) $(MDEF_TARGET) $(LED_FEEDBACK_TARGET) $(WEB_PROTOCOL_TARGET) $(CONTROL_QUEUE_TARGET) $(PACING_TARGET) $(APPLY_TARGET) $(LUA_VM_TARGET) $(LUA_EFFECT_TARGET) $(GLOW_LUA_API_TARGET) $(GLOW_FENNEL_TARGET) $(SCRIPTS_STORAGE_TARGET) $(FX_ERROR_PIPELINE_TARGET) $(OSC_PARSER_TARGET) $(LITTLEFS_IMAGE_TARGET) $(BEAT_CLOCK_TARGET) $(BEAT_QUEUE_TARGET) $(MIDI_REALTIME_TARGET) $(DJLINK_PARSER_TARGET) $(DJLINK_MASTER_TARGET) $(SAFE_BLACKOUT_TARGET) $(DEVICE_CONFIG_TARGET)
 	./$(AIM_TARGET)
 	./$(FP_TARGET)
 	./$(SHOW_TARGET)
@@ -372,6 +391,7 @@ test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL
 	./$(DJLINK_PARSER_TARGET)
 	./$(DJLINK_MASTER_TARGET)
 	./$(SAFE_BLACKOUT_TARGET)
+	./$(DEVICE_CONFIG_TARGET)
 
 # Browser fixture importers (web/shared/importers/): pure-JS parsing/mapping
 # tests, plus a round-trip through fdef_check (this is a separate target
@@ -380,6 +400,14 @@ test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL
 # already runs Node for the WASM smoke tests).
 test-importers: $(FDEF_CHECK_TARGET)
 	node web/shared/importers/test-importers.mjs
+
+# JS CFG1 encoder/decoder (web/shared/devcfg.js) vs. the C++ parser
+# (device_config.cpp) -- golden-blob + round-trip proof. Separate target
+# from `test-importers` (different subject, but same "needs node" caveat
+# that keeps it out of the C++-only `test` target).
+.PHONY: test-devcfg
+test-devcfg: $(DEVCFG_CHECK_TARGET)
+	node web/shared/test-devcfg.mjs
 
 # Clean build artifacts
 # NOTE: every *_OBJECTS/*_TARGET pair defined above must be listed here.
@@ -425,7 +453,9 @@ clean:
 	      $(DJLINK_PARSER_OBJECTS) $(DJLINK_PARSER_TARGET) \
 	      $(DJLINK_MASTER_OBJECTS) $(DJLINK_MASTER_TARGET) \
 	      $(SAFE_BLACKOUT_OBJECTS) $(SAFE_BLACKOUT_TARGET) \
+	      $(DEVICE_CONFIG_OBJECTS) $(DEVICE_CONFIG_TARGET) \
 	      $(FDEF_CHECK_OBJECTS) $(FDEF_CHECK_TARGET) \
+	      $(DEVCFG_CHECK_OBJECTS) $(DEVCFG_CHECK_TARGET) \
 	      $(LUA_C_OBJECTS)
 	rm -f $(wildcard *.d) $(wildcard third_party/lua/*.d)
 

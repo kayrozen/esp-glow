@@ -42,6 +42,8 @@
 #include "render_task.h"
 #include "wifi_manager.h"
 #include "storage_manager.h"
+#include "device_config.h"
+#include "device_config_web.h"
 #include "safe_blackout.h"
 #include "ota_manager.h"
 #include "esp_task_wdt.h"
@@ -86,30 +88,38 @@ extern "C" const uint8_t fennel_lua_end[] asm("_binary_fennel_lua_end");
 
 static const char* TAG = "esp-glow";
 
-// --- Board / config defaults (override in menuconfig) ---
-#ifndef CONFIG_GLOW_STATUS_LED_GPIO
-#define GLOW_STATUS_LED_GPIO 2
-#endif
-#ifndef CONFIG_GLOW_DMX_TX_GPIO
-#define GLOW_DMX_TX_GPIO 17
-#endif
-#ifndef CONFIG_GLOW_DMX_RX_GPIO
-#define GLOW_DMX_RX_GPIO 18
-#endif
-#ifndef CONFIG_GLOW_DMX_RTS_GPIO
-#define GLOW_DMX_RTS_GPIO 8
-#endif
-#ifndef CONFIG_GLOW_WIFI_SSID
-#define GLOW_WIFI_SSID "esp-glow"
-#endif
-#ifndef CONFIG_GLOW_WIFI_PASS
-#define GLOW_WIFI_PASS "esp-glow"
-#endif
-#ifndef CONFIG_GLOW_ARTNET_BRIDGE_IP
-#define GLOW_ARTNET_BRIDGE_IP 0u
-#endif
-
 #define BUNDLE_BUF_CAP (64 * 1024)  // 64 KB scratch in PSRAM
+
+// CFG1 (device_config.h): builds the DeviceConfig used when the "devcfg"
+// partition is absent or fails to parse (missing, blank/erased, corrupt --
+// see storage_load_devcfg). Every field here is exactly what menuconfig
+// already controlled before CFG1 existed, so a dev build with no devcfg
+// ever flashed behaves exactly as it did before this feature landed. This
+// is the ONE place CONFIG_GLOW_* (besides GLOW_SELFTEST/GLOW_USB_MIDI_HOST,
+// which gate compilation, not runtime values) is read -- everywhere else
+// in this file reads the resolved `cfg` instead.
+static DeviceConfig defaultDeviceConfigFromKconfig() {
+  DeviceConfig cfg;
+  std::snprintf(cfg.wifiSsid, sizeof(cfg.wifiSsid), "%s", CONFIG_GLOW_WIFI_SSID);
+  std::snprintf(cfg.wifiPass, sizeof(cfg.wifiPass), "%s", CONFIG_GLOW_WIFI_PASS);
+  cfg.artnetFallbackIp = static_cast<uint32_t>(CONFIG_GLOW_ARTNET_BRIDGE_IP);
+  cfg.artnetPort = 6454;
+  cfg.dmxTxGpio = CONFIG_GLOW_DMX_TX_GPIO;
+  cfg.dmxRxGpio = CONFIG_GLOW_DMX_RX_GPIO;
+  cfg.dmxRtsGpio = CONFIG_GLOW_DMX_RTS_GPIO;
+  cfg.ledGpio = CONFIG_GLOW_STATUS_LED_GPIO;
+#ifdef CONFIG_GLOW_USB_MIDI_HOST_DEFAULT_ON
+  cfg.usbMidiHost = true;
+#else
+  cfg.usbMidiHost = false;
+#endif
+#ifdef CONFIG_GLOW_SKIP_WIFI
+  cfg.skipWifi = true;
+#else
+  cfg.skipWifi = false;
+#endif
+  return cfg;
+}
 
 // Globals: must outlive the render task.
 static Show         g_show;
@@ -797,6 +807,23 @@ extern "C" void app_main(void) {
   g_mainTaskHandle = xTaskGetCurrentTaskHandle();
 #endif
 
+  // --- CFG1: read the "devcfg" partition FIRST, before anything else --
+  // even the status LED init a few lines down needs cfg.ledGpio, and DMX
+  // bring-up (F1, below) needs cfg.dmxTxGpio/RxGpio/RtsGpio. This is a
+  // local flash read only (esp_partition_read) -- it must never depend on,
+  // or wait for, the network (see FORMAT.md's boot-ordering note): nothing
+  // here touches WiFi, and WiFi bring-up itself stays all the way at the
+  // bottom of this function, unchanged. A missing or corrupt devcfg falls
+  // back to the compiled-in Kconfig defaults -- see
+  // defaultDeviceConfigFromKconfig's header comment -- and is reported
+  // loudly below, once the banner (and serial) is up. ---
+  DeviceConfig cfg;
+  const char* cfgSource = "devcfg";
+  if (!storage_load_devcfg(&cfg)) {
+    cfg = defaultDeviceConfigFromKconfig();
+    cfgSource = "defaults";
+  }
+
   // --- Banner (F0) ---
   esp_chip_info_t chip;
   esp_chip_info(&chip);
@@ -813,7 +840,22 @@ extern "C" void app_main(void) {
   ESP_LOGI(TAG, "psram:  enabled (octal=%d)", CONFIG_SPIRAM_MODE_OCT ? 1 : 0);
 #endif
 
-  led_status_init(CONFIG_GLOW_STATUS_LED_GPIO);
+  // CFG1: report what actually took effect -- both a human-readable log
+  // line (never the WiFi password) and, under CONFIG_GLOW_SELFTEST, the
+  // structured GLOW-TEST: line the QEMU/HIL harnesses assert on. A corrupt
+  // or missing devcfg falling back silently would be a debugging nightmare
+  // the first time someone's WiFi doesn't come up -- this is that report.
+  ESP_LOGI(TAG, "cfg: source=%s dmx_tx=%u dmx_rx=%u dmx_rts=%u led=%u usb_midi=%d skip_wifi=%d "
+                "artnet_fallback=%s:%u ssid=\"%s\"",
+           cfgSource, (unsigned)cfg.dmxTxGpio, (unsigned)cfg.dmxRxGpio, (unsigned)cfg.dmxRtsGpio,
+           (unsigned)cfg.ledGpio, (int)cfg.usbMidiHost, (int)cfg.skipWifi,
+           cfg.artnetFallbackIp == 0 ? "broadcast" : "unicast", (unsigned)cfg.artnetPort, cfg.wifiSsid);
+#ifdef CONFIG_GLOW_SELFTEST
+  printf("GLOW-TEST: cfg source=%s dmx_tx=%u usb_midi=%d skip_wifi=%d\n",
+         cfgSource, (unsigned)cfg.dmxTxGpio, (int)cfg.usbMidiHost, (int)cfg.skipWifi);
+#endif
+
+  led_status_init(cfg.ledGpio);
   led_status_set(LED_BLINK_SLOW);
 
   esp_err_t nvs = nvs_flash_init();
@@ -834,8 +876,18 @@ extern "C" void app_main(void) {
   ota_manager_set_callbacks(&otaCb);
   ota_manager_init();
 
+  // CFG1 §6: same "refuse while cues are active" gate as OTA (a reconfigure
+  // reboot mid-show helps nobody either); GET /devcfg serializes `cfg` as
+  // resolved above (devcfg or Kconfig defaults), so the reconfigure page
+  // always has a real starting point to edit. Both wired well before the
+  // web server can possibly start (see the network bring-up block below).
+  DeviceConfigWebCallbacks devcfgCb = {};
+  devcfgCb.cuesActive = ota_cb_cues_active;
+  device_config_web_set_callbacks(&devcfgCb);
+  device_config_web_set_effective_config(cfg);
+
   // --- F1: DMX sink ---
-  g_dmx = new DmxSink(DMX_NUM_1, CONFIG_GLOW_DMX_TX_GPIO, CONFIG_GLOW_DMX_RX_GPIO, CONFIG_GLOW_DMX_RTS_GPIO);
+  g_dmx = new DmxSink(DMX_NUM_1, cfg.dmxTxGpio, cfg.dmxRxGpio, cfg.dmxRtsGpio);
   if (!g_dmx->begin()) {
     ESP_LOGE(TAG, "DMX bring-up failed; halting.");
     led_status_set(LED_ERROR);
@@ -853,9 +905,14 @@ extern "C" void app_main(void) {
   // ArtNet-transport universe below -- g_artnet->send() is a safe no-op
   // until begin() actually opens the UDP socket (sock_ stays -1 until
   // then; see artnet_sink.cpp), so constructing early costs nothing. ---
-  uint32_t bridge = CONFIG_GLOW_ARTNET_BRIDGE_IP;
+  // CFG1: artnetFallbackIp is the destination for Art-Net universes the
+  // .show does not route explicitly (0 = broadcast) -- see FORMAT.md's
+  // "artnetFallbackIp" precedence note. Wave 3 will add an explicit
+  // per-universe (IP, wire-universe) table to the .show that takes
+  // precedence over this when present; today, this IS the only routing.
+  uint32_t bridge = cfg.artnetFallbackIp;
   if (bridge == 0) bridge = 0xFFFFFFFFu;
-  g_artnet = new ArtNetSink(bridge, 6454);
+  g_artnet = new ArtNetSink(bridge, cfg.artnetPort);
 
   // --- F5: always keep at least one DMX universe configured and
   // streaming, independent of whether a show bundle loads -- "safe
@@ -971,71 +1028,80 @@ extern "C" void app_main(void) {
   // deliberately LAST, not first: DMX output, the render task, and the
   // Lua/Fennel VM (boot.fnl, live-coded cues) are all fully up before
   // anything here is even attempted, so a rig with no network at all --
-  // dead AP, no WiFi at the venue, CONFIG_GLOW_SKIP_WIFI set outright --
-  // still plays its show instead of never getting past app_main(). This
-  // is the same guarantee F5's reconnect-with-backoff already gives for a
-  // network that drops AFTER boot (wifi_manager.cpp) -- extended to cover
-  // a network that was never there to begin with, or hardware/emulation
-  // that can't bring WiFi up at all (see CONFIG_GLOW_SKIP_WIFI's Kconfig
-  // help: QEMU has no WiFi/802.11 model, so esp_wifi_init()'s RF
-  // calibration step hangs forever against it -- tests/qemu/README.md).
-  // wifi_start_sta() itself does not block on association (see
-  // wifi_manager.cpp) -- moving it here means even esp_wifi_init()/
-  // esp_wifi_start() themselves hanging or failing can no longer take the
-  // rig's actual light output down with them, which is the point. ---
-#ifndef CONFIG_GLOW_SKIP_WIFI
-  // --- F2/F5: WiFi (STA), with a SoftAP fallback after repeated failed
-  // reconnects so the console stays reachable even when the venue's WiFi
-  // is gone (see wifi_manager.h's HIL flag on AP+DMX coexistence). ---
-  WifiStaConfig wc = {};
-  wc.ssid = CONFIG_GLOW_WIFI_SSID;
-  wc.password = CONFIG_GLOW_WIFI_PASS;
-  wc.ap_fallback = true;
-  wifi_start_sta(&wc);
+  // dead AP, no WiFi at the venue, cfg.skipWifi set outright -- still
+  // plays its show instead of never getting past app_main(). This is the
+  // same guarantee F5's reconnect-with-backoff already gives for a network
+  // that drops AFTER boot (wifi_manager.cpp) -- extended to cover a
+  // network that was never there to begin with, or hardware/emulation
+  // that can't bring WiFi up at all (see Kconfig.projbuild's
+  // GLOW_SKIP_WIFI help: QEMU has no WiFi/802.11 model, so
+  // esp_wifi_init()'s RF calibration step hangs forever against it --
+  // tests/qemu/README.md). wifi_start_sta() itself does not block on
+  // association (see wifi_manager.cpp) -- moving it here means even
+  // esp_wifi_init()/esp_wifi_start() themselves hanging or failing can no
+  // longer take the rig's actual light output down with them, which is
+  // the point.
+  //
+  // CFG1: this is now a RUNTIME branch on cfg.skipWifi, not a compile-time
+  // #ifdef -- the flasher's "no WiFi" checkbox and the device console's
+  // reconfigure page both need this to be a flash-time/runtime choice, not
+  // a rebuild. Kconfig's GLOW_SKIP_WIFI only seeds cfg.skipWifi's fallback
+  // value when no devcfg is present (defaultDeviceConfigFromKconfig) --
+  // see Kconfig.projbuild's updated help text. ---
+  if (!cfg.skipWifi) {
+    // --- F2/F5: WiFi (STA), with a SoftAP fallback after repeated failed
+    // reconnects so the console stays reachable even when the venue's WiFi
+    // is gone (see wifi_manager.h's HIL flag on AP+DMX coexistence). ---
+    WifiStaConfig wc = {};
+    wc.ssid = cfg.wifiSsid;
+    wc.password = cfg.wifiPass;
+    wc.ap_fallback = true;
+    wifi_start_sta(&wc);
 
-  // --- F2: Art-Net sink begin() -- opens the UDP socket now that
-  // netif/lwIP is up (wifi_start_sta() brings that up regardless of
-  // whether STA ever associates). g_artnet itself was already constructed
-  // earlier so bundle patching above could route ArtNet universes to it. ---
-  if (!g_artnet->begin()) {
-    ESP_LOGE(TAG, "Art-Net socket failed; matrix output disabled.");
-  } else {
+    // --- F2: Art-Net sink begin() -- opens the UDP socket now that
+    // netif/lwIP is up (wifi_start_sta() brings that up regardless of
+    // whether STA ever associates). g_artnet itself was already constructed
+    // earlier so bundle patching above could route ArtNet universes to it. ---
+    if (!g_artnet->begin()) {
+      ESP_LOGE(TAG, "Art-Net socket failed; matrix output disabled.");
+    } else {
 #ifdef CONFIG_GLOW_SELFTEST
-    printf("GLOW-TEST: artnet tx=ok\n");
+      printf("GLOW-TEST: artnet tx=ok\n");
 #endif
+    }
+
+    // --- F4/F5: web console (WS httpd + console static files + /ota +
+    // /devcfg) + OSC -- any g_liveControl bindings would need to already
+    // be in place before either of these start -- "configured once,
+    // before tasks start, and never mutated" is what makes transport-side
+    // binding reads race-free (none are bound yet -- see g_wsCues'
+    // comment).
+    web_input_init(*g_controlQueue, *g_evalQueue,
+                   g_nWsCues ? g_wsCues : nullptr, g_nWsCues,
+                   /*scenes=*/nullptr, /*nScenes=*/0,
+                   /*hasMaster=*/true);
+    web_server_task(nullptr);  // starts httpd; not a FreeRTOS task itself (see web_input.h)
+
+    osc_input_init(*g_controlQueue, g_oscMap, static_cast<uint16_t>(CONFIG_GLOW_OSC_UDP_PORT));
+    xTaskCreatePinnedToCore(osc_server_task, "osc", 4096 / sizeof(StackType_t),
+                            nullptr, 5, nullptr, 0);
+
+    // Musical time: passive Pro DJ Link listener (Afterglow's signature
+    // feature -- see djlink_parser.h's header). Two tasks, one per UDP
+    // port: beat packets (50001, the actual sync source) and CDJ status's
+    // tempo-master flag (50002, gates which player's beats get accepted).
+    djlink_input_init(*g_beatQueue);
+    xTaskCreatePinnedToCore(djlink_beat_task, "djlink_beat", 4096 / sizeof(StackType_t),
+                            nullptr, 5, nullptr, 0);
+    xTaskCreatePinnedToCore(djlink_status_task, "djlink_status", 4096 / sizeof(StackType_t),
+                            nullptr, 5, nullptr, 0);
+  } else {
+    ESP_LOGW(TAG, "cfg.skipWifi: WiFi/Art-Net/web console/OSC/DJ Link all skipped -- "
+                  "DMX output and Lua/Fennel cues run standalone.");
   }
 
-  // --- F4/F5: web console (WS httpd + console static files + /ota) + OSC
-  // -- any g_liveControl bindings would need to already be in place before
-  // either of these start -- "configured once, before tasks start, and
-  // never mutated" is what makes transport-side binding reads race-free
-  // (none are bound yet -- see g_wsCues' comment).
-  web_input_init(*g_controlQueue, *g_evalQueue,
-                 g_nWsCues ? g_wsCues : nullptr, g_nWsCues,
-                 /*scenes=*/nullptr, /*nScenes=*/0,
-                 /*hasMaster=*/true);
-  web_server_task(nullptr);  // starts httpd; not a FreeRTOS task itself (see web_input.h)
-
-  osc_input_init(*g_controlQueue, g_oscMap, static_cast<uint16_t>(CONFIG_GLOW_OSC_UDP_PORT));
-  xTaskCreatePinnedToCore(osc_server_task, "osc", 4096 / sizeof(StackType_t),
-                          nullptr, 5, nullptr, 0);
-
-  // Musical time: passive Pro DJ Link listener (Afterglow's signature
-  // feature -- see djlink_parser.h's header). Two tasks, one per UDP
-  // port: beat packets (50001, the actual sync source) and CDJ status's
-  // tempo-master flag (50002, gates which player's beats get accepted).
-  djlink_input_init(*g_beatQueue);
-  xTaskCreatePinnedToCore(djlink_beat_task, "djlink_beat", 4096 / sizeof(StackType_t),
-                          nullptr, 5, nullptr, 0);
-  xTaskCreatePinnedToCore(djlink_status_task, "djlink_status", 4096 / sizeof(StackType_t),
-                          nullptr, 5, nullptr, 0);
-#else
-  ESP_LOGW(TAG, "CONFIG_GLOW_SKIP_WIFI: WiFi/Art-Net/web console/OSC/DJ Link all skipped -- "
-                "DMX output and Lua/Fennel cues run standalone.");
-#endif  // CONFIG_GLOW_SKIP_WIFI
-
   // MIDI DIN is a UART, not a network transport -- always up, independent
-  // of CONFIG_GLOW_SKIP_WIFI. Needs the same g_liveControl-bindings-already-
+  // of cfg.skipWifi. Needs the same g_liveControl-bindings-already-
   // in-place guarantee as the transports above (see their comment).
   midi_input_init(*g_controlQueue, g_beatQueue, CONFIG_GLOW_MIDI_UART_NUM, CONFIG_GLOW_MIDI_RX_GPIO,
                   CONFIG_GLOW_MIDI_TX_GPIO);
@@ -1043,13 +1109,23 @@ extern "C" void app_main(void) {
                           nullptr, 5, nullptr, 0);
 
 #ifdef CONFIG_GLOW_USB_MIDI_HOST
-  // B2: this is a board change, not just a firmware flag -- see
-  // usb_midi_input.h's hardware note and Kconfig.projbuild's help text.
-  // Core 0 (with WiFi), same as every other network/USB transport task;
-  // watch render_task's `dropped` stat for coexistence regressions.
-  usb_midi_input_init(*g_controlQueue);
-  xTaskCreatePinnedToCore(usb_midi_host_task, "usb_midi", 4096 / sizeof(StackType_t),
-                          nullptr, 5, nullptr, 0);
+  // The driver is compiled in unconditionally (GLOW_USB_MIDI_HOST default
+  // y -- see Kconfig.projbuild): nothing here costs RAM or touches
+  // hardware unless cfg.usbMidiHost is actually true, so this compiles to
+  // "check a bool, usually skip" when the board has no VBUS path. This is
+  // what makes USB-MIDI a flash-time checkbox instead of a rebuild -- B2:
+  // this is still a BOARD change (see usb_midi_input.h's hardware note),
+  // just no longer also a firmware one.
+  if (cfg.usbMidiHost) {
+    // Core 0 (with WiFi), same as every other network/USB transport task;
+    // watch render_task's `dropped` stat for coexistence regressions.
+    usb_midi_input_init(*g_controlQueue);
+    xTaskCreatePinnedToCore(usb_midi_host_task, "usb_midi", 4096 / sizeof(StackType_t),
+                            nullptr, 5, nullptr, 0);
+  } else {
+    ESP_LOGI(TAG, "USB-MIDI host compiled in but disabled (cfg.usbMidiHost=false) -- "
+                  "no USB host stack, no VBUS.");
+  }
 #endif
 
   const char* showStatus;

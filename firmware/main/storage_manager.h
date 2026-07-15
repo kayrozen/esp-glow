@@ -17,6 +17,7 @@
 #pragma once
 
 #include "show_bundle.h"
+#include "device_config.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -34,6 +35,14 @@ extern "C" {
 // space for the raw partition bytes (64 KB is safe; see BUNDLE_BUF_CAP in
 // main.cpp).
 bool storage_load_show(LoadedShow* out_show, uint8_t* buf, size_t buf_cap);
+
+// Read the "devcfg" partition and parse it in one call. On success, fills
+// `out_cfg` and returns true. On any failure (partition missing/not found,
+// read error, or parseDeviceConfig rejecting the blob -- bad magic/
+// version/CRC, including an erased/all-0xFF board), returns false and
+// logs; the caller (main.cpp) falls back to the compiled-in Kconfig
+// defaults -- see device_config.h's header comment.
+bool storage_load_devcfg(DeviceConfig* out_cfg);
 
 #ifdef __cplusplus
 }

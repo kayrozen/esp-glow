@@ -1,6 +1,17 @@
 # firmware/main/Kconfig.projbuild — esp-glow menuconfig options.
 #
 # Surfaced under Component config -> esp-glow in `idf.py menuconfig`.
+#
+# CFG1 (device_config.h): every option below that also appears in the CFG1
+# flash-time config blob (status LED / DMX GPIOs / WiFi SSID+password /
+# Art-Net fallback IP / USB-MIDI enabled / skip-WiFi) is now a DEFAULT, not
+# the truth -- a valid "devcfg" partition read at boot overrides it. These
+# Kconfig values only take effect when devcfg is absent or fails to parse
+# (missing/corrupt/erased board), which is exactly "a dev build with
+# menuconfig behaves exactly as today" (see main.cpp's app_main). The
+# stock CI-built image most users flash from the browser never touches
+# menuconfig at all -- the provisioner's config form writes a devcfg blob
+# directly.
 
 menu "esp-glow"
 
@@ -9,14 +20,19 @@ config GLOW_STATUS_LED_GPIO
     default 2
     help
         GPIO driving the status LED. Default 2 (most ESP32-S3 devkits).
+        Overridden by a valid devcfg partition's ledGpio field.
 
 config GLOW_DMX_TX_GPIO
     int "DMX TX GPIO (RS485 DI)"
     default 17
+    help
+        Overridden by a valid devcfg partition's dmxTxGpio field.
 
 config GLOW_DMX_RX_GPIO
     int "DMX RX GPIO (RS485 RO)"
     default 18
+    help
+        Overridden by a valid devcfg partition's dmxRxGpio field.
 
 config GLOW_DMX_RTS_GPIO
     int "DMX RTS GPIO (RS485 DE/RE tied)"
@@ -24,26 +40,33 @@ config GLOW_DMX_RTS_GPIO
     help
         The UART RTS pin, which esp_dmx toggles for the DMX break/MAB and
         to drive the RS485 transceiver's DE + /RE lines (wire them together).
+        Overridden by a valid devcfg partition's dmxRtsGpio field.
 
 config GLOW_WIFI_SSID
     string "WiFi SSID"
     default "esp-glow"
     help
         Station SSID to join at boot. Set this to your LAN SSID.
+        Overridden by a valid devcfg partition's wifiSsid field -- this is
+        the value a dev build falls back to with no devcfg flashed.
 
 config GLOW_WIFI_PASS
     string "WiFi password"
     default "esp-glow"
     help
-        Station password for the SSID above.
+        Station password for the SSID above. Overridden by a valid devcfg
+        partition's wifiPass field.
 
 config GLOW_ARTNET_BRIDGE_IP
-    int "Art-Net bridge IP (packed, 0 = broadcast)"
+    int "Art-Net fallback IP (packed, 0 = broadcast)"
     default 0
     help
-        IPv4 of the Art-Net node/bridge, packed host-byte order, e.g.
-        192.168.1.50 => (192<<24)|(168<<16)|(1<<8)|50 = 0xC0A80132 = 3232235826.
-        0 means LAN broadcast (255.255.255.255), the Art-Net default.
+        IPv4 used for Art-Net universes the loaded .show does not route
+        explicitly (see FORMAT.md's "artnetFallbackIp" precedence note),
+        packed host-byte order, e.g. 192.168.1.50 =>
+        (192<<24)|(168<<16)|(1<<8)|50 = 0xC0A80132 = 3232235826. 0 means
+        LAN broadcast (255.255.255.255), the Art-Net default. Overridden
+        by a valid devcfg partition's artnetFallbackIp field.
 
 config GLOW_MIDI_UART_NUM
     int "MIDI UART port number"
@@ -69,20 +92,43 @@ config GLOW_MIDI_TX_GPIO
         leaves MIDI OUT disabled and glow.led.* stays a no-op.
 
 config GLOW_USB_MIDI_HOST
-    bool "Enable USB-MIDI host (requires a board with a powered VBUS USB-A port)"
+    bool "Compile in USB-MIDI host support"
+    default y
+    help
+        Compiles usb_midi_input.cpp/usb_host_lib into the image so a
+        class-compliant USB-MIDI controller can plug directly into the S3,
+        instead of (or alongside) DIN-MIDI over GLOW_MIDI_RX_GPIO. Costs
+        flash, not RAM or startup behavior, when unused -- no USB host
+        stack initializes and no VBUS is driven unless it's actually
+        turned on (see GLOW_USB_MIDI_HOST_DEFAULT_ON below and
+        device_config.h's usbMidiHost flag). Default y so the stock
+        browser-flashed image can always offer the flasher's "Enable
+        USB-MIDI host" checkbox; turn this off only to shrink the image
+        for a build that will never need the option at all.
+
+        This is a BOARD change, not just a firmware flag: USB host mode
+        means the ESP32 must supply 5V VBUS to the controller (a USB-A
+        receptacle, a power path able to source a few hundred mA, ideally
+        with over-current protection). One device at a time (same as
+        every other input transport here); the host task runs on core 0
+        with WiFi, so watch the render task's `dropped` frame counter for
+        coexistence regressions after enabling this.
+
+config GLOW_USB_MIDI_HOST_DEFAULT_ON
+    bool "Enable USB-MIDI host by default (used only when no devcfg is present)"
+    depends on GLOW_USB_MIDI_HOST
     default n
     help
-        Lets a class-compliant USB-MIDI controller plug directly into the
-        S3 (usb_midi_input.cpp/usb_host_lib), instead of DIN-MIDI over
-        GLOW_MIDI_RX_GPIO. This is a BOARD change, not just a firmware
-        flag: USB host mode means the ESP32 must supply 5V VBUS to the
-        controller (a USB-A receptacle, a power path able to source a few
-        hundred mA, ideally with over-current protection). Leave this OFF
-        on a board wired for GLOW_MIDI_RX_GPIO only -- it has no VBUS path
-        to offer a controller. One device at a time (same as every other
-        input transport here); the host task runs on core 0 with WiFi, so
-        watch the render task's `dropped` frame counter for coexistence
-        regressions after enabling this.
+        Whether USB-MIDI host mode actually STARTS is a runtime decision
+        (device_config.h's usbMidiHost flag, set by the flasher's
+        checkbox or the device console's reconfigure page) -- this option
+        only supplies the fallback used when no valid devcfg partition is
+        present, so a dev build driven purely by menuconfig (no CFG1 ever
+        flashed) behaves exactly as the old CONFIG_GLOW_USB_MIDI_HOST
+        used to: on means on. Leave this OFF on a board wired for
+        GLOW_MIDI_RX_GPIO only -- it has no VBUS path to offer a
+        controller, and this is the one setting that can turn USB host
+        mode on with nobody having ticked a checkbox.
 
 config GLOW_OSC_UDP_PORT
     int "OSC UDP listen port"
@@ -92,30 +138,40 @@ config GLOW_OSC_UDP_PORT
         (cue/scene/fader). 9000 matches common OSC client defaults.
 
 config GLOW_SKIP_WIFI
-    bool "Skip WiFi bring-up entirely"
+    bool "Skip WiFi bring-up entirely (default, when no devcfg is present)"
     default n
     help
-        Never calls wifi_start_sta(): no STA connect attempt, no SoftAP
-        fallback, no netif/lwIP bring-up. DMX output, the render task, and
-        the Lua/Fennel VM (boot.fnl, live-coded cues) all come up and run
-        completely independent of this -- see main.cpp's app_main() header
-        comment on why WiFi is brought up last, not first. Art-Net output,
-        the web console, OSC, and Pro DJ Link input are all network
-        features and are skipped along with it (MIDI DIN stays up --
-        that's a UART, not network).
+        Whether WiFi bring-up is skipped is now a runtime decision
+        (device_config.h's skipWifi flag, CFG1 flags bit1 -- set by the
+        flasher's "no WiFi" checkbox or the device console's reconfigure
+        page): main.cpp checks cfg.skipWifi, not this Kconfig symbol,
+        before ever calling wifi_start_sta(). This option only supplies
+        the fallback used when no valid devcfg partition is present (see
+        device_config.h's header comment), same "Kconfig is a default, not
+        the truth" relationship as every other option in this menu.
+
+        When it takes effect: never calls wifi_start_sta() (no STA connect
+        attempt, no SoftAP fallback, no netif/lwIP bring-up). DMX output,
+        the render task, and the Lua/Fennel VM (boot.fnl, live-coded cues)
+        all come up and run completely independent of this -- see
+        main.cpp's app_main() header comment on why WiFi is brought up
+        last, not first. Art-Net output, the web console, OSC, and Pro DJ
+        Link input are all network features and are skipped along with it
+        (MIDI DIN stays up -- that's a UART, not network).
 
         Two real uses, not just one: QEMU has no WiFi/802.11 hardware
         model at all (see tests/qemu/README.md) -- esp_wifi_init()'s RF
         calibration step hangs waiting on radio status bits that emulated
-        silicon never sets, so this is required for the QEMU boot suite to
-        get past it. It's equally real for a physical rig: a purely local
-        DMX/Fennel setup with no network at all, or a venue where you
-        simply don't want the STA/AP surface running.
+        silicon never sets, so this default (or an explicit devcfg with
+        skipWifi=1) is required for the QEMU boot suite to get past it.
+        It's equally real for a physical rig: a purely local DMX/Fennel
+        setup with no network at all, or a venue where you simply don't
+        want the STA/AP surface running.
 
-        A rig with this off (the default) already tolerates a missing or
-        dropped AP without blacking out (F5's reconnect-with-backoff) --
-        this option is for never bringing WiFi up in the first place, not
-        for handling it going away.
+        A rig with this off already tolerates a missing or dropped AP
+        without blacking out (F5's reconnect-with-backoff) -- this option
+        is for never bringing WiFi up in the first place, not for handling
+        it going away.
 
 config GLOW_SELFTEST
     bool "Enable HIL selftest mode (GLOW-TEST: telemetry + serial queries)"

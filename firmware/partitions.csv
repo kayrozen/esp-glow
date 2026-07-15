@@ -11,22 +11,38 @@
 #   coredump  512 KB  panic core dumps (robustness)
 #   scripts   256 KB  LittleFS: Fennel/Lua scripts, writable at runtime
 #                     (see scripts_storage.h, README_LUA_FENNEL.md)
+#   devcfg      4 KB  raw CFG1 device config blob: WiFi/DMX GPIOs/Art-Net
+#                     fallback/USB-MIDI, written by the browser at flash
+#                     time (see FORMAT.md, device_config.h)
 #
-# Total: ~7.85 MB, fits in 8 MB flash (128 KB headroom left). For 16 MB
+# Total: ~7.85 MB, fits in 8 MB flash (124 KB headroom left). For 16 MB
 # boards, enlarge ota_0/ota_1 and/or show.
 #
-# `show` is a raw `data` partition (subtype 0x40), not a filesystem: the
-# SHW1 bundle is a single opaque blob, so a filesystem buys nothing and the
-# web flasher (esptool-js, browser-side) can't construct one anyway. The
-# device reads it with esp_partition_read(); the browser writes it with
-# esptool-js flashing raw bytes straight at this partition's offset.
+# `show` and `devcfg` are raw `data` partitions (subtype 0x40), not
+# filesystems: each is a single opaque blob (SHW1 / CFG1), so a filesystem
+# buys nothing and the web flasher (esptool-js, browser-side) can't
+# construct one anyway. The device reads them with esp_partition_read();
+# the browser writes them with esptool-js flashing raw bytes straight at
+# each partition's offset.
 #
-# `scripts` is the opposite: it's the ONE thing on this device meant to
+# `devcfg` is placed at the very end of flash, after `scripts`, so adding
+# it never moved `show` (0x620000) or `scripts` (0x7A0000) -- every
+# already-flashed board's existing partitions keep their offsets. It's a
+# separate partition from `show`, not a field folded into SHW1, because it
+# changes on a different cadence (once per device, at provisioning /
+# reconfigure time) and via a different path (the flasher's config form or
+# the device console's reconfigure page, not the show compiler).
+#
+# `scripts` is the odd one out: it's the ONE thing on this device meant to
 # change at runtime without a reflash (live-coded Fennel/Lua, a boot.fnl
 # evaluated at startup — see design doc phases 2/6/8). LittleFS earns its
 # keep here because scripts are many small named files the device itself
 # creates/overwrites (glow.save), not a single opaque blob written from
-# outside.
+# outside. `devcfg` *can* also be rewritten at runtime (the device console's
+# reconfigure page writes it directly with esp_partition_write, gated by
+# the same CRC validation the boot-time parser uses), but it stays a raw
+# partition like `show` rather than LittleFS, since it's still one
+# fixed-size opaque blob, not many named files.
 
 # Name,     Type, SubType,  Offset,   Size,    Flags
 nvs,        data, nvs,      0x9000,   0x6000,
@@ -37,3 +53,4 @@ ota_1,      app,  ota_1,    0x320000, 0x300000,
 show,       data, 0x40,     0x620000, 0x100000,
 coredump,   data, coredump, 0x720000, 0x80000,
 scripts,    data, spiffs,   0x7A0000, 0x40000,
+devcfg,     data, 0x40,     0x7E0000, 0x1000,
