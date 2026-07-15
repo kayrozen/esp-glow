@@ -20,6 +20,7 @@
 #include "pixel_matrix.h"
 #include "profile_encoder.h"
 #include "show_control.h"
+#include "wled_manager.h"
 
 static int g_failCount = 0;
 
@@ -77,8 +78,9 @@ struct Harness {
   GlowLuaApi api;
 
   Harness(const std::string& fennelSrc, IMatrixRegistry* mats = nullptr,
-         IFixtureRegistry* fixtures = nullptr)
-      : vm(), matrices(mats), live(show), api(vm, show, mats, beatClock, live, fixtures) {
+         IFixtureRegistry* fixtures = nullptr, WledManager* wled = nullptr)
+      : vm(), matrices(mats), live(show),
+        api(vm, show, mats, beatClock, live, fixtures, nullptr, wled) {
     api.install();
     char err[256];
     if (!vm.loadFennelCompiler(fennelSrc.data(), fennelSrc.size(), err, sizeof(err))) {
@@ -521,6 +523,101 @@ void test_matrix_unknown_pattern_name_errors() {
 }
 
 // ---------------------------------------------------------------------------
+// glow.wled.*
+// ---------------------------------------------------------------------------
+
+void test_wled_fx_sends_a_packet_to_the_named_target() {
+  TEST("glow.wled.fx resolves a target by name and sends one packet");
+  MockWledSink sink;
+  WledManager wled(&sink);
+  wled.addTarget({"main_matrix", "192.168.1.100", WLED_DEFAULT_PORT, 1});
+
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc, nullptr, nullptr, &wled);
+
+  h.evalOrDie(R"((glow.wled.fx "main_matrix" :fire-2012
+                  {:speed 180 :intensity 220 :brightness 200 :palette :fire}))");
+
+  CHECK(sink.sendCount == 1);
+  CHECK(sink.lastIp == "192.168.1.100");
+  CHECK(sink.last[8] == 66);   // fire-2012
+  CHECK(sink.last[9] == 180);  // speed
+  CHECK(sink.last[16] == 220); // intensity
+  CHECK(sink.last[2] == 200);  // brightness
+  CHECK(sink.last[19] == 35);  // fire palette
+}
+
+void test_wled_color_sends_a_direct_change_packet() {
+  TEST("glow.wled.color sends a solid-color direct-change packet");
+  MockWledSink sink;
+  WledManager wled(&sink);
+  wled.addTarget({"tree", "192.168.1.101", WLED_DEFAULT_PORT, 1});
+
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc, nullptr, nullptr, &wled);
+  h.evalOrDie(R"((glow.wled.color "tree" 255 0 0 {:brightness 255 :transition 500}))");
+
+  CHECK(sink.sendCount == 1);
+  CHECK(sink.last[1] == 0x01);  // direct change
+  CHECK(sink.last[3] == 255 && sink.last[4] == 0 && sink.last[5] == 0);
+}
+
+void test_wled_on_off_toggle_brightness() {
+  TEST("glow.wled.on/off toggle brightness on the named target");
+  MockWledSink sink;
+  WledManager wled(&sink);
+  wled.addTarget({"tree", "192.168.1.101", WLED_DEFAULT_PORT, 1});
+
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc, nullptr, nullptr, &wled);
+
+  h.evalOrDie(R"((glow.wled.off "tree"))");
+  CHECK(sink.sendCount == 1);
+  CHECK(sink.last[2] == 0);
+
+  h.evalOrDie(R"((glow.wled.on "tree"))");
+  CHECK(sink.sendCount == 2);
+  CHECK(sink.last[2] == 255);
+}
+
+void test_wled_fx_broadcast_sends_to_broadcast_address() {
+  TEST("glow.wled.fx-broadcast sends to 255.255.255.255 without a named target");
+  MockWledSink sink;
+  WledManager wled(&sink);
+
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc, nullptr, nullptr, &wled);
+  h.evalOrDie(R"((glow.wled.fx-broadcast :pacifica {:speed 100 :intensity 150 :palette :ocean}))");
+
+  CHECK(sink.sendCount == 1);
+  CHECK(sink.lastIp == "255.255.255.255");
+  CHECK(sink.last[8] == 101);  // pacifica
+}
+
+void test_wled_fx_unknown_target_errors_cleanly() {
+  TEST("glow.wled.fx on an unknown target name errors, not crashes");
+  MockWledSink sink;
+  WledManager wled(&sink);
+  wled.addTarget({"tree", "192.168.1.101", WLED_DEFAULT_PORT, 1});
+
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc, nullptr, nullptr, &wled);
+  std::string err;
+  CHECK(!h.eval(R"((glow.wled.fx "no_such_target" :solid))", &err));
+  CHECK(err.find("unknown WLED target") != std::string::npos);
+  CHECK(sink.sendCount == 0);
+}
+
+void test_wled_without_manager_errors_cleanly() {
+  TEST("glow.wled.* with no WledManager configured errors instead of crashing");
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc);  // wled defaults to nullptr
+  std::string err;
+  CHECK(!h.eval(R"((glow.wled.fx "tree" :solid))", &err));
+  CHECK(err.find("no WLED targets") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
 // glow.beat / glow.bar / glow.beat-number / glow.bpm / glow.locked? / glow.tap
 // ---------------------------------------------------------------------------
 
@@ -671,6 +768,13 @@ int main() {
 
   test_glow_ranges_lists_named_and_continuous();
   test_glow_ranges_without_registry_errors_cleanly();
+
+  test_wled_fx_sends_a_packet_to_the_named_target();
+  test_wled_color_sends_a_direct_change_packet();
+  test_wled_on_off_toggle_brightness();
+  test_wled_fx_broadcast_sends_to_broadcast_address();
+  test_wled_fx_unknown_target_errors_cleanly();
+  test_wled_without_manager_errors_cleanly();
 
   if (g_failCount == 0) {
     printf("\nAll tests passed.\n");

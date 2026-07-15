@@ -106,6 +106,16 @@ std::vector<uint8_t> encodeController(const ControllerBuilder& def, std::string&
 //                                     # startUniverse and startAddress are 1-indexed, same
 //                                     # convention as UNIVERSE/FIXTURE above.
 // CONTROLLER <deffile>                # embed a .mdef controller definition; deffile resolved via callback
+// WLED <name> <ip> [syncGroup]       # a named WLED UDP Notifier target (README_WLED.md);
+//                                     # <name> and <ip> may optionally be double-quoted (quotes
+//                                     # are stripped, not parsed -- neither may contain a space).
+//                                     # <ip> is an IPv4 dotted-quad or 255.255.255.255 (broadcast);
+//                                     # mDNS hostnames are not resolved by this compiler or the
+//                                     # device today -- resolve to a static IP first. syncGroup is
+//                                     # 1..8, default 1 (informational: WLED's own receiver does
+//                                     # any group filtering, esp-glow addresses targets by name).
+//                                     # Bumps the bundle to SHW1 v3 (see show_bundle.h) the same
+//                                     # way CONTROLLER bumps it to v2.
 //
 // After parsing, the compiler validates every DMX address (1..512) and every
 // fixture's footprint against the end of its universe (a fixture never

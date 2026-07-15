@@ -4,6 +4,7 @@
 #include "aim.h"
 #include "pixel_matrix.h"
 #include "mdef.h"
+#include "wled_target.h"
 #include <vector>
 #include <cstdint>
 
@@ -22,7 +23,16 @@
 // through the matrix table is otherwise byte-identical to v1.
 //   ...
 //   matrixCount   u16
-//   mdefCount     u16   (v2 only)
+//   mdefCount     u16   (v2+ only)
+//
+// Version 3 header inserts one more field after mdefCount, same additive
+// convention -- everything through the controller table is byte-identical
+// to v2. mdefCount is always present at v3 (0 if the show has no
+// CONTROLLER) so the header stays self-describing without a v1/v2/v3
+// three-way branch past this point.
+//   ...
+//   mdefCount     u16   (v2+ only)
+//   wledCount     u16   (v3 only)
 //
 // Universe table (universeCount entries):
 //   transport     u8   (0=Dmx, 1=ArtNet, 2=Sacn, 3=Unused)
@@ -47,9 +57,16 @@
 //   order         u8            (ColorOrder value)
 //   startUniverse u8
 //   startChannel  u16
-// Controller (mdef) table (v2 only, mdefCount entries):
+// Controller (mdef) table (v2+ only, mdefCount entries):
 //   blobLen       u16
 //   blob          blobLen bytes   (an MDF1 controller definition, mdef.h)
+// WLED target table (v3 only, wledCount entries):
+//   nameLen       u8
+//   name          nameLen bytes  (UTF-8, not NUL-terminated)
+//   ipLen         u8
+//   ip            ipLen bytes    (UTF-8 IPv4 dotted-quad or 255.255.255.255)
+//   port          u16
+//   syncGroup     u8
 
 enum class UniverseTransport : uint8_t {
   Dmx = 0,
@@ -71,7 +88,8 @@ struct LoadedShow {
   UniverseTransport transport[8] = {};
   std::vector<PatchEntry> fixtures;
   std::vector<MatrixMap> matrices;
-  std::vector<MidiControllerProfile> controllers;  // v2 only; usually 0 or 1 (see B1)
+  std::vector<MidiControllerProfile> controllers;  // v2+ only; usually 0 or 1 (see B1)
+  std::vector<WledTarget> wledTargets;              // v3 only
 };
 
 // Load a SHW1 bundle from a byte buffer.

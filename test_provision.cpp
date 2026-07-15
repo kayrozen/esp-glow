@@ -739,6 +739,129 @@ TEST(show_controller_missing_deffile_error) {
 }
 
 // ============================================================================
+// .show WLED / SHW1 v3 Tests
+// ============================================================================
+
+TEST(show_compile_and_load_roundtrip_with_wled) {
+  std::string showText = R"(
+    SHOW 2
+    UNIVERSE 1 DMX
+    WLED "main_matrix" "192.168.1.100" 1
+    WLED "christmas_tree" "192.168.1.101" 3
+    WLED broadcast_zone 255.255.255.255
+  )";
+  auto readFile = [&](const std::string&) { return std::string(); };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(result.ok);
+  CHECK(!result.bundle.empty());
+  CHECK(result.bundle[4] == 3);  // version bumped once a WLED target is present
+
+  LoadedShow loaded;
+  CHECK(loadShow(result.bundle.data(), result.bundle.size(), loaded));
+  CHECK(loaded.wledTargets.size() == 3);
+
+  CHECK(loaded.wledTargets[0].name == "main_matrix");
+  CHECK(loaded.wledTargets[0].ip == "192.168.1.100");
+  CHECK(loaded.wledTargets[0].port == WLED_DEFAULT_PORT);
+  CHECK(loaded.wledTargets[0].syncGroup == 1);
+
+  CHECK(loaded.wledTargets[1].name == "christmas_tree");
+  CHECK(loaded.wledTargets[1].syncGroup == 3);
+
+  // Unquoted tokens work exactly like quoted ones (stripQuotes is a no-op
+  // when there are no surrounding quotes -- see provision.cpp).
+  CHECK(loaded.wledTargets[2].name == "broadcast_zone");
+  CHECK(loaded.wledTargets[2].ip == "255.255.255.255");
+  CHECK(loaded.wledTargets[2].syncGroup == 1);  // default
+}
+
+TEST(show_compile_and_load_roundtrip_with_wled_and_controller) {
+  std::map<std::string, std::string> fileMap;
+  fileMap["apc.mdef"] = R"(
+    CONTROLLER Akai APC40 mkII
+    PAD 53 60
+  )";
+  std::string showText = R"(
+    SHOW 2
+    UNIVERSE 1 DMX
+    CONTROLLER apc.mdef
+    WLED "tree" "192.168.1.101" 1
+  )";
+  auto readFile = [&](const std::string& name) {
+    auto it = fileMap.find(name);
+    if (it != fileMap.end()) return it->second;
+    return std::string();
+  };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(result.ok);
+  CHECK(result.bundle[4] == 3);  // WLED present -> v3, which still carries mdefCount
+
+  LoadedShow loaded;
+  CHECK(loadShow(result.bundle.data(), result.bundle.size(), loaded));
+  CHECK(loaded.controllers.size() == 1);
+  CHECK(loaded.wledTargets.size() == 1);
+  CHECK(loaded.wledTargets[0].name == "tree");
+}
+
+TEST(show_compile_no_wled_stays_v1) {
+  std::string showText = R"(
+    SHOW 2
+    UNIVERSE 1 DMX
+  )";
+  auto readFile = [&](const std::string&) { return std::string(); };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(result.ok);
+  CHECK(result.bundle[4] == 1);  // no CONTROLLER/WLED -> byte-identical v1 layout
+
+  LoadedShow loaded;
+  CHECK(loadShow(result.bundle.data(), result.bundle.size(), loaded));
+  CHECK(loaded.wledTargets.empty());
+}
+
+TEST(show_wled_duplicate_name_error) {
+  std::string showText = R"(
+    SHOW 2
+    UNIVERSE 1 DMX
+    WLED "tree" "192.168.1.101"
+    WLED "tree" "192.168.1.102"
+  )";
+  auto readFile = [&](const std::string&) { return std::string(); };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(!result.ok);
+  CHECK(!result.err.empty());
+}
+
+TEST(show_wled_missing_ip_error) {
+  std::string showText = R"(
+    SHOW 2
+    UNIVERSE 1 DMX
+    WLED "tree"
+  )";
+  auto readFile = [&](const std::string&) { return std::string(); };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(!result.ok);
+  CHECK(!result.err.empty());
+}
+
+TEST(show_wled_syncgroup_out_of_range_error) {
+  std::string showText = R"(
+    SHOW 2
+    UNIVERSE 1 DMX
+    WLED "tree" "192.168.1.101" 9
+  )";
+  auto readFile = [&](const std::string&) { return std::string(); };
+
+  CompileResult result = compileShow(showText, readFile);
+  CHECK(!result.ok);
+  CHECK(!result.err.empty());
+}
+
+// ============================================================================
 // SHOW 2: 1-indexed addressing + migration + validation
 // ============================================================================
 
@@ -1250,6 +1373,12 @@ int main() {
   RUN_TEST(show_compile_and_load_roundtrip_with_controller);
   RUN_TEST(show_compile_no_controller_stays_v1);
   RUN_TEST(show_controller_missing_deffile_error);
+  RUN_TEST(show_compile_and_load_roundtrip_with_wled);
+  RUN_TEST(show_compile_and_load_roundtrip_with_wled_and_controller);
+  RUN_TEST(show_compile_no_wled_stays_v1);
+  RUN_TEST(show_wled_duplicate_name_error);
+  RUN_TEST(show_wled_missing_ip_error);
+  RUN_TEST(show_wled_syncgroup_out_of_range_error);
   RUN_TEST(show_v2_address_and_universe_convert_to_0_indexed);
   RUN_TEST(show_missing_header_error_names_migration);
   RUN_TEST(show_empty_file_missing_header_error);

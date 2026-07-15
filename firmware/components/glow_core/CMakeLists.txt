@@ -86,6 +86,12 @@ idf_component_register(
         ${GLOW_ROOT}/dmx_sink.cpp
         # device-only Art-Net sink (#ifdef ESP_PLATFORM guarded; filled in F2)
         ${GLOW_ROOT}/artnet_sink.cpp
+        # WLED UDP Notifier support (README_WLED.md): host-testable packet
+        # builder + named-target manager, plus the device-only UDP transport
+        # (#ifdef ESP_PLATFORM guarded, same split as artnet_sink.cpp above)
+        ${GLOW_ROOT}/wled_packet.cpp
+        ${GLOW_ROOT}/wled_manager.cpp
+        ${GLOW_ROOT}/wled_udp_sink.cpp
         # F6: the Lua/Fennel live-coding layer
         ${GLOW_ROOT}/lua_vm.cpp
         ${GLOW_ROOT}/glow_lua_api.cpp

@@ -9,7 +9,8 @@ uint8_t matrixUniverseCount(const MatrixMap& m) {
   return static_cast<uint8_t>((totalChannels - 1) / 512 + 1);
 }
 
-ApplyResult applyLoadedShow(const LoadedShow& ls, Show& show, ISinkFactory& factory) {
+ApplyResult applyLoadedShow(const LoadedShow& ls, Show& show, ISinkFactory& factory,
+                            WledManager* wled) {
   ApplyResult r;
 
   // 1. Mark which universes are matrix (Raw) universes. A universe is Raw if
@@ -51,6 +52,14 @@ ApplyResult applyLoadedShow(const LoadedShow& ls, Show& show, ISinkFactory& fact
       show.patch(e.profile, e.universe, e.base);
     }
     r.fixturesPatched++;
+  }
+
+  // 4. WLED targets, if this device has a WledManager.
+  if (wled) {
+    for (const WledTarget& t : ls.wledTargets) {
+      wled->addTarget(t);
+      r.wledTargetsApplied++;
+    }
   }
 
   return r;
