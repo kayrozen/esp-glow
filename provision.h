@@ -96,12 +96,24 @@ std::vector<uint8_t> encodeController(const ControllerBuilder& def, std::string&
 //                                     # fallback, because silently reinterpreting an old
 //                                     # 0-indexed .show as 1-indexed would shift every address
 //                                     # by one channel without any error.
-// UNIVERSE <idx> <DMX|ARTNET|SACN>   # sets transport for universe idx (1..8, 1-indexed).
+// UNIVERSE <idx> <DMX|ARTNET|SACN> [<ip>] [<wireUniverse>]
+//                                     # sets transport for universe idx (1..8, 1-indexed).
 //                                     # Stored internally as idx-1. NOTE: this is the .show
 //                                     # text convention only -- Art-Net universes are 0-indexed
 //                                     # on the wire, so UNIVERSE 1 ARTNET is internal index 0,
-//                                     # which the Art-Net sink sends as wire universe 0 (see
-//                                     # FORMAT.md / README_PROVISION.md for the worked mapping).
+//                                     # which the Art-Net sink sends as wire universe 0 by
+//                                     # default (see FORMAT.md / README_PROVISION.md for the
+//                                     # worked mapping).
+//                                     # <ip> and <wireUniverse> (ARTNET only, both optional) are
+//                                     # Wave 3's explicit per-node routing: <ip> (dotted-quad)
+//                                     # names the destination Art-Net node -- omitted, it falls
+//                                     # back to CFG1's artnetFallbackIp, or broadcast if that's
+//                                     # 0 too. <wireUniverse> (0..32767) is the 15-bit Art-Net
+//                                     # Port-Address to send as -- omitted (but <ip> given), it
+//                                     # defaults to the internal index and the compiler warns.
+//                                     # Two UNIVERSE ARTNET lines resolving to the same (ip,
+//                                     # wireUniverse) is a compile error (same ip, different
+//                                     # wireUniverse is fine -- that's one node's second output).
 // FIXTURE  <deffile> <universe> <address> # patch an instance; deffile resolved via callback.
 //                                     # <address> is the 1-indexed DMX address printed on the
 //                                     # fixture's own display (1..512), stored as base=address-1.

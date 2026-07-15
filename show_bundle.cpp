@@ -25,6 +25,16 @@ public:
     return true;
   }
 
+  bool readU32(uint32_t& out) {
+    if (pos_ + 4 > len_) return false;
+    out = static_cast<uint32_t>(data_[pos_]) |
+          (static_cast<uint32_t>(data_[pos_ + 1]) << 8) |
+          (static_cast<uint32_t>(data_[pos_ + 2]) << 16) |
+          (static_cast<uint32_t>(data_[pos_ + 3]) << 24);
+    pos_ += 4;
+    return true;
+  }
+
   bool readF32(float& out) {
     if (pos_ + 4 > len_) return false;
     uint32_t bits = static_cast<uint32_t>(data_[pos_]) |
@@ -77,7 +87,7 @@ bool loadShow(const uint8_t* data, size_t len, LoadedShow& out) {
   // otherwise (a false positive -- the host build's GCC/-O0 doesn't hit it).
   uint8_t version = 0;
   if (!reader.readU8(version)) return false;
-  if (version != 1 && version != 2 && version != 3) return false;
+  if (version != 1 && version != 2 && version != 3 && version != 4) return false;
 
   uint8_t universeCount;
   if (!reader.readU8(universeCount)) return false;
@@ -96,12 +106,30 @@ bool loadShow(const uint8_t* data, size_t len, LoadedShow& out) {
 
   out.universeCount = universeCount;
 
-  // Read universe table
+  // Read universe table. v1/v2/v3 entries are just the transport byte; v4
+  // entries add destIp/wireUniverse (see show_bundle.h's format comment).
+  // Default every universe to today's implicit behavior first -- a v1/v2/v3
+  // bundle (or a v4 universe that happens not to need overriding) leaves
+  // this as-is: fallback/broadcast destination, wire universe = the
+  // universe's own internal index.
+  for (int i = 0; i < universeCount; i++) {
+    out.artnetDest[i].ip = 0;
+    out.artnetDest[i].wireUniverse = static_cast<uint16_t>(i);
+  }
   for (int i = 0; i < universeCount; i++) {
     uint8_t transport;
     if (!reader.readU8(transport)) return false;
     if (transport > 3) return false;
     out.transport[i] = static_cast<UniverseTransport>(transport);
+
+    if (version >= 4) {
+      uint32_t destIp;
+      uint16_t wireUniverse;
+      if (!reader.readU32(destIp)) return false;
+      if (!reader.readU16(wireUniverse)) return false;
+      out.artnetDest[i].ip = destIp;
+      out.artnetDest[i].wireUniverse = wireUniverse;
+    }
   }
 
   // Read profile table and build profiles
@@ -243,7 +271,7 @@ bool loadShow(const uint8_t* data, size_t len, LoadedShow& out) {
     }
   }
 
-  // WLED target table -- v3 only.
+  // WLED target table -- v3+ only.
   for (int i = 0; i < wledCount; i++) {
     uint8_t nameLen;
     if (!reader.readU8(nameLen)) return false;

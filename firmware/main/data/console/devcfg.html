@@ -97,6 +97,14 @@
     #status.err   { display: block; background: rgba(255,84,112,0.12); color: var(--err); }
     #status.info  { display: block; background: rgba(77,140,255,0.12); color: var(--accent); }
     a.back { color: var(--text-dim); font-size: 0.85rem; text-decoration: none; }
+    #artnet-nodes table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    #artnet-nodes th, #artnet-nodes td {
+      text-align: left;
+      padding: 6px 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    #artnet-nodes th { color: var(--text-dim); font-weight: 500; }
+    #artnet-nodes .empty { color: var(--text-dim); font-size: 0.85rem; padding: 4px 0; }
   </style>
 </head>
 <body>
@@ -166,6 +174,17 @@
     </form>
 
     <div id="status"></div>
+
+    <fieldset>
+      <legend>Discovered Art-Net nodes</legend>
+      <p class="sub" style="margin-bottom:10px;">Nodes that answered this device's last ArtPoll broadcast. A universe
+        with no explicit IP in the .show routes here automatically once its node is discovered -- if nothing lights up,
+        check the node actually shows up below.</p>
+      <div id="artnet-nodes">Loading&hellip;</div>
+      <div class="actions">
+        <button type="button" id="artnet-nodes-refresh">Refresh</button>
+      </div>
+    </fieldset>
   </div>
   <script type="module" src="devcfg-page.js"></script>
 </body>

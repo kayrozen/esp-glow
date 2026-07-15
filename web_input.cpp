@@ -36,6 +36,7 @@
 #include "scripts_storage.h"
 #include "ota_manager.h"     // F5: /ota registers onto this same httpd server
 #include "device_config_web.h"  // CFG1 §6: /devcfg registers onto this same httpd server
+#include "artnet_nodes_web.h"  // Wave 3 Phase 3: /artnet_nodes registers onto this same httpd server
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -453,9 +454,10 @@ void web_server_task(void* /*ctx*/) {
   // this stays at IDF's default single-worker, exact-match config --
   // handlers above rely on running one at a time (see kWsBufCap). +1 for
   // /ws, +1 for /ota (F5 -- see ota_manager.h), +2 for GET+POST /devcfg
-  // (CFG1 §6 -- see device_config_web.h) -- all reuse this same server
-  // rather than starting a second one.
-  config.max_uri_handlers = kNumStaticFiles + 4;
+  // (CFG1 §6 -- see device_config_web.h), +1 for GET /artnet_nodes (Wave 3
+  // Phase 3 -- see artnet_nodes_web.h) -- all reuse this same server rather
+  // than starting a second one.
+  config.max_uri_handlers = kNumStaticFiles + 5;
   // OTA uploads (up to a full ota_0/ota_1 partition, several MB) can take
   // a while over a venue's WiFi; the default recv timeout is tuned for
   // small console requests, not that.
@@ -484,8 +486,9 @@ void web_server_task(void* /*ctx*/) {
 
   ota_register_handlers(g_server);
   device_config_web_register_handlers(g_server);
+  artnet_nodes_web_register_handlers(g_server);
 
-  ESP_LOGI(TAG, "web console + /ws + /ota + /devcfg ready");
+  ESP_LOGI(TAG, "web console + /ws + /ota + /devcfg + /artnet_nodes ready");
 }
 
 #endif  // ESP_PLATFORM

@@ -55,6 +55,7 @@
 #include "effects.h"  // DimmerEffect -- used by setup_selftest_fixture() (CONFIG_GLOW_SELFTEST)
 #include "dmx_sink.h"
 #include "artnet_sink.h"
+#include "artnet_discovery_task.h"
 #include "pixel_matrix.h"
 #include "pixel_patterns.h"
 #include "show_bundle.h"
@@ -169,6 +170,15 @@ static bool                  g_hasController = false;
 static DeviceMidiOutput      g_midiOutput;
 static LedFeedback*          g_ledFeedback = nullptr;
 
+// Wave 3 Phase 3: the bundle's per-universe Art-Net routes, copied out of
+// LoadedShow the same way g_controllerProfile is (ls is a boot-only local;
+// see setup_show_from_bundle) so artnet_discovery_task_init has something
+// process-lifetime to read. This is exactly the signal discovery needs to
+// respect the precedence rule: artnetDest[u].ip != 0 means the .show
+// already routed universe u explicitly, so discovery must never touch it.
+static ArtNetDest g_artnetShowDest[MAX_UNIVERSES];
+static uint8_t    g_artnetUniverseCount = 0;
+
 // F4 (pulled forward): the control-event queue itself. Real transports
 // (web httpd, MIDI UART, OSC UDP -- web_input.cpp, midi_input.cpp,
 // osc_input.cpp) push into this via the FreeRTOS-backed queue this
@@ -239,6 +249,14 @@ public:
       case UniverseTransport::ArtNet: return g_artnet;
       default: return nullptr;  // Sacn/Unused not supported
     }
+  }
+
+  // Wave 3: the bundle's per-universe (IP, wire-universe) route, applied
+  // straight onto g_artnet before the render task ever calls send() for
+  // this universe -- see setup_show_from_bundle's call order and
+  // ArtNetSink::setDest's ordering note.
+  void configureArtnetDest(uint8_t universeIdx, const ArtNetDest& dest) override {
+    if (g_artnet) g_artnet->setDest(universeIdx, dest);
   }
 };
 
@@ -642,6 +660,15 @@ static void on_pre_render(void* /*ctx*/, float t, Show* show) {
 }
 
 static void on_post_render(void* /*ctx*/, uint32_t slack_us) {
+  // Wave 3: exactly one ArtSync broadcast per frame, right after every
+  // Art-Net send() this frame's renderFrame() just did (render_task.cpp
+  // calls s_post_render immediately after show->renderFrame) -- this is
+  // what makes every node latch its outputs simultaneously instead of
+  // whenever its own packet happens to arrive (visible tearing on a
+  // matrix spanning multiple universes otherwise). A safe no-op before
+  // g_artnet->begin() (socket not open yet).
+  if (g_artnet) g_artnet->frameEnd();
+
   render_tick_hooks(RenderTickPhase::Post, 0.0f, slack_us);
 }
 
@@ -783,6 +810,14 @@ static bool setup_show_from_bundle() {
            r.universesConfigured, r.universesSkipped, r.fixturesPatched,
            r.headsPatched, r.matrixUniverses, r.wledTargetsApplied);
 
+  // Wave 3 Phase 3: copy the bundle's per-universe routes out before `ls`
+  // goes out of scope (same reasoning as g_controllerProfile below) --
+  // artnet_discovery_task_init reads this once WiFi/Art-Net come up.
+  g_artnetUniverseCount = ls.universeCount;
+  for (uint8_t u = 0; u < ls.universeCount && u < MAX_UNIVERSES; ++u) {
+    g_artnetShowDest[u] = ls.artnetDest[u];
+  }
+
   // Build PixelMatrix objects for each matrix entry. Each gets a rainbow
   // pattern by default; a richer config (F4) can map patterns per matrix.
   for (const MatrixMap& mm : ls.matrices) {
@@ -909,21 +944,23 @@ extern "C" void app_main(void) {
   printf("GLOW-TEST: dmx begin=ok\n");
 #endif
 
-  // --- F2: Art-Net sink -- constructed now (not begun). WiFi/netif bring-up
-  // moves to the very end of this function (see the "network bring-up"
-  // block below), but DeviceSinkFactory::sinkFor() still needs a non-null
-  // g_artnet right now, before setup_show_from_bundle patches any
-  // ArtNet-transport universe below -- g_artnet->send() is a safe no-op
-  // until begin() actually opens the UDP socket (sock_ stays -1 until
-  // then; see artnet_sink.cpp), so constructing early costs nothing. ---
+  // --- F2/Wave 3: Art-Net sink -- constructed now (not begun). WiFi/netif
+  // bring-up moves to the very end of this function (see the "network
+  // bring-up" block below), but DeviceSinkFactory::sinkFor() still needs a
+  // non-null g_artnet right now, before setup_show_from_bundle patches any
+  // ArtNet-transport universe below (and calls configureArtnetDest for
+  // each one -- see that function and ArtNetSink::setDest's ordering
+  // note). g_artnet->send()/frameEnd() are safe no-ops until begin()
+  // actually opens the UDP socket (sock_ stays -1 until then; see
+  // artnet_sink.cpp), so constructing early costs nothing. ---
   // CFG1: artnetFallbackIp is the destination for Art-Net universes the
   // .show does not route explicitly (0 = broadcast) -- see FORMAT.md's
-  // "artnetFallbackIp" precedence note. Wave 3 will add an explicit
-  // per-universe (IP, wire-universe) table to the .show that takes
-  // precedence over this when present; today, this IS the only routing.
-  uint32_t bridge = cfg.artnetFallbackIp;
-  if (bridge == 0) bridge = 0xFFFFFFFFu;
-  g_artnet = new ArtNetSink(bridge, cfg.artnetPort);
+  // "artnetFallbackIp" precedence note. Precedence, per FORMAT.md: an
+  // explicit per-universe (IP, wire-universe) route in the .show wins over
+  // this fallback, which wins over broadcast. ArtNetSink resolves that
+  // precedence itself (via ArtNetRouter) every send -- ip=0 on a
+  // per-universe route means "use this fallback."
+  g_artnet = new ArtNetSink(cfg.artnetPort, cfg.artnetFallbackIp);
 
   // --- F5: always keep at least one DMX universe configured and
   // streaming, independent of whether a show bundle loads -- "safe
@@ -1084,6 +1121,13 @@ extern "C" void app_main(void) {
 #ifdef CONFIG_GLOW_SELFTEST
       printf("GLOW-TEST: artnet tx=ok\n");
 #endif
+      // Wave 3 Phase 3: ArtPoll discovery, own socket + own task -- fills
+      // in only the universes the .show left unspecified (see
+      // g_artnetShowDest's comment); a node vanishing reverts its
+      // universes to fallback/broadcast, never darkness.
+      artnet_discovery_task_init(g_artnet, g_artnetShowDest, g_artnetUniverseCount);
+      xTaskCreatePinnedToCore(artnet_discovery_task, "artnet_disc", 4096 / sizeof(StackType_t),
+                              nullptr, 5, nullptr, 0);
     }
 
     // --- WLED UDP Notifier sink begin() -- same "constructed early, begun

@@ -106,7 +106,42 @@ async function save(ev) {
   }
 }
 
+function renderArtnetNodes(nodes) {
+  const el = $("artnet-nodes");
+  if (!nodes.length) {
+    el.innerHTML = '<p class="empty">No nodes discovered yet -- either none have replied to an ArtPoll yet, or ' +
+      "every universe is explicitly routed / broadcasting (discovery only fills in what the .show left unspecified).</p>";
+    return;
+  }
+  const rows = nodes.map((n) => {
+    const name = n.longName || n.shortName || "(unnamed)";
+    const universes = (n.universes || []).join(", ") || "—";
+    return `<tr><td>${escapeHtml(name)}</td><td>${escapeHtml(n.ip)}</td><td>${escapeHtml(universes)}</td></tr>`;
+  }).join("");
+  el.innerHTML = `<table><thead><tr><th>Name</th><th>IP</th><th>Wire universes</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+async function loadArtnetNodes() {
+  const el = $("artnet-nodes");
+  try {
+    const res = await fetch("/artnet_nodes", { cache: "no-store" });
+    if (!res.ok) throw new Error(`GET /artnet_nodes failed: ${res.status}`);
+    const data = await res.json();
+    renderArtnetNodes(data.nodes || []);
+  } catch (e) {
+    el.innerHTML = `<p class="empty">Could not load discovered nodes: ${escapeHtml(e.message)}</p>`;
+  }
+}
+
 $("reload-btn").addEventListener("click", loadCurrent);
 $("devcfg-form").addEventListener("submit", save);
+$("artnet-nodes-refresh").addEventListener("click", loadArtnetNodes);
 
 loadCurrent();
+loadArtnetNodes();

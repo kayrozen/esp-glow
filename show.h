@@ -32,6 +32,24 @@ public:
   virtual void send(uint8_t universeIndex, const uint8_t* data, uint16_t len) = 0;
 };
 
+// An Art-Net destination: which node (IP) and which wire universe a
+// universe's packets go out as. The wire universe is Art-Net's 15-bit
+// Port-Address (Net:SubNet:Universe, 0..32767) collapsed into one number --
+// see FORMAT.md's "Art-Net Wire Universe & Destination Routing" section for
+// the byte-level Net/SubNet/Universe decomposition used when a packet is
+// actually built.
+//
+// ip == 0 is a sentinel meaning "no explicit .show route": the sink
+// resolves it to its own configured fallback (CFG1's artnetFallbackIp), or
+// broadcast if that is also 0. wireUniverse has no equivalent sentinel --
+// a destination with ip == 0 still carries a real wireUniverse (defaulted
+// to the internal universe index if the .show didn't say otherwise; see
+// provision.cpp's compileShow).
+struct ArtNetDest {
+  uint32_t ip = 0;
+  uint16_t wireUniverse = 0;
+};
+
 class MockSink : public IUniverseSink {
 public:
   void send(uint8_t idx, const uint8_t* data, uint16_t len) override;

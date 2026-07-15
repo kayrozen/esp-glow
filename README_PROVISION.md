@@ -58,7 +58,10 @@ first non-comment line; see "Format Version / Migration" below.
 
 ```
 SHOW 2                              # REQUIRED first non-comment line.
-UNIVERSE <idx> <DMX|ARTNET|SACN>   # Sets transport for universe idx (1..8, 1-indexed).
+UNIVERSE <idx> <DMX|ARTNET|SACN> [<ip>] [<wireUniverse>]
+                                    # Sets transport for universe idx (1..8, 1-indexed).
+                                    # <ip>/<wireUniverse> are ARTNET-only, both optional --
+                                    # see "Universes -- the Art-Net Wire Mapping" below.
 FIXTURE  <deffile> <universe> <address> # Patch an instance of a fixture type.
                                     # <universe> 1-indexed (as above). <address> is the
                                     # 1-indexed DMX address (1..512) printed on the fixture.
@@ -107,14 +110,54 @@ loud). The compiler converts to a 0-based **internal** universe index (`UNIVERSE
 used everywhere on-device (`PatchEntry.universe`, `MatrixMap.startUniverse`).
 
 **Art-Net universes are 0-based on the wire** (Art-Net's own `SubUni`/`Net` addressing starts
-at 0), which happens to line up with the internal index without another offset:
-`UNIVERSE 1 ARTNET` → internal index `0` → `ArtNetSink::send(universeIndex=0, ...)` → wire
-universe `0` (the *first* Art-Net universe, sometimes written `0.0` or `Net 0 / SubUni 0`).
-`UNIVERSE 2 ARTNET` → internal index `1` → wire universe `1`. In general: **wire universe =
-`.show` universe number − 1**, the same arithmetic as a DMX address, just applied to the whole
-universe instead of a channel within it. DMX and sACN universes don't have this wire-level
-0-basing concern (DMX is a physical port, not a numbered universe on a shared wire), so this
-mapping only matters for `ARTNET` transport universes.
+at 0). By default (no explicit routing given -- see below), this lines up with the internal
+index without another offset: `UNIVERSE 1 ARTNET` → internal index `0` → wire universe `0`
+(the *first* Art-Net universe, sometimes written `0.0` or `Net 0 / SubUni 0`). `UNIVERSE 2
+ARTNET` → internal index `1` → wire universe `1`. In general, absent an explicit wire universe:
+**wire universe = `.show` universe number − 1**, the same arithmetic as a DMX address, just
+applied to the whole universe instead of a channel within it. DMX and sACN universes don't have
+this wire-level 0-basing concern (DMX is a physical port, not a numbered universe on a shared
+wire), so this mapping only matters for `ARTNET` transport universes.
+
+### Universes — Explicit Destination Routing (Wave 3)
+
+A real rig usually has several Art-Net nodes, and a node usually has several DMX outputs. Since
+"internal universe index" and "Art-Net wire universe" are conflated by default (previous
+section), there was no way to say "wire universe 0 on node A" and "wire universe 0 on node B" --
+same number, different IP. `UNIVERSE ... ARTNET` takes two more optional arguments for this:
+
+```
+UNIVERSE <idx> ARTNET [<ip>] [<wireUniverse>]
+```
+
+```
+SHOW 2
+UNIVERSE 1 DMX
+UNIVERSE 2 ARTNET 192.168.1.50 0     # node A, wire universe 0
+UNIVERSE 3 ARTNET 192.168.1.50 1     # SAME node, second DMX output -- the normal case
+UNIVERSE 4 ARTNET 192.168.1.51 0     # node B, also wire universe 0 -- different IP, no conflict
+UNIVERSE 5 ARTNET                    # no IP -> the CFG1 fallback, or broadcast if that's 0
+```
+
+- A multi-output node (2/4/8 DMX ports) is the normal case, not an exception: same IP, different
+  wire universes across two `UNIVERSE` lines.
+- `<ip>` omitted → the destination is left as the "no explicit route" marker; the device
+  resolves it to CFG1's `artnetFallbackIp`, or broadcasts if that's `0` too (see FORMAT.md's CFG1
+  section for the full precedence chain: **explicit `.show` route > `artnetFallbackIp` >
+  broadcast**). Existing shows that specify no IPs keep working unchanged.
+- `<wireUniverse>` omitted but `<ip>` given → defaults to the universe's own internal index (the
+  previous section's mapping), and the compiler emits a non-fatal warning -- an explicit number
+  is almost always what's meant, but this isn't an error.
+- Both omitted (bare `ARTNET`) → today's implicit behavior exactly, no warning.
+- **Compile-time validation**: two `UNIVERSE ARTNET` lines resolving to the same `(ip,
+  wireUniverse)` is an error naming both universes (two streams fighting over one node output);
+  the same IP with two *different* wire universes is accepted (that's the multi-output-node
+  case). A malformed `<ip>` (not four dot-separated `0..255` octets) is an error naming the line.
+
+See FORMAT.md's "Art-Net Wire Universe & Destination Routing" section for the full byte-level
+Net/SubNet/Universe decomposition, the `ArtNetSink`/`ArtNetRouter` API, ArtSync, and Phase 3's
+ArtPoll/ArtPollReply discovery (which fills in exactly this same table when a `.show` doesn't
+give an IP at all).
 
 ### Format Version / Migration
 
@@ -151,10 +194,13 @@ MATRIX 2 1 16 16 SERP H GRB
 
 Little-endian encoding. Assumes all platforms (x86-64 host and ESP32-S3 Xtensa device) are little-endian. Floating-point numbers are IEEE-754 32-bit (native byte order). Document any assumption changes.
 
-Note: this `version` byte (1, or 2 once a `CONTROLLER` is compiled in) is the **binary bundle**
-format version, unrelated to the `.show` text's `SHOW 2` header above — the text format moved
-to 1-indexed addressing without touching this byte at all; a `SHOW 2` source file with no
-`CONTROLLER` still compiles to `version = 1` bytes, byte-identical to a pre-migration bundle.
+Note: this `version` byte (1; 2 once a `CONTROLLER` is compiled in; 4 once a `.show` gives at
+least one `UNIVERSE ... ARTNET` line an explicit IP and/or wire universe) is the **binary
+bundle** format version, unrelated to the `.show` text's `SHOW 2` header above — the text format
+moved to 1-indexed addressing without touching this byte at all; a `SHOW 2` source file with
+neither a `CONTROLLER` nor explicit Art-Net routing still compiles to `version = 1` bytes,
+byte-identical to a pre-migration bundle. Versions only ever go up when the feature that needs
+the extra bytes is actually used -- see "Universe Table" below for what v4 adds.
 
 ### Layout
 
@@ -167,8 +213,14 @@ Header (11 bytes):
   fixtureCount  u16           count of fixtures in patch
   matrixCount   u16           count of pixel matrices
 
-Universe Table (universeCount entries, 1 byte each):
-  transport[i]  u8            0=Dmx, 1=ArtNet, 2=Sacn, 3=Unused
+Universe Table (universeCount entries):
+  v1/v2/v3 -- 1 byte each:
+    transport[i]  u8            0=Dmx, 1=ArtNet, 2=Sacn, 3=Unused
+  v4 -- 7 bytes each (see FORMAT.md's "Art-Net Wire Universe & Destination
+  Routing" for the full writeup):
+    transport[i]     u8         (as above)
+    destIp[i]        u32        packed host-byte-order IPv4; 0 = no explicit route
+    wireUniverse[i]  u16        0..32767, already resolved by the compiler
 
 Profile Table (profileCount entries):
   blobLen       u16           length of this PFX1 blob (bytes)
@@ -246,7 +298,7 @@ The loader (`loadShow`) is the security boundary for device-side loading:
 
 - **Never reads out of bounds**: All array accesses are bounds-checked before dereferencing.
 - **Rejects malformed input**:
-  - Bad magic or version != 1 → false
+  - Bad magic or version not in {1, 2, 3} → false
   - Truncated bundle (size too small) → false
   - profileIndex out of range → false
   - Any PFX1 blob that fails `parseProfile` → false
@@ -305,9 +357,13 @@ CompileResult compileShow(const std::string& showText,
 ### Loader (Portable)
 
 ```cpp
+struct ArtNetDest { uint32_t ip; uint16_t wireUniverse; };  // ip == 0 -> fallback/broadcast
+
 struct LoadedShow {
   uint8_t universeCount;
   UniverseTransport transport[8];
+  ArtNetDest artnetDest[8];  // always populated -- v1/v2/v3 bundles get today's
+                             // implicit default (ip=0, wireUniverse=index)
   std::vector<PatchEntry> fixtures;
   std::vector<MatrixMap> matrices;
 };

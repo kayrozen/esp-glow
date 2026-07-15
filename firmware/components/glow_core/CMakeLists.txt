@@ -84,8 +84,18 @@ idf_component_register(
         ${GLOW_ROOT}/safe_blackout.cpp
         # device-only DMX sink (#ifdef ESP_PLATFORM guarded; filled in F1)
         ${GLOW_ROOT}/dmx_sink.cpp
-        # device-only Art-Net sink (#ifdef ESP_PLATFORM guarded; filled in F2)
+        # Wave 3: portable Art-Net packet building + per-universe routing/
+        # sequencing/ArtSync (host-tested; see artnet_router.h)
+        ${GLOW_ROOT}/artnet_router.cpp
+        # device-only Art-Net sink (#ifdef ESP_PLATFORM guarded; filled in F2,
+        # rewritten in Wave 3 to wrap artnet_router.cpp on an unconnected
+        # socket + sendto())
         ${GLOW_ROOT}/artnet_sink.cpp
+        # Wave 3 Phase 3: portable ArtPoll/ArtPollReply parsing + discovery
+        # table (host-tested; see artnet_discovery.h) + the device-only
+        # socket/task wiring it onto ArtNetSink (#ifdef ESP_PLATFORM guarded)
+        ${GLOW_ROOT}/artnet_discovery.cpp
+        ${GLOW_ROOT}/artnet_discovery_task.cpp
         # WLED UDP Notifier support (README_WLED.md): host-testable packet
         # builder + named-target manager, plus the device-only UDP transport
         # (#ifdef ESP_PLATFORM guarded, same split as artnet_sink.cpp above)
@@ -141,6 +151,10 @@ idf_component_register(
         # rollback + self-validation (#ifdef ESP_PLATFORM guarded; see
         # ota_manager.h)
         ${GLOW_ROOT}/ota_manager.cpp
+        # Wave 3 Phase 3: GET /artnet_nodes over the same httpd server --
+        # discovered-node list for the reconfigure console (#ifdef
+        # ESP_PLATFORM guarded; see artnet_nodes_web.h)
+        ${GLOW_ROOT}/artnet_nodes_web.cpp
     INCLUDE_DIRS
         ${GLOW_ROOT}
         ${GLOW_ROOT}/third_party/lua
