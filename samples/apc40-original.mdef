@@ -1,14 +1,39 @@
 # samples/apc40-original.mdef -- Akai APC40 (the original 2009 model, not the
 # mkII). Transcribed from Akai's "Generic Communication Protocol for Akai
 # APC40 Controller" Rev 1 (May 1, 2009), Generic Mode (Mode 0). See FORMAT.md's
-# "MDF1 Controller Definition Format" section for the full grammar.
+# "MDF1 Controller Definition Format" section for the full grammar, and its
+# "Per-range channel significance" section for what CH means below.
 #
-# The original APC40 differs from the mkII: its clip grid is addressed as five
-# CLIP LAUNCH note rows (0x35..0x39), the track being selected by the MIDI
-# channel, and its clip LEDs use a fixed green/red/yellow palette (with blink
-# variants) rather than the mkII's 128-colour RGB scheme. MDF1 is
-# single-channel and parseMidi ignores the channel, so the per-track duplicates
-# collapse to one entry per note/CC below.
+# THE BUG THIS FILE USED TO BAKE IN: the note/CC numbers below (0x30-0x34 for
+# the per-track button row, 0x35-0x39 for the clip-launch grid, CC 7 for the
+# track fader) were already correctly transcribed in this file's prior
+# commentary -- it already said "one per track via the channel" and "the
+# track chosen by the MIDI channel" for exactly these ranges. What it could
+# NOT do, because MDF1 had no per-range channel field yet, was actually
+# encode that: every PAD/FADER line collapsed to one channel-agnostic entry,
+# and parseMidi discarded the channel nibble outright (live_control.cpp), so
+# two pads sharing a note (same clip-launch row, different track) could only
+# ever be bound to the same cue. Fixed below with CH (MDF1 v2, mdef.h's
+# MdefPadRange/MdefFaderRange) -- see live_control.h's
+# LiveControl::effectiveId for how a channel-significant incoming event
+# resolves to a distinct (channel << 8) | note binding id, and
+# glow.bind.pad-xy (glow_lua_api.cpp) for the Fennel-side grid binding.
+#
+# The original APC40 and the mkII share the same Generic Mode note/CC
+# addressing for backward compatibility (Akai's mkII protocol doc, "APC40
+# Mk2 Communications Protocol" v1.2, describes an IDENTICAL 0x30-0x34
+# per-track-button-row / 0x35-0x39 clip-launch-row layout and quotes,
+# verbatim: "Assignment of note numbers to buttons. Note 0x30 to 0x49 use
+# MIDI Channel 0 to 7 to indicate Tracks 1-8. All other note values ignore
+# the MIDI Channel." and, for LED feedback specifically (a narrower span --
+# see FORMAT.md/A2): "Assignment of Note number messages to LEDs. Note 0x30
+# to 0x39 use MIDI Channel 0 to 7 to indicate Tracks 1-8. All other note
+# values ignore the MIDI Channel." -- and its absolute-controllers table
+# describes the TRACK FADER's MIDI Channel column as "0-8 = Tracks 1-8,
+# Master", i.e. one CC number, channel 0-7 selects the per-track fader,
+# channel 8 is the master-track alias). The original APC40's clip grid uses
+# a fixed green/red/yellow LED palette (not the mkII's RGB velocity table)
+# but the same note/channel addressing underneath.
 
 CONTROLLER Akai APC40
 MIDI_CHANNEL 0
@@ -16,18 +41,26 @@ MIDI_CHANNEL 0
 # --- Pads (Note-on buttons) -------------------------------------------
 # Per-track button rows: RECORD ARM, SOLO, ACTIVATOR, TRACK SELECTION,
 # CLIP STOP -- notes 0x30..0x34 (48..52), one per track via the channel.
-PAD 48 52
+PAD 48 CH 0 7   # RECORD ARM
+PAD 49 CH 0 7   # SOLO
+PAD 50 CH 0 7   # ACTIVATOR
+PAD 51 CH 0 7   # TRACK SELECTION
+PAD 52 CH 0 7   # CLIP STOP
 # CLIP LAUNCH rows 1..5 -- notes 0x35..0x39 (53..57); 8 tracks each, the
 # track chosen by the MIDI channel. The green/red/yellow LEDs below drive
 # these.
-PAD 53 57
+PAD 53 CH 0 7   # CLIP LAUNCH row 1
+PAD 54 CH 0 7   # CLIP LAUNCH row 2
+PAD 55 CH 0 7   # CLIP LAUNCH row 3
+PAD 56 CH 0 7   # CLIP LAUNCH row 4
+PAD 57 CH 0 7   # CLIP LAUNCH row 5
 # Device / view / record-mode buttons: CLIP-TRACK, DEVICE ON-OFF, left,
 # right, DETAIL VIEW, REC QUANT, MIDI OVERDUB, METRONOME -- 0x3A..0x41
-# (58..65).
+# (58..65). Single physical buttons, not per-track -- channel-agnostic.
 PAD 58 65
 # MASTER select + STOP ALL CLIPS -- 0x50..0x51 (80..81).
 PAD 80 81
-# SCENE LAUNCH 1..5 -- 0x52..0x56 (82..86).
+# SCENE LAUNCH 1..5 -- 0x52..0x56 (82..86). One per scene, not per track.
 PAD 82 86
 # PAN + SEND A/B/C selectors -- 0x57..0x5A (87..90).
 PAD 87 90
@@ -36,11 +69,13 @@ PAD 87 90
 PAD 91 101
 
 # --- Faders / absolute knobs (CC) -------------------------------------
-FADER CC 7   track      # 8 track level faders (0x07, track = MIDI channel)
-FADER CC 14  master     # master level (0x0E)
-FADER CC 15  crossfader # crossfader (0x0F)
-FADER CC 16 23          # 8 DEVICE CONTROL knobs (0x10..0x17), absolute
-FADER CC 48 55          # 8 TRACK CONTROL knobs (0x30..0x37), absolute
+FADER CC 7   track CH 0 7   # 8 track level faders (0x07): channel 0-7 = tracks 1-8
+FADER CC 14  master         # master level (0x0E) -- separate physical fader
+FADER CC 15  crossfader     # crossfader (0x0F)
+FADER CC 16 23               # 8 DEVICE CONTROL knobs (0x10..0x17): one physical knob each
+                              # (channel carries currently-selected-track context, not a distinct
+                              # fader per channel -- see samples/apc40.mdef's longer note), absolute
+FADER CC 48 55                # 8 TRACK CONTROL knobs (0x30..0x37), same reasoning, absolute
 
 # --- Relative encoders (CC) -------------------------------------------
 # CUE LEVEL (0x2F) reports two's-complement deltas: 0x01..0x3F = +1..+63,
@@ -49,8 +84,10 @@ ENCODER CC 47 relative-2c   # cue level
 
 # --- LED feedback -----------------------------------------------------
 # Clip-launch grid LEDs (0x35..0x39): fixed green/red/yellow palette with
-# blink variants, selected by note-on velocity.
-LED NOTE 53 57 velocity
+# blink variants, selected by note-on velocity. Inside the 0x30-0x39
+# LED-channel-significant span -- each track's copy of a row lights
+# independently.
+LED NOTE 53 57 velocity CH 0 7
   COLOR off          0
   COLOR green        1
   COLOR green-blink  2
@@ -58,12 +95,14 @@ LED NOTE 53 57 velocity
   COLOR red-blink    4
   COLOR yellow       5
   COLOR yellow-blink 6
-# CLIP STOP LEDs: off / on / blink (0x34).
-LED NOTE 52 52 velocity
+# CLIP STOP LEDs: off / on / blink (0x34). Also inside 0x30-0x39 --
+# channel-significant.
+LED NOTE 52 52 velocity CH 0 7
   COLOR off   0
   COLOR on    1
   COLOR blink 2
-# SCENE LAUNCH LEDs: off / on / blink (0x52..0x56).
+# SCENE LAUNCH LEDs: off / on / blink (0x52..0x56). Outside 0x30-0x39 --
+# one LED per scene, agnostic.
 LED NOTE 82 86 velocity
   COLOR off   0
   COLOR on    1

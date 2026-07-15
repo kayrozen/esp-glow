@@ -1,34 +1,81 @@
 #include "live_control.h"
+#include "mdef.h"
 #include "show_control.h"
 
 bool parseMidi(const uint8_t* msg, size_t len, ControlEvent& out) {
-  if (len < 3) return false;
+  if (len < 1) return false;
 
   uint8_t status = msg[0] & 0xF0;
+  if (status == 0xF0) return false;  // System/Realtime -- not channel-voice, routed elsewhere
+
+  uint8_t channel = msg[0] & 0x0F;
+
+  // Program Change and Channel Pressure are 2-byte messages (status + one
+  // data byte) -- every other channel-voice status is 3 bytes. Validate
+  // against the length THIS status needs, never a blanket "len < 3": that
+  // used to reject valid 2-byte messages outright.
+  bool twoByte = (status == 0xC0 || status == 0xD0);
+  size_t need = twoByte ? 2 : 3;
+  if (len < need) return false;
+
   uint8_t data1 = msg[1];
-  uint8_t data2 = msg[2];
+  uint8_t data2 = twoByte ? 0 : msg[2];
 
-  if (status == 0x90) {
-    out.type = ControlType::Button;
-    out.id = data1;
-    out.pressed = (data2 > 0);
-    out.value = 0.0f;
-    return true;
-  } else if (status == 0x80) {
-    out.type = ControlType::Button;
-    out.id = data1;
-    out.pressed = false;
-    out.value = 0.0f;
-    return true;
-  } else if (status == 0xB0) {
-    out.type = ControlType::Fader;
-    out.id = 128 + data1;
-    out.value = data2 / 127.0f;
-    out.pressed = false;
-    return true;
+  switch (status) {
+    case 0x80:  // Note Off
+      out.type = ControlType::Button;
+      out.channel = channel;
+      out.id = data1;
+      out.pressed = false;
+      out.value = 0.0f;
+      return true;
+    case 0x90:  // Note On (velocity 0 is a note-off in disguise)
+      out.type = ControlType::Button;
+      out.channel = channel;
+      out.id = data1;
+      out.pressed = (data2 > 0);
+      out.value = 0.0f;
+      return true;
+    case 0xA0:  // Polyphonic Key Pressure (per-note aftertouch)
+      out.type = ControlType::Aftertouch;
+      out.channel = channel;
+      out.id = data1;
+      out.pressed = false;
+      out.value = data2 / 127.0f;
+      return true;
+    case 0xB0:  // Control Change
+      out.type = ControlType::Fader;
+      out.channel = channel;
+      out.id = 128 + data1;
+      out.pressed = false;
+      out.value = data2 / 127.0f;
+      return true;
+    case 0xC0:  // Program Change
+      out.type = ControlType::Program;
+      out.channel = channel;
+      out.id = data1;
+      out.pressed = false;
+      out.value = 0.0f;
+      return true;
+    case 0xD0:  // Channel Pressure (whole-channel aftertouch, no note id)
+      out.type = ControlType::Aftertouch;
+      out.channel = channel;
+      out.id = 0;
+      out.pressed = false;
+      out.value = data1 / 127.0f;
+      return true;
+    case 0xE0: {  // Pitch Bend: 14-bit, LSB then MSB, center 0x2000 -> 0.5
+      uint16_t bend14 = static_cast<uint16_t>(data1) | (static_cast<uint16_t>(data2) << 7);
+      out.type = ControlType::PitchBend;
+      out.channel = channel;
+      out.id = 0;
+      out.pressed = false;
+      out.value = bend14 / 16383.0f;
+      return true;
+    }
+    default:
+      return false;
   }
-
-  return false;
 }
 
 LiveControl::LiveControl(ShowController& ctrl) : ctrl_(ctrl) {}
@@ -54,8 +101,23 @@ LiveControl::Binding* LiveControl::find(ControlType type, uint16_t controlId) {
   return nullptr;
 }
 
+uint16_t LiveControl::effectiveId(const ControlEvent& ev) const {
+  if (profile_ == nullptr) return ev.id;  // no .mdef -- unpacked, unchanged
+
+  if (ev.type == ControlType::Button) {
+    if (findPadChannelRange(*profile_, static_cast<uint8_t>(ev.id)) == nullptr) return ev.id;
+    return static_cast<uint16_t>((static_cast<uint16_t>(ev.channel) << 8) | ev.id);
+  }
+  if (ev.type == ControlType::Fader && ev.id >= 128) {
+    uint8_t cc = static_cast<uint8_t>(ev.id - 128);
+    if (findFaderChannelRange(*profile_, cc) == nullptr) return ev.id;
+    return static_cast<uint16_t>((static_cast<uint16_t>(ev.channel) << 8) | ev.id);
+  }
+  return ev.id;
+}
+
 void LiveControl::handle(const ControlEvent& ev, float t) {
-  Binding* binding = find(ev.type, ev.id);
+  Binding* binding = find(ev.type, effectiveId(ev));
   if (!binding) return;
 
   if (ev.type == ControlType::Button) {

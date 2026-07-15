@@ -13,10 +13,13 @@
 #include <string>
 #include <unordered_map>
 
+#include "controller_encoder.h"
 #include "fixture_profile.h"
+#include "led_feedback.h"
 #include "live_control.h"
 #include "lua_effect.h"
 #include "lua_vm.h"
+#include "mdef.h"
 #include "pixel_matrix.h"
 #include "profile_encoder.h"
 #include "show_control.h"
@@ -77,8 +80,8 @@ struct Harness {
   GlowLuaApi api;
 
   Harness(const std::string& fennelSrc, IMatrixRegistry* mats = nullptr,
-         IFixtureRegistry* fixtures = nullptr)
-      : vm(), matrices(mats), live(show), api(vm, show, mats, beatClock, live, fixtures) {
+         IFixtureRegistry* fixtures = nullptr, LedFeedback* ledFeedback = nullptr)
+      : vm(), matrices(mats), live(show), api(vm, show, mats, beatClock, live, fixtures, ledFeedback) {
     api.install();
     char err[256];
     if (!vm.loadFennelCompiler(fennelSrc.data(), fennelSrc.size(), err, sizeof(err))) {
@@ -642,6 +645,82 @@ void test_glow_ranges_without_registry_errors_cleanly() {
   CHECK(err.find("fixture registry") != std::string::npos);
 }
 
+namespace {
+// A tiny 2-row x 4-column grid: notes 53/54, each channel-significant 0..3
+// -- the same shape as the APC40's clip-launch grid, just smaller.
+MidiControllerProfile buildGridProfile() {
+  ControllerBuilder b;
+  b.name = "Test Grid";
+  b.pads.push_back({53, 53, 0, 3});  // row 0
+  b.pads.push_back({54, 54, 0, 3});  // row 1
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  MidiControllerProfile p;
+  if (!err.empty() || !parseMidiController(blob.data(), blob.size(), p)) {
+    printf("FATAL: buildGridProfile failed: %s\n", err.c_str());
+    std::abort();
+  }
+  return p;
+}
+}  // namespace
+
+void test_bind_pad_xy_resolves_grid_and_binds_packed_id() {
+  TEST("glow.bind.pad-xy: resolves (col,row) via the .mdef grid, fires independently per channel");
+
+  MidiControllerProfile profile = buildGridProfile();
+  LedFeedback lf(profile);  // no IMidiOutput needed -- only its profile() is read here
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc, nullptr, nullptr, &lf);
+  h.live.setControllerProfile(&profile);
+
+  h.evalOrDie("(glow.cue.define :a {:effects []})");
+  h.evalOrDie("(glow.cue.define :b {:effects []})");
+  h.evalOrDie("(glow.bind.pad-xy 0 0 :flash :a)");  // col=0,row=0 -> note 53, channel 0
+  h.evalOrDie("(glow.bind.pad-xy 2 0 :flash :b)");  // col=2,row=0 -> note 53, channel 2
+
+  uint16_t cueA, cueB;
+  CHECK(h.api.cueIdForName("a", cueA));
+  CHECK(h.api.cueIdForName("b", cueB));
+
+  ControlEvent evCol0, evCol2;
+  uint8_t msgCol0[] = {0x90, 53, 100};  // channel 0
+  uint8_t msgCol2[] = {0x92, 53, 100};  // channel 2
+  CHECK(parseMidi(msgCol0, 3, evCol0));
+  CHECK(parseMidi(msgCol2, 3, evCol2));
+
+  h.live.handle(evCol0, 0.0f);
+  CHECK(h.show.isActive(cueA));
+  CHECK(!h.show.isActive(cueB));
+
+  h.live.handle(evCol2, 0.0f);
+  CHECK(h.show.isActive(cueB));
+}
+
+void test_bind_pad_xy_out_of_range_is_a_no_op() {
+  TEST("glow.bind.pad-xy: out-of-range coordinate is a no-op, not an error");
+
+  MidiControllerProfile profile = buildGridProfile();
+  LedFeedback lf(profile);
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc, nullptr, nullptr, &lf);
+
+  h.evalOrDie("(glow.cue.define :a {:effects []})");
+  // row 5 doesn't exist (only rows 0/1 declared) -- must not error.
+  CHECK(h.eval("(glow.bind.pad-xy 0 5 :flash :a)"));
+  // col 9 is past this grid's channel span (0..3) -- must not error.
+  CHECK(h.eval("(glow.bind.pad-xy 9 0 :flash :a)"));
+}
+
+void test_bind_pad_xy_no_led_feedback_is_a_no_op() {
+  TEST("glow.bind.pad-xy: no LedFeedback wired (no .mdef) -- no-op, not an error");
+
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc);  // no LedFeedback
+
+  h.evalOrDie("(glow.cue.define :a {:effects []})");
+  CHECK(h.eval("(glow.bind.pad-xy 0 0 :flash :a)"));
+}
+
 int main() {
   test_cue_define_and_go_activates_showcontroller_cue();
   test_cue_release_deactivates();
@@ -671,6 +750,10 @@ int main() {
 
   test_glow_ranges_lists_named_and_continuous();
   test_glow_ranges_without_registry_errors_cleanly();
+
+  test_bind_pad_xy_resolves_grid_and_binds_packed_id();
+  test_bind_pad_xy_out_of_range_is_a_no_op();
+  test_bind_pad_xy_no_led_feedback_is_a_no_op();
 
   if (g_failCount == 0) {
     printf("\nAll tests passed.\n");

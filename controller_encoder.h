@@ -12,6 +12,8 @@ struct ControllerFaderSpec {
   uint8_t ccFrom = 0;
   uint8_t ccTo = 0;
   std::string name;  // empty = unnamed
+  uint8_t channelFrom = kChannelAgnostic;
+  uint8_t channelTo = kChannelAgnostic;  // both kChannelAgnostic = ordinary (v1-shaped)
 };
 
 struct ControllerEncoderSpec {
@@ -31,11 +33,15 @@ struct ControllerLedSpec {
   uint8_t addrTo = 0;
   LedSemantic semantic = LedSemantic::Velocity;
   std::vector<ControllerColorSpec> colors;
+  uint8_t channelFrom = kChannelAgnostic;
+  uint8_t channelTo = kChannelAgnostic;  // LED-output channel significance; see mdef.h's MdefLedRange
 };
 
 struct ControllerPadSpec {
   uint8_t noteFrom = 0;
   uint8_t noteTo = 0;
+  uint8_t channelFrom = kChannelAgnostic;
+  uint8_t channelTo = kChannelAgnostic;  // both kChannelAgnostic = ordinary (v1-shaped)
 };
 
 struct ControllerBuilder {
