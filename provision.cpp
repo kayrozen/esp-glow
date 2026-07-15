@@ -1317,6 +1317,7 @@ CompileResult compileShow(const std::string& showText,
   }
 
   // WLED target table -- v3+ only.
+  for (const auto& wt : wledTargets) {
     writeU8(static_cast<uint8_t>(wt.name.size()));
     for (char c : wt.name) writeU8(static_cast<uint8_t>(c));
     writeU8(static_cast<uint8_t>(wt.ip.size()));

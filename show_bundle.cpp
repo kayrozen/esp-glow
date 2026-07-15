@@ -272,6 +272,7 @@ bool loadShow(const uint8_t* data, size_t len, LoadedShow& out) {
   }
 
   // WLED target table -- v3+ only.
+  for (int i = 0; i < wledCount; i++) {
     uint8_t nameLen;
     if (!reader.readU8(nameLen)) return false;
     uint8_t nameBuf[255];
