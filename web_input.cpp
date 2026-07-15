@@ -397,6 +397,14 @@ extern "C" const uint8_t htm_mjs_start[]            asm("_binary_htm_mjs_start")
 extern "C" const uint8_t htm_mjs_end[]              asm("_binary_htm_mjs_end");
 extern "C" const uint8_t editor_bundle_mjs_start[]  asm("_binary_editor_bundle_mjs_start");
 extern "C" const uint8_t editor_bundle_mjs_end[]    asm("_binary_editor_bundle_mjs_end");
+// CFG1 §6: the reconfigure page (devcfg.html/devcfg-page.js) + its own
+// copy of the byte-format encoder/decoder (shared/devcfg.js).
+extern "C" const uint8_t devcfg_html_start[]        asm("_binary_devcfg_html_start");
+extern "C" const uint8_t devcfg_html_end[]          asm("_binary_devcfg_html_end");
+extern "C" const uint8_t devcfg_page_js_start[]     asm("_binary_devcfg_page_js_start");
+extern "C" const uint8_t devcfg_page_js_end[]       asm("_binary_devcfg_page_js_end");
+extern "C" const uint8_t devcfg_js_start[]          asm("_binary_devcfg_js_start");
+extern "C" const uint8_t devcfg_js_end[]            asm("_binary_devcfg_js_end");
 
 namespace {
 struct StaticFile {
@@ -419,6 +427,9 @@ static const StaticFile kStaticFiles[] = {
   {"/vendor/preact-hooks.mjs", preact_hooks_mjs_start, preact_hooks_mjs_end, "application/javascript"},
   {"/vendor/htm.mjs",          htm_mjs_start,          htm_mjs_end,          "application/javascript"},
   {"/vendor/editor-bundle.mjs", editor_bundle_mjs_start, editor_bundle_mjs_end, "application/javascript"},
+  {"/devcfg.html",              devcfg_html_start,      devcfg_html_end,      "text/html"},
+  {"/devcfg-page.js",           devcfg_page_js_start,   devcfg_page_js_end,   "application/javascript"},
+  {"/shared/devcfg.js",         devcfg_js_start,        devcfg_js_end,        "application/javascript"},
 };
 constexpr size_t kNumStaticFiles = sizeof(kStaticFiles) / sizeof(kStaticFiles[0]);
 

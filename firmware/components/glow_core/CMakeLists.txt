@@ -163,6 +163,13 @@ idf_component_register(
         ${GLOW_ROOT}/firmware/main/data/console/vendor/preact-hooks.mjs
         ${GLOW_ROOT}/firmware/main/data/console/vendor/htm.mjs
         ${GLOW_ROOT}/firmware/main/data/console/vendor/editor-bundle.mjs
+        # CFG1 §6: the reconfigure page -- a plain static form (not part of
+        # the Preact bundle above), plus its own copy of the byte-format
+        # encoder/decoder (shared/devcfg.js -- same file as
+        # web/shared/devcfg.js; see that file's header comment).
+        ${GLOW_ROOT}/firmware/main/data/console/devcfg.html
+        ${GLOW_ROOT}/firmware/main/data/console/devcfg-page.js
+        ${GLOW_ROOT}/firmware/main/data/console/shared/devcfg.js
 )
 
 # Match the host build flags: no exceptions, no RTTI, full warnings.
