@@ -490,6 +490,46 @@ html, body {
 
 .flash-done { display: flex; align-items: center; gap: 8px; color: var(--ok); }
 
+/* --- CFG1 device config form (Wave 2) ---------------------------------- */
+
+.devcfg-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-soft);
+}
+.devcfg-section-title {
+  color: var(--text-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0;
+}
+.devcfg-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 12px;
+}
+.devcfg-field { display: flex; flex-direction: column; gap: 3px; }
+.devcfg-field label { color: var(--text-dim); font-size: 11px; }
+.devcfg-field input[type="text"],
+.devcfg-field input[type="password"],
+.devcfg-field input[type="number"] {
+  background: var(--bg-elev-2);
+  color: var(--text-bright);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  padding: 5px 8px;
+  font: inherit;
+}
+.devcfg-warn {
+  color: #d7ba7d;
+  font-size: 11px;
+  margin: 2px 0 0;
+}
+
 .flash-footer {
   display: flex;
   justify-content: flex-end;

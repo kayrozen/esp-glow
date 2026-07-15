@@ -16,7 +16,7 @@ piece of firmware logic is extracted into a host-tested helper so the green
 ```
 firmware/
   CMakeLists.txt                 top-level ESP-IDF project
-  partitions.csv                 nvs / ota_0 / ota_1 / show / coredump
+  partitions.csv                 nvs / ota_0 / ota_1 / show / coredump / scripts / devcfg
   sdkconfig.defaults             octal PSRAM, -fno-exceptions/-fno-rtti, WiFi, lwIP
   main/
     CMakeLists.txt               app_main + per-phase modules
@@ -37,8 +37,15 @@ idf.py flash monitor
 ```
 
 `idf.py menuconfig` lets you override the status LED GPIO and board-specific
-options. The defaults target an ESP32-S3 with 8 MB flash + octal PSRAM; for
-16 MB boards, enlarge `ota_0`/`ota_1`/`show` in `partitions.csv`.
+options -- but these are now DEFAULTS, not the running truth: a `CFG1` blob in
+the raw `devcfg` partition (written by the browser flasher or the device
+console's reconfigure page, see FORMAT.md and "Web flasher" below) overrides
+WiFi SSID/password, DMX/LED GPIOs, the Art-Net fallback destination, and
+whether USB-MIDI host is enabled, at boot. `menuconfig`'s values only take
+effect when `devcfg` is absent or fails to parse. The defaults target an
+ESP32-S3 with 8 MB flash + octal PSRAM; for 16 MB boards, enlarge
+`ota_0`/`ota_1`/`show` in `partitions.csv` (leave `devcfg` at the end of the
+table so existing boards' offsets don't move).
 
 You can also flash from a browser with no local toolchain: the deployed
 provisioner page (`web/provisioner-static/`) includes a USB flasher built on
@@ -331,5 +338,18 @@ it same-origin.
 
 The existing "Download compiled .shw1" button still works — command-line
 flashing, and Safari/Firefox users, aren't going away.
+
+**CFG1 device config (Wave 2):** the flash modal also includes a device
+config form (WiFi SSID/password or "no WiFi", DMX/status-LED GPIOs, Art-Net
+fallback destination, USB-MIDI on/off with a VBUS-hardware warning). It's
+encoded in the browser (`web/shared/devcfg.js`, no WASM needed -- CFG1 is a
+plain fixed-field struct, not a compiled text grammar) and written at the
+`devcfg` partition's offset, resolved from the real `partition-table.bin`
+the same way the `scripts` partition's offset already is. Form values
+persist to `localStorage` so reflashing a board isn't retyping the WiFi
+password every time. See FORMAT.md's "CFG1 Device Config Format" section
+for the wire format, and `device_config_web.h`/the device console's
+`/devcfg.html` page for reconfiguring an already-flashed board without a
+cable.
 
 ---

@@ -53,6 +53,16 @@ idf_component_register(
         ${GLOW_ROOT}/pixel_patterns.cpp
         # bundle loader
         ${GLOW_ROOT}/show_bundle.cpp
+        # CFG1 flash-time device config: host-tested parser (device_config.h)
+        # + encoder (device_config_encoder.h -- unlike PFX1/MDF1's text-
+        # grammar encoders, this one is useful on-device too: see
+        # device_config_web.cpp's GET /devcfg)
+        ${GLOW_ROOT}/device_config.cpp
+        ${GLOW_ROOT}/device_config_encoder.cpp
+        # CFG1 read/write over the web console's existing httpd server --
+        # reconfigure without reflashing (#ifdef ESP_PLATFORM guarded; see
+        # device_config_web.h)
+        ${GLOW_ROOT}/device_config_web.cpp
         # A5/.mdef: MDF1 controller-definition runtime parser (the MIDI
         # twin of fixture_profile.cpp), consumed by show_bundle.cpp's v2
         # controller table, and the LED feedback engine that reads it
@@ -153,6 +163,13 @@ idf_component_register(
         ${GLOW_ROOT}/firmware/main/data/console/vendor/preact-hooks.mjs
         ${GLOW_ROOT}/firmware/main/data/console/vendor/htm.mjs
         ${GLOW_ROOT}/firmware/main/data/console/vendor/editor-bundle.mjs
+        # CFG1 §6: the reconfigure page -- a plain static form (not part of
+        # the Preact bundle above), plus its own copy of the byte-format
+        # encoder/decoder (shared/devcfg.js -- same file as
+        # web/shared/devcfg.js; see that file's header comment).
+        ${GLOW_ROOT}/firmware/main/data/console/devcfg.html
+        ${GLOW_ROOT}/firmware/main/data/console/devcfg-page.js
+        ${GLOW_ROOT}/firmware/main/data/console/shared/devcfg.js
 )
 
 # Match the host build flags: no exceptions, no RTTI, full warnings.

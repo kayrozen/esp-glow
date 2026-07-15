@@ -114,6 +114,12 @@ jobs:
       - name: Run fixture importer tests (QLC+/OFL/GDTF -- web/shared/importers/)
         run: node web/shared/importers/test-importers.mjs
 
+      - name: Build devcfg_check (host g++ -- round-trip oracle for the CFG1 JS encoder)
+        run: make devcfg_check
+
+      - name: Run CFG1 device-config encoder/decoder tests (web/shared/devcfg.js)
+        run: node web/shared/test-devcfg.mjs
+
       - name: Upload WASM artifacts
         uses: actions/upload-artifact@v4
         with:

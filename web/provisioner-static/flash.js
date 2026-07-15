@@ -98,21 +98,24 @@ function parsePartitionTable(bytes) {
   return entries;
 }
 
-// Resolves the "scripts" partition's flash offset by fetching and parsing
+// Resolves a partition's flash offset+size by label, fetching and parsing
 // the real partition table binary the firmware was built with — not
 // hardcoded, since a board's actual partition layout is the only source
-// of truth for where writing "scripts region" bytes is safe (see
-// firmware/partitions.csv, which is what generates this binary at build
-// time). Returns { offset, size } or null if not found.
-async function findScriptsPartition(args, baseUrl) {
+// of truth for where writing raw bytes is safe (see firmware/partitions.csv,
+// which is what generates this binary at build time). Returns
+// { offset, size } or null if not found. Used for "scripts" and "devcfg" —
+// unlike "show", neither has its own CI-built flash_files entry to read
+// the offset back out of (see findShowPartitionOffset), since the CI build
+// doesn't bake a scripts image or a devcfg blob into the demo image.
+async function findPartitionByLabel(args, baseUrl, label) {
   const file = findPartitionTableFile(args);
   if (!file) return null;
   const res = await fetch(new URL(file, baseUrl));
   if (!res.ok) return null;
   const bytes = new Uint8Array(await res.arrayBuffer());
   const entries = parsePartitionTable(bytes);
-  const scripts = entries.find((e) => e.label === "scripts");
-  return scripts ? { offset: scripts.offset, size: scripts.size } : null;
+  const part = entries.find((e) => e.label === label);
+  return part ? { offset: part.offset, size: part.size } : null;
 }
 
 // Detect the chip's family name from esptool-js's `chip` string, e.g.
@@ -137,6 +140,12 @@ function chipFamily(chipDescription) {
 //               must exactly match the scripts partition's size (it does,
 //               if it came from buildScriptsImage against this same
 //               firmware build's partition table).
+//   devcfgBytes Uint8Array | null — a CFG1 device config blob (see
+//               web/shared/devcfg.js's encodeDeviceConfig) to write at the
+//               "devcfg" partition's offset, so a fresh board comes up
+//               already configured (WiFi/DMX pins/Art-Net fallback/
+//               USB-MIDI) with no menuconfig rebuild (Wave 2, FORMAT.md).
+//               Must be exactly DEVCFG_BLOB_SIZE bytes.
 //   eraseFirst  bool — erase the whole flash before writing.
 //   baudrate    number — defaults to 460800.
 //   onLog(line) called with esptool-js's terminal output.
@@ -147,6 +156,7 @@ export async function flash(opts) {
     baseUrl = new URL("firmware/", window.location.href),
     bundleBytes = null,
     scriptsImageBytes = null,
+    devcfgBytes = null,
     eraseFirst = false,
     baudrate = 460800,
     onLog = () => {},
@@ -214,7 +224,7 @@ export async function flash(opts) {
   }
 
   if (scriptsImageBytes) {
-    const scripts = await findScriptsPartition(args, baseUrl);
+    const scripts = await findPartitionByLabel(args, baseUrl, "scripts");
     if (scripts == null) {
       await transport.disconnect();
       throw new Error(
@@ -232,6 +242,25 @@ export async function flash(opts) {
       );
     }
     fileArray.push({ address: scripts.offset, data: toBinaryString(scriptsImageBytes) });
+  }
+
+  if (devcfgBytes) {
+    const devcfg = await findPartitionByLabel(args, baseUrl, "devcfg");
+    if (devcfg == null) {
+      await transport.disconnect();
+      throw new Error(
+        "Couldn't find the \"devcfg\" partition in this firmware build's partition table " +
+          "(expected a partition-table.bin in flasher_args.json). The firmware build may be out of date.",
+      );
+    }
+    if (devcfgBytes.length > devcfg.size) {
+      await transport.disconnect();
+      throw new Error(
+        `The CFG1 device config blob is ${devcfgBytes.length} bytes, larger than this board's ` +
+          `"devcfg" partition (${devcfg.size} bytes). This should never happen -- report it.`,
+      );
+    }
+    fileArray.push({ address: devcfg.offset, data: toBinaryString(devcfgBytes) });
   }
 
   if (eraseFirst) {

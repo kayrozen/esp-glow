@@ -35,6 +35,7 @@
 #include "live_control.h"    // ControlType (for parseWebCommand's out param)
 #include "scripts_storage.h"
 #include "ota_manager.h"     // F5: /ota registers onto this same httpd server
+#include "device_config_web.h"  // CFG1 §6: /devcfg registers onto this same httpd server
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -396,6 +397,14 @@ extern "C" const uint8_t htm_mjs_start[]            asm("_binary_htm_mjs_start")
 extern "C" const uint8_t htm_mjs_end[]              asm("_binary_htm_mjs_end");
 extern "C" const uint8_t editor_bundle_mjs_start[]  asm("_binary_editor_bundle_mjs_start");
 extern "C" const uint8_t editor_bundle_mjs_end[]    asm("_binary_editor_bundle_mjs_end");
+// CFG1 §6: the reconfigure page (devcfg.html/devcfg-page.js) + its own
+// copy of the byte-format encoder/decoder (shared/devcfg.js).
+extern "C" const uint8_t devcfg_html_start[]        asm("_binary_devcfg_html_start");
+extern "C" const uint8_t devcfg_html_end[]          asm("_binary_devcfg_html_end");
+extern "C" const uint8_t devcfg_page_js_start[]     asm("_binary_devcfg_page_js_start");
+extern "C" const uint8_t devcfg_page_js_end[]       asm("_binary_devcfg_page_js_end");
+extern "C" const uint8_t devcfg_js_start[]          asm("_binary_devcfg_js_start");
+extern "C" const uint8_t devcfg_js_end[]            asm("_binary_devcfg_js_end");
 
 namespace {
 struct StaticFile {
@@ -418,6 +427,9 @@ static const StaticFile kStaticFiles[] = {
   {"/vendor/preact-hooks.mjs", preact_hooks_mjs_start, preact_hooks_mjs_end, "application/javascript"},
   {"/vendor/htm.mjs",          htm_mjs_start,          htm_mjs_end,          "application/javascript"},
   {"/vendor/editor-bundle.mjs", editor_bundle_mjs_start, editor_bundle_mjs_end, "application/javascript"},
+  {"/devcfg.html",              devcfg_html_start,      devcfg_html_end,      "text/html"},
+  {"/devcfg-page.js",           devcfg_page_js_start,   devcfg_page_js_end,   "application/javascript"},
+  {"/shared/devcfg.js",         devcfg_js_start,        devcfg_js_end,        "application/javascript"},
 };
 constexpr size_t kNumStaticFiles = sizeof(kStaticFiles) / sizeof(kStaticFiles[0]);
 
@@ -440,9 +452,10 @@ void web_server_task(void* /*ctx*/) {
   // Every URI registered below is an exact path (no wildcards needed), so
   // this stays at IDF's default single-worker, exact-match config --
   // handlers above rely on running one at a time (see kWsBufCap). +1 for
-  // /ws, +1 for /ota (F5 -- see ota_manager.h; reuses this same server
-  // rather than starting a second one).
-  config.max_uri_handlers = kNumStaticFiles + 2;
+  // /ws, +1 for /ota (F5 -- see ota_manager.h), +2 for GET+POST /devcfg
+  // (CFG1 §6 -- see device_config_web.h) -- all reuse this same server
+  // rather than starting a second one.
+  config.max_uri_handlers = kNumStaticFiles + 4;
   // OTA uploads (up to a full ota_0/ota_1 partition, several MB) can take
   // a while over a venue's WiFi; the default recv timeout is tuned for
   // small console requests, not that.
@@ -470,8 +483,9 @@ void web_server_task(void* /*ctx*/) {
   }
 
   ota_register_handlers(g_server);
+  device_config_web_register_handlers(g_server);
 
-  ESP_LOGI(TAG, "web console + /ws + /ota ready");
+  ESP_LOGI(TAG, "web console + /ws + /ota + /devcfg ready");
 }
 
 #endif  // ESP_PLATFORM

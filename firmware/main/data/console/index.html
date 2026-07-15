@@ -6,8 +6,27 @@
   <meta name="theme-color" content="#0a0c12" />
   <title>esp-glow console</title>
   <link rel="stylesheet" href="styles.css" />
+  <style>
+    /* Fixed corner link to the reconfigure page (devcfg.html, §6) -- a
+       sibling of #app, not inside it, so Preact mounting/re-rendering
+       #app's contents never touches it. */
+    #devcfg-link {
+      position: fixed;
+      top: max(env(safe-area-inset-top), 6px);
+      right: 8px;
+      z-index: 10;
+      color: var(--text-dim);
+      font-size: 0.78rem;
+      text-decoration: none;
+      padding: 4px 8px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg-elev);
+    }
+  </style>
 </head>
 <body>
+  <a id="devcfg-link" href="/devcfg.html">⚙ Config</a>
   <div id="app"></div>
   <script type="module" src="app.js"></script>
 </body>
