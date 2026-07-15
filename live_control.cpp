@@ -78,6 +78,22 @@ bool parseMidi(const uint8_t* msg, size_t len, ControlEvent& out) {
   }
 }
 
+uint16_t packChannelControlId(uint8_t channel, uint16_t id) {
+  return static_cast<uint16_t>((static_cast<uint16_t>(channel) << 8) | id);
+}
+
+uint16_t resolveFaderBindingId(const MidiControllerProfile* profile, uint8_t cc) {
+  uint16_t id = static_cast<uint16_t>(128 + cc);
+  if (profile == nullptr) return id;
+
+  const MdefFaderRange* range = findFaderChannelRange(*profile, cc);
+  if (range == nullptr) return id;
+
+  // glow.bind.fader has no channel/coordinate argument; for a multi-channel
+  // fader range, resolve to the range's base channel.
+  return packChannelControlId(range->channelFrom, id);
+}
+
 LiveControl::LiveControl(ShowController& ctrl) : ctrl_(ctrl) {}
 
 void LiveControl::bindButton(uint16_t controlId, ActionKind action, uint16_t targetId) {
@@ -106,12 +122,12 @@ uint16_t LiveControl::effectiveId(const ControlEvent& ev) const {
 
   if (ev.type == ControlType::Button) {
     if (findPadChannelRange(*profile_, static_cast<uint8_t>(ev.id)) == nullptr) return ev.id;
-    return static_cast<uint16_t>((static_cast<uint16_t>(ev.channel) << 8) | ev.id);
+    return packChannelControlId(ev.channel, ev.id);
   }
   if (ev.type == ControlType::Fader && ev.id >= 128) {
     uint8_t cc = static_cast<uint8_t>(ev.id - 128);
     if (findFaderChannelRange(*profile_, cc) == nullptr) return ev.id;
-    return static_cast<uint16_t>((static_cast<uint16_t>(ev.channel) << 8) | ev.id);
+    return packChannelControlId(ev.channel, ev.id);
   }
   return ev.id;
 }

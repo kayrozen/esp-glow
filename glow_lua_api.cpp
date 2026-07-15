@@ -702,10 +702,8 @@ int GlowLuaApi::l_bind_fader(lua_State* L) {
     return luaL_error(L, "glow.bind.fader: only :master is supported, got '%s'", target);
   }
 
-  // Fader control ids carry the same +128 offset parseMidi assigns
-  // (live_control.cpp) so this one binding table entry matches a CC
-  // whether it arrived over MIDI, OSC, or the web console.
-  api.liveControl_.bindFader(static_cast<uint16_t>(128 + cc), ActionKind::Master);
+  const MidiControllerProfile* profile = api.ledFeedback_ != nullptr ? &api.ledFeedback_->profile() : nullptr;
+  api.liveControl_.bindFader(resolveFaderBindingId(profile, static_cast<uint8_t>(cc)), ActionKind::Master);
   return 0;
 }
 

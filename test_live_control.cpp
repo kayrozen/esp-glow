@@ -217,6 +217,43 @@ void test_master_fader() {
   CHECK_NEAR(live.masterLevel(), 0.75f);
 }
 
+
+void test_profile_resolved_fader_bindings() {
+  TEST("Fader binding: channel-significant ranges bind on resolved base channel");
+
+  ControllerBuilder b;
+  b.name = "Channel Fader Controller";
+  b.faders.push_back({21, 21, "bank", 2, 4});  // one CC multiplexed across channels 2..4
+  b.faders.push_back({14, 14, "master"});      // channel-agnostic fader
+  std::string encErr;
+  std::vector<uint8_t> blob = b.encode(encErr);
+  CHECK(encErr.empty());
+  MidiControllerProfile profile;
+  CHECK(parseMidiController(blob.data(), blob.size(), profile));
+
+  ShowController ctrl;
+  LiveControl live(ctrl);
+  live.setControllerProfile(&profile);
+
+  uint16_t channelFaderId = resolveFaderBindingId(&profile, 21);
+  CHECK(channelFaderId == packChannelControlId(2, static_cast<uint16_t>(128 + 21)));
+  live.bindFader(channelFaderId, ActionKind::Master);
+
+  // The one-argument API resolves to channelFrom, so other channels in the
+  // same .mdef range do not hit this binding.
+  live.handle({ControlType::Fader, static_cast<uint16_t>(128 + 21), 3, false, 0.25f}, 0.0f);
+  CHECK_NEAR(live.masterLevel(), 1.0f);
+
+  live.handle({ControlType::Fader, static_cast<uint16_t>(128 + 21), 2, false, 0.5f}, 0.0f);
+  CHECK_NEAR(live.masterLevel(), 0.5f);
+
+  uint16_t agnosticFaderId = resolveFaderBindingId(&profile, 14);
+  CHECK(agnosticFaderId == static_cast<uint16_t>(128 + 14));
+  live.bindFader(agnosticFaderId, ActionKind::Master);
+  live.handle({ControlType::Fader, static_cast<uint16_t>(128 + 14), 7, false, 0.75f}, 0.0f);
+  CHECK_NEAR(live.masterLevel(), 0.75f);
+}
+
 void test_clear() {
   TEST("clear(): wipes bindings, leaves masterLevel untouched (glow.bind.clear)");
 
@@ -595,6 +632,7 @@ int main() {
   test_scene_go();
   test_scene_toggle();
   test_master_fader();
+  test_profile_resolved_fader_bindings();
   test_clear();
   test_unbound_event();
   test_type_mismatch();

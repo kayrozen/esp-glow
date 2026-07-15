@@ -51,6 +51,10 @@ enum class ActionKind : uint8_t { CueFlash, CueToggle, SceneGo, SceneToggle, Mas
 // Bounds-safe: never reads `msg[i]` for `i >= len`.
 bool parseMidi(const uint8_t* msg, size_t len, ControlEvent& out);
 
+// Shared binding/lookup key helpers for channel-significant controls.
+uint16_t packChannelControlId(uint8_t channel, uint16_t id);
+uint16_t resolveFaderBindingId(const MidiControllerProfile* profile, uint8_t cc);
+
 class LiveControl {
 public:
   explicit LiveControl(ShowController& ctrl);
@@ -59,7 +63,7 @@ public:
   // faders, see FORMAT.md's "Per-range channel significance"). When set,
   // incoming events addressing a channel-significant pad/fader range are
   // looked up (and must have been bound) by the packed id
-  // (channel << 8) | id -- see effectiveId() below and glow.bind.pad-xy
+  // packChannelControlId(channel, id) -- see effectiveId() below and glow.bind.pad-xy
   // (glow_lua_api.cpp), which binds using that same packed id. nullptr (the
   // default) keeps every controller's existing channel-agnostic behavior
   // byte-for-byte: every id is looked up unpacked, exactly as before this
@@ -95,7 +99,7 @@ private:
   // (or should have been) bound under: unpacked, unless profile_ is set AND
   // the event's raw id falls in one of its channel-significant PAD/FADER
   // ranges (mdef.h's findPadChannelRange/findFaderChannelRange), in
-  // which case it's (channel << 8) | id -- the same packing glow.bind.pad-xy
+  // which case it's packChannelControlId(channel, id) -- the same packing glow.bind.pad-xy
   // uses (glow_lua_api.cpp). Button ids are notes (0..127); Fader ids already
   // carry parseMidi's +128 offset, so the fader lookup strips it before
   // checking the profile's CC ranges and re-adds it after packing.
