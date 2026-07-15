@@ -207,12 +207,12 @@ void test_bad_magic() {
 }
 
 void test_bad_version() {
-  TEST("Reject unsupported version (3 -- 1 and 2 are both valid)");
+  TEST("Reject unsupported version (4 -- 1, 2, and 3 are all valid)");
 
   ControllerBuilder b = makeController();
   std::string err;
   std::vector<uint8_t> blob = b.encode(err);
-  blob[4] = 3;
+  blob[4] = 4;
 
   MidiControllerProfile p;
   CHECK(!parseMidiController(blob.data(), blob.size(), p));
@@ -468,6 +468,167 @@ void test_resolve_pad_xy_grid() {
   CHECK(!resolvePadXY(p, 0, -1, note, channel));  // negative row
 }
 
+// ============================================================================
+// P1.1: INIT SYSEX blobs (MDF1 v3)
+// ============================================================================
+
+void test_init_blobs_roundtrip() {
+  TEST("INIT SYSEX blobs -> version 3, bytes exact, order preserved");
+
+  ControllerBuilder b = makeController();  // no CH ranges -- would be v1 without INIT
+  b.initBlobs.push_back({0xF0, 0x47, 0x7F, 0x29, 0x60, 0x00, 0x04, 0x40, 0x00, 0x00, 0x00, 0xF7});
+  b.initBlobs.push_back({0xF0, 0x7E, 0x7F, 0x06, 0x01, 0xF7});
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  CHECK(err.empty());
+  CHECK(blob[4] == 3);  // version byte -- bumped by INIT alone, no CH needed
+
+  MidiControllerProfile p;
+  CHECK(parseMidiController(blob.data(), blob.size(), p));
+  CHECK(p.initCount == 2);
+  CHECK(p.initBlobs[0].len == 12);
+  CHECK(std::memcmp(p.initBlobs[0].data, b.initBlobs[0].data(), 12) == 0);
+  CHECK(p.initBlobs[1].len == 6);
+  CHECK(std::memcmp(p.initBlobs[1].data, b.initBlobs[1].data(), 6) == 0);
+
+  // The rest of the profile survived the extra header field/table intact.
+  CHECK(p.padCount == b.pads.size());
+  CHECK(p.leds[0].colorCount == 3);
+}
+
+void test_init_blobs_with_channel_ranges_also_v3() {
+  TEST("INIT SYSEX + CH ranges together -> still version 3 (v3 implies wide records)");
+
+  ControllerBuilder b;
+  b.name = "Both";
+  b.pads.push_back({53, 53, 0, 7});
+  b.initBlobs.push_back({0xF0, 0x47, 0x00, 0xF7});
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  CHECK(err.empty());
+  CHECK(blob[4] == 3);
+
+  MidiControllerProfile p;
+  CHECK(parseMidiController(blob.data(), blob.size(), p));
+  CHECK(p.pads[0].channelFrom == 0 && p.pads[0].channelTo == 7);  // wide records preserved
+  CHECK(p.initCount == 1);
+  CHECK(p.initBlobs[0].len == 4);
+}
+
+void test_no_init_line_sends_nothing() {
+  TEST("No INIT line -> initCount 0, every existing .mdef unchanged (v1 and v2)");
+
+  ControllerBuilder v1 = makeController();
+  std::string err;
+  std::vector<uint8_t> blobV1 = v1.encode(err);
+  CHECK(blobV1[4] == 1);
+  MidiControllerProfile pV1;
+  CHECK(parseMidiController(blobV1.data(), blobV1.size(), pV1));
+  CHECK(pV1.initCount == 0);
+
+  ControllerBuilder v2;
+  v2.name = "V2 no init";
+  v2.pads.push_back({53, 53, 0, 7});
+  std::vector<uint8_t> blobV2 = v2.encode(err);
+  CHECK(blobV2[4] == 2);
+  MidiControllerProfile pV2;
+  CHECK(parseMidiController(blobV2.data(), blobV2.size(), pV2));
+  CHECK(pV2.initCount == 0);
+}
+
+void test_old_v1_v2_blobs_load_with_no_init() {
+  TEST("Old MDF1 blob (no init section, hand-built v1/v2) loads, initCount == 0");
+
+  // Hand-built v1 blob (pre-dates INIT entirely) -- exact bytes from
+  // test_old_v1_blob_loads_as_agnostic above.
+  std::vector<uint8_t> blobV1 = {
+    'M', 'D', 'F', '1',
+    1, 0, 0, 0, 1, 0, 0, 0, 0,
+    53, 60,
+  };
+  MidiControllerProfile pV1;
+  CHECK(parseMidiController(blobV1.data(), blobV1.size(), pV1));
+  CHECK(pV1.initCount == 0);
+
+  // Hand-built v2 blob (channel-significant pad, still pre-dates INIT).
+  std::vector<uint8_t> blobV2 = {
+    'M', 'D', 'F', '1',
+    2, 0, 0, 0, 1, 0, 0, 0, 0,
+    53, 53, 0, 7,
+  };
+  MidiControllerProfile pV2;
+  CHECK(parseMidiController(blobV2.data(), blobV2.size(), pV2));
+  CHECK(pV2.initCount == 0);
+  CHECK(pV2.pads[0].channelFrom == 0);
+}
+
+void test_init_blob_count_limit() {
+  TEST("ControllerBuilder::encode rejects too many INIT SYSEX lines");
+
+  ControllerBuilder b;
+  b.name = "Too Many Inits";
+  for (int i = 0; i <= MDEF_MAX_INIT_BLOBS; ++i) {
+    b.initBlobs.push_back({0xF0, 0xF7});
+  }
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  CHECK(blob.empty());
+  CHECK(!err.empty());
+}
+
+void test_init_blob_size_limit() {
+  TEST("ControllerBuilder::encode rejects an oversized INIT SYSEX blob");
+
+  ControllerBuilder b;
+  b.name = "Huge Init";
+  std::vector<uint8_t> huge(MDEF_MAX_INIT_BLOB_BYTES + 1, 0x00);
+  b.initBlobs.push_back(huge);
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  CHECK(blob.empty());
+  CHECK(!err.empty());
+}
+
+void test_init_blob_count_overrun_rejected() {
+  TEST("Reject initCount > MDEF_MAX_INIT_BLOBS on parse (never reads out of bounds)");
+
+  ControllerBuilder b = makeController();
+  b.initBlobs.push_back({0xF0, 0xF7});
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  CHECK(blob[4] == 3);
+  blob[13] = MDEF_MAX_INIT_BLOBS + 1;  // initCount header field, right before the name
+
+  MidiControllerProfile p;
+  CHECK(!parseMidiController(blob.data(), blob.size(), p));
+}
+
+void test_init_blob_len_overrun_rejected() {
+  TEST("Reject an init blob whose declared length runs past the buffer end");
+
+  ControllerBuilder b = makeController();
+  b.initBlobs.push_back({0xF0, 0xF7});
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  CHECK(blob.empty() == false);
+
+  // Truncate the blob right after the init table's length byte, so the
+  // declared 2 bytes of payload have nowhere to come from.
+  size_t nameOff = 14;  // 13-byte header + initCount(1)
+  size_t afterName = nameOff + b.name.size();
+  size_t padTable = afterName + 4u * b.pads.size();
+  size_t faderTable = padTable + 6u * b.faders.size();
+  size_t encoderTable = faderTable + 3u * b.encoders.size();
+  size_t ledTable = encoderTable + 9u * b.leds.size();
+  size_t colorTable = ledTable + 3u * 3 /* colors in makeController's LED */;
+  size_t initLenByteOffset = colorTable;
+  CHECK(blob[initLenByteOffset] == 2);  // the 2-byte {0xF0,0xF7} blob's length prefix
+  blob.resize(initLenByteOffset + 1);   // cut off right after the length byte
+
+  MidiControllerProfile p;
+  CHECK(!parseMidiController(blob.data(), blob.size(), p));
+}
+
 int main() {
   test_roundtrip_basic_fields();
   test_led_range_lookup_by_note();
@@ -492,6 +653,15 @@ int main() {
   test_old_v1_blob_loads_as_agnostic();
   test_channel_range_validation();
   test_resolve_pad_xy_grid();
+
+  test_init_blobs_roundtrip();
+  test_init_blobs_with_channel_ranges_also_v3();
+  test_no_init_line_sends_nothing();
+  test_old_v1_v2_blobs_load_with_no_init();
+  test_init_blob_count_limit();
+  test_init_blob_size_limit();
+  test_init_blob_count_overrun_rejected();
+  test_init_blob_len_overrun_rejected();
 
   if (g_failCount == 0) {
     printf("\nAll tests passed!\n");

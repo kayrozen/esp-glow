@@ -105,6 +105,29 @@ MDEF_SOURCES = mdef.cpp controller_encoder.cpp test_mdef.cpp
 MDEF_OBJECTS = $(MDEF_SOURCES:.cpp=.o)
 MDEF_TARGET  = test_mdef
 
+# --- test_controller_init: P1.1 INIT SYSEX send-on-connect (host-tested;
+# the actual DIN UART/USB-MIDI OUT wiring is device-only, see midi_input.cpp/
+# usb_midi_input.cpp) ---
+CONTROLLER_INIT_SOURCES = mdef.cpp controller_encoder.cpp controller_init.cpp test_controller_init.cpp
+CONTROLLER_INIT_OBJECTS = $(CONTROLLER_INIT_SOURCES:.cpp=.o)
+CONTROLLER_INIT_TARGET  = test_controller_init
+
+# --- test_usb_midi_packetizer: USB-MIDI 1.0 event-packet framing for
+# outbound SysEx (P1.1's USB-MIDI OUT path; the actual OUT-transfer
+# submission is device-only, see usb_midi_input.cpp) ---
+USB_MIDI_PACKETIZER_SOURCES = usb_midi_packetizer.cpp test_usb_midi_packetizer.cpp
+USB_MIDI_PACKETIZER_OBJECTS = $(USB_MIDI_PACKETIZER_SOURCES:.cpp=.o)
+USB_MIDI_PACKETIZER_TARGET  = test_usb_midi_packetizer
+
+# --- test_state_broadcast: P1.3 end-to-end -- OSC input -> LiveControl ->
+# ShowController -> buildStateJson (web_protocol.h) and LedFeedback both
+# reading the same active-cue snapshot (FORMAT.md's "LED-feedback tie-in").
+STATE_BROADCAST_SOURCES = vec_math.cpp aim.cpp fixture_profile.cpp profile_encoder.cpp show.cpp \
+                          show_control.cpp mdef.cpp controller_encoder.cpp live_control.cpp \
+                          led_feedback.cpp web_protocol.cpp osc_parser.cpp test_state_broadcast.cpp
+STATE_BROADCAST_OBJECTS = $(STATE_BROADCAST_SOURCES:.cpp=.o)
+STATE_BROADCAST_TARGET  = test_state_broadcast
+
 # --- test_led_feedback: LED feedback change-detection + rate-limiting
 # (A5/A6) -- links a real ShowController so glow.led.auto's cue-tracking is
 # exercised against the real weight/active-state machinery, not a fake ---
@@ -229,6 +252,15 @@ $(LIVE_CONTROL_TARGET): $(LIVE_CONTROL_OBJECTS)
 
 $(MDEF_TARGET): $(MDEF_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(MDEF_OBJECTS) -o $(MDEF_TARGET) -lm
+
+$(CONTROLLER_INIT_TARGET): $(CONTROLLER_INIT_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(CONTROLLER_INIT_OBJECTS) -o $(CONTROLLER_INIT_TARGET) -lm
+
+$(STATE_BROADCAST_TARGET): $(STATE_BROADCAST_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(STATE_BROADCAST_OBJECTS) -o $(STATE_BROADCAST_TARGET) -lm
+
+$(USB_MIDI_PACKETIZER_TARGET): $(USB_MIDI_PACKETIZER_OBJECTS)
+	$(CXX) $(CXXFLAGS) $(USB_MIDI_PACKETIZER_OBJECTS) -o $(USB_MIDI_PACKETIZER_TARGET) -lm
 
 $(LED_FEEDBACK_TARGET): $(LED_FEEDBACK_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(LED_FEEDBACK_OBJECTS) -o $(LED_FEEDBACK_TARGET) -lm
@@ -390,7 +422,7 @@ ARTNET_DISCOVERY_TARGET  = test_artnet_discovery
 $(ARTNET_DISCOVERY_TARGET): $(ARTNET_DISCOVERY_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(ARTNET_DISCOVERY_OBJECTS) -o $(ARTNET_DISCOVERY_TARGET) -lm
 
-test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET) $(LIVE_CONTROL_TARGET) $(MDEF_TARGET) $(LED_FEEDBACK_TARGET) $(WEB_PROTOCOL_TARGET) $(CONTROL_QUEUE_TARGET) $(PACING_TARGET) $(APPLY_TARGET) $(WLED_TARGET) $(LUA_VM_TARGET) $(LUA_EFFECT_TARGET) $(GLOW_LUA_API_TARGET) $(GLOW_FENNEL_TARGET) $(SCRIPTS_STORAGE_TARGET) $(FX_ERROR_PIPELINE_TARGET) $(OSC_PARSER_TARGET) $(LITTLEFS_IMAGE_TARGET) $(BEAT_CLOCK_TARGET) $(BEAT_QUEUE_TARGET) $(MIDI_REALTIME_TARGET) $(DJLINK_PARSER_TARGET) $(DJLINK_MASTER_TARGET) $(SAFE_BLACKOUT_TARGET) $(DEVICE_CONFIG_TARGET) $(ARTNET_ROUTER_TARGET) $(ARTNET_DISCOVERY_TARGET)
+test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL_TARGET) $(PIXEL_MATRIX_TARGET) $(PROVISION_TARGET) $(LIVE_CONTROL_TARGET) $(MDEF_TARGET) $(CONTROLLER_INIT_TARGET) $(USB_MIDI_PACKETIZER_TARGET) $(STATE_BROADCAST_TARGET) $(LED_FEEDBACK_TARGET) $(WEB_PROTOCOL_TARGET) $(CONTROL_QUEUE_TARGET) $(PACING_TARGET) $(APPLY_TARGET) $(WLED_TARGET) $(LUA_VM_TARGET) $(LUA_EFFECT_TARGET) $(GLOW_LUA_API_TARGET) $(GLOW_FENNEL_TARGET) $(SCRIPTS_STORAGE_TARGET) $(FX_ERROR_PIPELINE_TARGET) $(OSC_PARSER_TARGET) $(LITTLEFS_IMAGE_TARGET) $(BEAT_CLOCK_TARGET) $(BEAT_QUEUE_TARGET) $(MIDI_REALTIME_TARGET) $(DJLINK_PARSER_TARGET) $(DJLINK_MASTER_TARGET) $(SAFE_BLACKOUT_TARGET) $(DEVICE_CONFIG_TARGET) $(ARTNET_ROUTER_TARGET) $(ARTNET_DISCOVERY_TARGET)
 	./$(AIM_TARGET)
 	./$(FP_TARGET)
 	./$(SHOW_TARGET)
@@ -400,6 +432,9 @@ test: $(AIM_TARGET) $(FP_TARGET) $(SHOW_TARGET) $(EFFECTS_TARGET) $(SHOW_CONTROL
 	./$(PROVISION_TARGET)
 	./$(LIVE_CONTROL_TARGET)
 	./$(MDEF_TARGET)
+	./$(CONTROLLER_INIT_TARGET)
+	./$(USB_MIDI_PACKETIZER_TARGET)
+	./$(STATE_BROADCAST_TARGET)
 	./$(LED_FEEDBACK_TARGET)
 	./$(WEB_PROTOCOL_TARGET)
 	./$(CONTROL_QUEUE_TARGET)
@@ -439,6 +474,17 @@ test-importers: $(FDEF_CHECK_TARGET)
 .PHONY: test-devcfg
 test-devcfg: $(DEVCFG_CHECK_TARGET)
 	node web/shared/test-devcfg.mjs
+
+# P1.3: web console reconciliation logic (app.js's reconcileActiveCues) and
+# WsClient's `state` message parsing, master field included
+# (scripts/test-ws-client.mjs -- previously written but never wired into
+# `make`/CI; folded in here). Pure JS, no C++ dependency, same "needs node"
+# reason this stays out of the C++-only `test` target as
+# test-devcfg/test-importers above.
+.PHONY: test-console
+test-console:
+	node scripts/test-ws-client.mjs
+	node web/console/test-reconcile.mjs
 
 # Clean build artifacts
 # NOTE: every *_OBJECTS/*_TARGET pair defined above must be listed here.

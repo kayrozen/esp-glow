@@ -273,6 +273,109 @@ void test_stop_all() {
   delete effectsB[0];
 }
 
+// P1.2: manual level override (live_control.h's ActionKind::CueLevel)
+void test_manual_level_holds_cue_at_weight() {
+  TEST("setManualLevel: pins weight, bypasses fade-in, isActive() tracks it");
+
+  ShowController ctrl;
+  std::vector<IEffect*> effects;
+  // A long fadeIn -- if setManualLevel actually went through the fade-in
+  // state machine, weight at t=0 would be 0, not the pinned level.
+  effects.push_back(new ConstCapEffect{7, Capability::Dimmer, 1.0f});
+  uint16_t cueId = ctrl.addCue(effects, 5.0f, 5.0f, 0, 0.0f);
+
+  CHECK(!ctrl.isActive(cueId));
+  ctrl.setManualLevel(cueId, 0.5f);
+  CHECK(ctrl.isActive(cueId));
+
+  std::vector<CapIntent> caps;
+  std::vector<AimIntent> aims;
+  ctrl.evaluate(0.0f, caps, aims);
+  CHECK(caps.size() == 1);
+  CHECK_NEAR(caps[0].norm01, 0.5f);
+
+  // Moving the level updates the pinned weight immediately, still no fade.
+  ctrl.setManualLevel(cueId, 0.9f);
+  caps.clear();
+  aims.clear();
+  ctrl.evaluate(0.0f, caps, aims);
+  CHECK(caps.size() == 1);
+  CHECK_NEAR(caps[0].norm01, 0.9f);
+
+  delete effects[0];
+}
+
+void test_manual_level_out_of_range_clamps() {
+  TEST("setManualLevel: out-of-range values clamp to [0,1]");
+
+  ShowController ctrl;
+  std::vector<IEffect*> effects;
+  effects.push_back(new ConstCapEffect{7, Capability::Dimmer, 1.0f});
+  uint16_t cueId = ctrl.addCue(effects, 0.0f, 0.0f, 0, 0.0f);
+
+  ctrl.setManualLevel(cueId, 3.0f);
+  std::vector<CapIntent> caps;
+  std::vector<AimIntent> aims;
+  ctrl.evaluate(0.0f, caps, aims);
+  CHECK(caps.size() == 1);
+  CHECK_NEAR(caps[0].norm01, 1.0f);
+
+  ctrl.setManualLevel(cueId, -1.0f);
+  CHECK(!ctrl.isActive(cueId));  // <= 0 deactivates
+
+  delete effects[0];
+}
+
+void test_manual_level_zero_deactivates() {
+  TEST("setManualLevel(0): releases manual control and deactivates, no fade lingers");
+
+  ShowController ctrl;
+  std::vector<IEffect*> effects;
+  effects.push_back(new ConstCapEffect{7, Capability::Dimmer, 1.0f});
+  uint16_t cueId = ctrl.addCue(effects, 0.0f, 10.0f, 0, 0.0f);  // long fadeOut
+
+  ctrl.setManualLevel(cueId, 1.0f);
+  CHECK(ctrl.isActive(cueId));
+  ctrl.setManualLevel(cueId, 0.0f);
+  CHECK(!ctrl.isActive(cueId));
+
+  std::vector<CapIntent> caps;
+  std::vector<AimIntent> aims;
+  ctrl.evaluate(0.0f, caps, aims);
+  CHECK(caps.empty());  // gone immediately, not fading out
+
+  delete effects[0];
+}
+
+void test_manual_level_unknown_cue_is_noop() {
+  TEST("setManualLevel on an unknown cue id is a no-op, not a crash");
+
+  ShowController ctrl;
+  ctrl.setManualLevel(999, 0.5f);  // no cues registered at all
+  CHECK(!ctrl.anyActive());
+}
+
+void test_manual_level_survives_stop_all() {
+  TEST("stopAll() clears a manual override too -- no lingering pinned weight");
+
+  ShowController ctrl;
+  std::vector<IEffect*> effects;
+  effects.push_back(new ConstCapEffect{7, Capability::Dimmer, 1.0f});
+  uint16_t cueId = ctrl.addCue(effects, 0.0f, 0.0f, 0, 0.0f);
+
+  ctrl.setManualLevel(cueId, 1.0f);
+  CHECK(ctrl.isActive(cueId));
+  ctrl.stopAll();
+  CHECK(!ctrl.isActive(cueId));
+
+  std::vector<CapIntent> caps;
+  std::vector<AimIntent> aims;
+  ctrl.evaluate(0.0f, caps, aims);
+  CHECK(caps.empty());
+
+  delete effects[0];
+}
+
 // Blending tests
 void test_intensity_scaling() {
   TEST("Intensity scaling: single cue fadeIn 2 with Dimmer 1.0, at t=1 should be 0.5");
@@ -610,6 +713,11 @@ int main() {
   test_release_mid_fade_in();
   test_auto_hold();
   test_stop_all();
+  test_manual_level_holds_cue_at_weight();
+  test_manual_level_out_of_range_clamps();
+  test_manual_level_zero_deactivates();
+  test_manual_level_unknown_cue_is_noop();
+  test_manual_level_survives_stop_all();
 
   printf("\n");
 

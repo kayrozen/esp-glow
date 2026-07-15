@@ -280,20 +280,20 @@ void test_build_config_null_buffer_returns_size() {
 // ---------------------------------------------------------------------------
 
 void test_build_state_empty() {
-  TEST("build: state with no active cues");
+  TEST("build: state with no active cues, master 1.0");
   char buf[64];
-  size_t n = buildStateJson(nullptr, 0, buf, sizeof(buf));
+  size_t n = buildStateJson(nullptr, 0, 1.0f, buf, sizeof(buf));
   std::string s(buf, n);
-  CHECK(s == R"({"type":"state","active":[]})");
+  CHECK(s == R"({"type":"state","active":[],"master":1.0000})");
 }
 
 void test_build_state_three_ids() {
-  TEST("build: state with three active cue ids");
+  TEST("build: state with three active cue ids and a master level");
   uint16_t ids[3] = {0, 3, 5};
   char buf[64];
-  size_t n = buildStateJson(ids, 3, buf, sizeof(buf));
+  size_t n = buildStateJson(ids, 3, 0.75f, buf, sizeof(buf));
   std::string s(buf, n);
-  CHECK(s == R"({"type":"state","active":[0,3,5]})");
+  CHECK(s == R"({"type":"state","active":[0,3,5],"master":0.7500})");
 }
 
 // ---------------------------------------------------------------------------

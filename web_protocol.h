@@ -22,8 +22,18 @@
 //     { "type":"master","value":0.5 }
 //     { "type":"hello" }                           // request config
 //
-//   Device -> UI feedback (optional, Phase 4):
-//     { "type":"state", "active":[0,3,5] }
+//   Device -> UI feedback (Phase 4 -- P1.3 makes this the device's real
+//   push, not just a stub):
+//     { "type":"state", "active":[0,3,5], "master":0.75 }
+//
+// `state` is the device's source of truth for which cues are active and
+// the current grandmaster level -- broadcast on change (post-render, from
+// ShowController::activeCueIds()/LiveControl::masterLevel(), the same
+// snapshot MIDI LED feedback reads -- see led_feedback.h/main.cpp), and
+// sent in full to a newly-connected client so it never starts out wrong.
+// `master` is always present (LiveControl::masterLevel() always has a
+// value, default 1.0) even on a device with no master fader bound -- the
+// UI only displays it when config.hasMaster is true.
 //
 // `mode` is "flash" or "toggle" and is derived from the binding's ActionKind:
 //   CueFlash / SceneGo  -> "flash"
@@ -78,9 +88,11 @@ size_t buildConfigJson(const WebCueInfo* cues, size_t nCues,
                        bool hasMaster,
                        char* buf, size_t bufLen);
 
-// Build a `state` JSON message (Phase 4 feedback) into `buf`.
-// `activeIds` may be nullptr only if nActive is 0.
-size_t buildStateJson(const uint16_t* activeIds, size_t nActive,
+// Build a `state` JSON message (Phase 4 feedback, P1.3) into `buf`.
+// `activeIds` may be nullptr only if nActive is 0. `masterLevel` is
+// written as the `master` field unconditionally (see this header's
+// protocol comment on why the UI decides whether to show it).
+size_t buildStateJson(const uint16_t* activeIds, size_t nActive, float masterLevel,
                       char* buf, size_t bufLen);
 
 //

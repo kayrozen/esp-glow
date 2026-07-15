@@ -22,6 +22,22 @@ public:
   void goScene(uint16_t sceneId, float t);
   void releaseScene(uint16_t sceneId, float t);
 
+  // P1.2 (live_control.h's ActionKind::CueLevel): hold `cueId` at a manual
+  // weight in [0,1], bypassing the fade-in/hold/fade-out state machine
+  // entirely while held -- a continuous MIDI source (a fader, the pitch
+  // wheel, channel pressure) "bumping" a cue the way go()/release() can't.
+  // level clamped to [0,1]. level > 0 activates the cue (same
+  // isActive()/priority-ordering participation as go(), including a fresh
+  // activationSeq on the 0->active edge) and pins its weight at `level`
+  // every frame, regardless of any go()/release() call in flight. level <=
+  // 0 releases manual control immediately (no fade) and deactivates the
+  // cue -- "fader all the way down" means "off", not "back to whatever
+  // go()/release() last established". Calling release() on a cue currently
+  // under manual override is a no-op in effect: weightAndAlive() answers
+  // from the override, not the release fade, until setManualLevel brings
+  // it back to 0 (or stopAll() clears it) -- manual control wins.
+  void setManualLevel(uint16_t cueId, float level);
+
   // F5 safe blackout: deactivate every cue immediately, with no fade-out.
   // Unlike release() (which starts a fadeOutSec-paced ramp down), this is
   // the "the show is over right now" primitive a safety path needs -- a
@@ -62,6 +78,10 @@ private:
     bool released = false;
     float releaseTime = 0.0f;
     float releaseWeight = 0.0f;
+
+    // P1.2: manual weight override (setManualLevel) -- see its own comment.
+    bool manualOverride = false;
+    float manualLevel = 0.0f;
   };
 
   struct Scene {

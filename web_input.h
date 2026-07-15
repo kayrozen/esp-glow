@@ -35,10 +35,27 @@ void web_input_init(IControlEventQueue& controlQueue, IEvalSubmissionQueue& eval
 // buf=nullptr,bufLen=0 to measure.
 size_t web_input_build_config(char* buf, size_t bufLen);
 
-// Build a `state` message into `buf` listing currently-active cue ids.
-// `activeIds` may be nullptr if nActive == 0.
-size_t web_input_build_state(const uint16_t* activeIds, size_t nActive,
+// Build a `state` message into `buf` listing currently-active cue ids plus
+// the current master level (P1.3). `activeIds` may be nullptr if
+// nActive == 0.
+size_t web_input_build_state(const uint16_t* activeIds, size_t nActive, float masterLevel,
                              char* buf, size_t bufLen);
+
+// P1.3: called from the WS handshake handler (ws_handler's HTTP_GET
+// branch) the moment a new client's fd is registered -- marks that the
+// render task's next post-render state check should broadcast
+// unconditionally, bypassing change-detection, so a client that connects
+// mid-static-show still gets a full `state` message instead of waiting
+// for something to actually change (which might be never). Cheap,
+// single-writer-from-this-side dirty flag -- not a snapshot of engine
+// state, so this isn't the "new cross-task state" the render task's
+// broadcast is meant to avoid (see main.cpp's broadcast_state_if_changed).
+void web_input_note_new_client();
+
+// Consumed by the render task once per frame: returns true (and clears
+// the flag) if a client connected since the last call. See
+// web_input_note_new_client's comment.
+bool web_input_take_forced_state_broadcast();
 
 // What the caller should do after web_input_handle_text_frame returns.
 enum WebInputAction {

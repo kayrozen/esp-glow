@@ -28,6 +28,13 @@ static constexpr int MDEF_MAX_LED_RANGES = 8;
 static constexpr int MDEF_MAX_COLORS = 96;
 static constexpr int MDEF_MAX_NAME_BLOB = 1024;
 
+// P1.1: opaque SysEx init messages (`INIT SYSEX <hex bytes>`, MDF1 v3 --
+// see FORMAT.md). A handful of short messages is the realistic shape (a
+// mode-set/LED-enable handshake, not a firmware dump), so these stay small
+// and fixed-size like everything else in this file -- no heap.
+static constexpr int MDEF_MAX_INIT_BLOBS = 8;
+static constexpr int MDEF_MAX_INIT_BLOB_BYTES = 64;
+
 // A3: relative encoders send deltas, not absolute positions, and the
 // encoding is vendor-specific. Absolute is the safe default (degrades to a
 // fader) when unsure -- see decodeEncoderDelta below.
@@ -102,6 +109,14 @@ struct MdefLedRange {
   uint8_t channelTo = kChannelAgnostic;  // inclusive, 0..15
 };
 
+// One opaque outbound SysEx message from `INIT SYSEX <hex bytes>` -- the
+// firmware never interprets `data`, only sends it verbatim, in declaration
+// order, once the controller's MIDI-out path is up (controller_init.h).
+struct MdefInitBlob {
+  uint8_t len = 0;
+  uint8_t data[MDEF_MAX_INIT_BLOB_BYTES] = {};
+};
+
 struct MidiControllerProfile {
   // 0 = any/unset, 1..16 = a fixed channel (1-indexed, unlike parseMidi's
   // 0-indexed ControlEvent::channel or this file's own 0-indexed
@@ -127,6 +142,11 @@ struct MidiControllerProfile {
   uint8_t colorCount = 0;
   MdefColorEntry colors[MDEF_MAX_COLORS];
 
+  // v3 only (0 on a v1/v2 blob -- "no INIT line" and "old MDF1 version"
+  // are the same no-op case; see FORMAT.md's "INIT Blob Table (v3)").
+  uint8_t initCount = 0;
+  MdefInitBlob initBlobs[MDEF_MAX_INIT_BLOBS];
+
   // NUL-separated UTF-8 strings (fader names + colour names), indexed by
   // MdefFaderRange::nameOff / MdefColorEntry::nameOff. Copied out of the
   // parsed blob -- parseMidiController never keeps a pointer into the
@@ -141,7 +161,7 @@ struct MidiControllerProfile {
 // never read out of bounds) on:
 //  - buffer shorter than the 13-byte header, or shorter than the declared
 //    name/table sizes
-//  - bad magic, version not 1 or 2, flags != 0
+//  - bad magic, version not 1, 2, or 3, flags != 0
 //  - any of padCount/faderCount/encoderCount/ledCount/colorCount exceeding
 //    its MDEF_MAX_*
 //  - a pad/fader/encoder/led addrFrom > addrTo, or an address/mode/msgType/
@@ -150,14 +170,19 @@ struct MidiControllerProfile {
 //    land on a NUL-terminated string within the trailing name blob
 //  - an LED range's colorOffset/colorCount that doesn't fit within the
 //    global colour table
-//  - (version 2 only) a pad/fader/LED channelFrom/channelTo that isn't the
+//  - (version 2+ only) a pad/fader/LED channelFrom/channelTo that isn't the
 //    kChannelAgnostic sentinel in both fields, and isn't a valid 0..15 range
 //    with channelFrom <= channelTo
+//  - (version 3 only) initCount exceeding MDEF_MAX_INIT_BLOBS, or any init
+//    blob's declared length exceeding MDEF_MAX_INIT_BLOB_BYTES or running
+//    past the end of the buffer
 //
-// Version 1 blobs (no channel fields -- every existing committed .mdef, and
-// every profile built by a ControllerBuilder with no CH ranges) parse with
-// every pad/fader/LED range's channel fields set to kChannelAgnostic, byte-
-// for-byte the same runtime behavior as before version 2 existed.
+// Version 1 blobs (no channel fields, no init blobs -- every existing
+// committed .mdef, and every profile built by a ControllerBuilder with no
+// CH ranges or INIT lines) parse with every pad/fader/LED range's channel
+// fields set to kChannelAgnostic and initCount 0, byte-for-byte the same
+// runtime behavior as before version 2/3 existed. Version 2 blobs (channel
+// ranges, no INIT lines) parse with initCount 0 the same way.
 bool parseMidiController(const uint8_t* data, size_t len, MidiControllerProfile& out);
 
 // Find the LED range (if any) covering `note`/`cc`. Returns nullptr if the

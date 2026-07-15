@@ -130,6 +130,11 @@ jobs:
       - name: Run CFG1 device-config encoder/decoder tests (web/shared/devcfg.js)
         run: node web/shared/test-devcfg.mjs
 
+      - name: Run web console + ws-client tests (P1.3 -- app.js, ws-client.js)
+        run: |
+          node scripts/test-ws-client.mjs
+          node web/console/test-reconcile.mjs
+
       - name: Upload WASM artifacts
         uses: actions/upload-artifact@v4
         with:

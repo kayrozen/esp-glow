@@ -764,6 +764,103 @@ TEST(parse_mdef_no_ch_anywhere_every_committed_mdef_still_loads) {
 }
 
 // ============================================================================
+// P1.1: .mdef INIT SYSEX (MDF1 v3) Tests
+// ============================================================================
+
+TEST(parse_mdef_init_sysex_blob_parsed_bytes_exact_order_preserved) {
+  std::string text = R"(
+    CONTROLLER Grid
+    INIT SYSEX F0 47 7F 29 60 00 04 40 00 00 00 F7
+    INIT SYSEX F0 7E 7F 06 01 F7
+    PAD 0 39
+  )";
+  ControllerBuilder def;
+  std::string err;
+  CHECK(parseControllerDef(text, def, err));
+  CHECK(err.empty());
+
+  CHECK(def.initBlobs.size() == 2);
+  std::vector<uint8_t> expected0 = {0xF0, 0x47, 0x7F, 0x29, 0x60, 0x00, 0x04, 0x40, 0x00, 0x00, 0x00, 0xF7};
+  std::vector<uint8_t> expected1 = {0xF0, 0x7E, 0x7F, 0x06, 0x01, 0xF7};
+  CHECK(def.initBlobs[0] == expected0);
+  CHECK(def.initBlobs[1] == expected1);
+
+  // Round-trip through MDF1 -> same bytes out.
+  std::string encErr;
+  std::vector<uint8_t> blob = encodeController(def, encErr);
+  CHECK(encErr.empty());
+  CHECK(blob[4] == 3);  // INIT present -> version 3
+  MidiControllerProfile p;
+  CHECK(parseMidiController(blob.data(), blob.size(), p));
+  CHECK(p.initCount == 2);
+  CHECK(p.initBlobs[0].len == expected0.size());
+  CHECK(std::memcmp(p.initBlobs[0].data, expected0.data(), expected0.size()) == 0);
+  CHECK(p.initBlobs[1].len == expected1.size());
+  CHECK(std::memcmp(p.initBlobs[1].data, expected1.data(), expected1.size()) == 0);
+}
+
+TEST(parse_mdef_no_init_line_every_committed_mdef_still_loads) {
+  // No INIT anywhere -> version 1 (or 2, if CH is used), initCount 0 --
+  // same "unwritten grammar means unchanged behavior" contract as CH.
+  std::string text = R"(
+    CONTROLLER Grid
+    PAD 53 CH 0 7
+  )";
+  ControllerBuilder def;
+  std::string err;
+  CHECK(parseControllerDef(text, def, err));
+  CHECK(def.initBlobs.empty());
+
+  std::string encErr;
+  std::vector<uint8_t> blob = encodeController(def, encErr);
+  CHECK(blob[4] == 2);  // CH present, no INIT -> still version 2, not 3
+  MidiControllerProfile p;
+  CHECK(parseMidiController(blob.data(), blob.size(), p));
+  CHECK(p.initCount == 0);
+}
+
+TEST(parse_mdef_init_sysex_missing_keyword_error) {
+  std::string text = R"(
+    CONTROLLER Grid
+    INIT F0 F7
+  )";
+  ControllerBuilder def;
+  std::string err;
+  CHECK(!parseControllerDef(text, def, err));
+  CHECK(!err.empty());
+}
+
+TEST(parse_mdef_init_sysex_missing_bytes_error) {
+  std::string text = R"(
+    CONTROLLER Grid
+    INIT SYSEX
+  )";
+  ControllerBuilder def;
+  std::string err;
+  CHECK(!parseControllerDef(text, def, err));
+}
+
+TEST(parse_mdef_init_sysex_invalid_hex_byte_error) {
+  std::string text = R"(
+    CONTROLLER Grid
+    INIT SYSEX F0 ZZ F7
+  )";
+  ControllerBuilder def;
+  std::string err;
+  CHECK(!parseControllerDef(text, def, err));
+}
+
+TEST(parse_mdef_init_sysex_odd_length_token_error) {
+  std::string text = R"(
+    CONTROLLER Grid
+    INIT SYSEX F0 4 F7
+  )";
+  ControllerBuilder def;
+  std::string err;
+  CHECK(!parseControllerDef(text, def, err));
+}
+
+// ============================================================================
 // .show CONTROLLER / SHW1 v2 Tests
 // ============================================================================
 
@@ -1721,6 +1818,12 @@ int main() {
   RUN_TEST(parse_mdef_ch_lo_greater_than_hi_error);
   RUN_TEST(parse_mdef_pad_extra_token_without_ch_error);
   RUN_TEST(parse_mdef_no_ch_anywhere_every_committed_mdef_still_loads);
+  RUN_TEST(parse_mdef_init_sysex_blob_parsed_bytes_exact_order_preserved);
+  RUN_TEST(parse_mdef_no_init_line_every_committed_mdef_still_loads);
+  RUN_TEST(parse_mdef_init_sysex_missing_keyword_error);
+  RUN_TEST(parse_mdef_init_sysex_missing_bytes_error);
+  RUN_TEST(parse_mdef_init_sysex_invalid_hex_byte_error);
+  RUN_TEST(parse_mdef_init_sysex_odd_length_token_error);
   RUN_TEST(show_compile_and_load_roundtrip_with_controller);
   RUN_TEST(show_compile_no_controller_stays_v1);
   RUN_TEST(show_controller_missing_deffile_error);

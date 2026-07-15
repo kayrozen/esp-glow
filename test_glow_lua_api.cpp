@@ -819,6 +819,154 @@ void test_bind_pad_xy_no_led_feedback_is_a_no_op() {
   CHECK(h.eval("(glow.bind.pad-xy 0 0 :flash :a)"));
 }
 
+// ============================================================================
+// P1.2: glow.bind.pitchbend/pressure/program, glow.param.get
+// ============================================================================
+
+void test_bind_pitchbend_param_drives_glow_param_get() {
+  TEST("glow.bind.pitchbend :param -- the wheel drives glow.param.get");
+
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc);
+
+  h.evalOrDie("(glow.bind.pitchbend :param :hue)");
+  CHECK(std::fabs(h.evalNumber("(glow.param.get :hue)")) < 1e-6);  // unset -> 0
+
+  ControlEvent ev;
+  uint8_t msg[] = {0xE0, 0x7F, 0x7F};  // Pitch Bend, max value -> 1.0
+  CHECK(parseMidi(msg, 3, ev));
+  h.live.handle(ev, 0.0f);
+
+  CHECK(std::fabs(h.evalNumber("(glow.param.get :hue)") - 1.0) < 1e-3);
+}
+
+void test_bind_pressure_cue_level_holds_cue() {
+  TEST("glow.bind.pressure :cue-level -- channel pressure holds a cue at its level");
+
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc);
+
+  h.evalOrDie("(glow.cue.define :chorus {:effects []})");
+  h.evalOrDie("(glow.bind.pressure :cue-level :chorus)");
+
+  uint16_t chorusId;
+  CHECK(h.api.cueIdForName("chorus", chorusId));
+  CHECK(!h.show.isActive(chorusId));
+
+  ControlEvent ev;
+  uint8_t msg[] = {0xD2, 64};  // Channel Pressure, channel 2, ~0.5
+  CHECK(parseMidi(msg, 2, ev));
+  h.live.handle(ev, 0.0f);
+  CHECK(h.show.isActive(chorusId));
+}
+
+void test_bind_fader_cue_level_and_param() {
+  TEST("glow.bind.fader :cue-level / :param -- the fader reaches the same continuous targets");
+
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc);
+
+  h.evalOrDie("(glow.cue.define :bump {:effects []})");
+  h.evalOrDie("(glow.bind.fader 10 :cue-level :bump)");
+  h.evalOrDie("(glow.bind.fader 11 :param :depth)");
+
+  uint16_t bumpId;
+  CHECK(h.api.cueIdForName("bump", bumpId));
+
+  h.live.handle({ControlType::Fader, static_cast<uint16_t>(128 + 10), 0, false, 0.6f}, 0.0f);
+  CHECK(h.show.isActive(bumpId));
+
+  h.live.handle({ControlType::Fader, static_cast<uint16_t>(128 + 11), 0, false, 0.3f}, 0.0f);
+  CHECK(std::fabs(h.evalNumber("(glow.param.get :depth)") - 0.3) < 1e-3);
+}
+
+void test_bind_program_scene_selector() {
+  TEST("glow.bind.program :scene -- program N selects scene N");
+
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc);
+
+  h.evalOrDie("(glow.cue.define :a {:effects []})");
+  h.evalOrDie("(glow.scene.define :verse [:a])");
+  h.evalOrDie("(glow.bind.program :scene)");
+
+  uint16_t cueA;
+  CHECK(h.api.cueIdForName("a", cueA));
+  uint16_t sceneVerse;
+  CHECK(h.api.sceneIdForName("verse", sceneVerse));
+
+  ControlEvent ev;
+  uint8_t msg[] = {0xC0, static_cast<uint8_t>(sceneVerse)};
+  CHECK(parseMidi(msg, 2, ev));
+  h.live.handle(ev, 0.0f);
+  CHECK(h.show.isActive(cueA));
+}
+
+void test_bind_program_only_scene_keyword_valid() {
+  TEST("glow.bind.program: any keyword other than :scene errors");
+
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc);
+  std::string err;
+  CHECK(!h.eval("(glow.bind.program :cue)", &err));
+  CHECK(!err.empty());
+}
+
+void test_bind_pitchbend_unknown_action_errors() {
+  TEST("glow.bind.pitchbend: an unknown action keyword errors, not crashes");
+
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc);
+  std::string err;
+  CHECK(!h.eval("(glow.bind.pitchbend :sideways)", &err));
+  CHECK(!err.empty());
+}
+
+void test_bind_pressure_unknown_cue_errors() {
+  TEST("glow.bind.pressure :cue-level with an unknown cue name errors");
+
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc);
+  std::string err;
+  CHECK(!h.eval("(glow.bind.pressure :cue-level :nope)", &err));
+  CHECK(!err.empty());
+}
+
+void test_param_get_never_bound_is_zero() {
+  TEST("glow.param.get on a name never bound to -- 0, not an error");
+
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc);
+  CHECK(std::fabs(h.evalNumber("(glow.param.get :nonexistent)")) < 1e-6);
+}
+
+void test_two_controllers_pitchbend_inert_without_wheel() {
+  TEST("Two controllers, same boot.fnl: pitchbend binding is inert on the wheel-less one");
+
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc);
+
+  h.evalOrDie("(glow.cue.define :a {:effects []})");
+  h.evalOrDie("(glow.bind.pad 60 :flash :a)");      // both controllers have this pad
+  h.evalOrDie("(glow.bind.pitchbend :param :hue)");  // only a controller with a wheel sends this
+
+  // Controller WITHOUT a wheel: only sends the pad. Works fine; the wheel
+  // binding simply never fires because nothing calls handle() with a
+  // PitchBend event for it.
+  h.live.handle({ControlType::Button, 60, 0, true, 0.0f}, 0.0f);
+  uint16_t cueA;
+  CHECK(h.api.cueIdForName("a", cueA));
+  CHECK(h.show.isActive(cueA));
+  CHECK(std::fabs(h.evalNumber("(glow.param.get :hue)")) < 1e-6);  // untouched
+
+  // Controller WITH a wheel: same bindings, wheel event now fires.
+  ControlEvent ev;
+  uint8_t msg[] = {0xE0, 0x7F, 0x7F};
+  CHECK(parseMidi(msg, 3, ev));
+  h.live.handle(ev, 1.0f);
+  CHECK(std::fabs(h.evalNumber("(glow.param.get :hue)") - 1.0) < 1e-3);
+}
+
 int main() {
   test_cue_define_and_go_activates_showcontroller_cue();
   test_cue_release_deactivates();
@@ -859,6 +1007,16 @@ int main() {
   test_bind_pad_xy_resolves_grid_and_binds_packed_id();
   test_bind_pad_xy_out_of_range_is_a_no_op();
   test_bind_pad_xy_no_led_feedback_is_a_no_op();
+
+  test_bind_pitchbend_param_drives_glow_param_get();
+  test_bind_pressure_cue_level_holds_cue();
+  test_bind_fader_cue_level_and_param();
+  test_bind_program_scene_selector();
+  test_bind_program_only_scene_keyword_valid();
+  test_bind_pitchbend_unknown_action_errors();
+  test_bind_pressure_unknown_cue_errors();
+  test_param_get_never_bound_is_zero();
+  test_two_controllers_pitchbend_inert_without_wheel();
 
   if (g_failCount == 0) {
     printf("\nAll tests passed.\n");

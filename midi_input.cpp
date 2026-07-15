@@ -50,14 +50,17 @@ static int g_rxGpio = -1;
 static int g_txGpio = -1;
 static volatile bool g_uartReady = false;  // true once uart_driver_install succeeds
 static MidiByteReader g_reader;
+static const MidiControllerProfile* g_controllerProfile = nullptr;  // P1.1: INIT SYSEX source
 
 void midi_input_init(IControlEventQueue& queue, glow::IBeatEventQueue* beatQueue,
-                     int uartNum, int rxGpio, int txGpio) {
+                     int uartNum, int rxGpio, int txGpio,
+                     const MidiControllerProfile* controllerProfile) {
   g_queue = &queue;
   g_beatQueue = beatQueue;
   g_uartNum = uartNum;
   g_rxGpio = rxGpio;
   g_txGpio = txGpio;
+  g_controllerProfile = controllerProfile;
 }
 
 void midi_input_handle_byte(uint8_t byte) {
@@ -126,6 +129,18 @@ void midi_uart_task(void* /*ctx*/) {
 
   ESP_LOGI(TAG, "MIDI UART %d ready (rx=%d, tx=%d, 31250 baud)", g_uartNum, g_rxGpio, g_txGpio);
 
+  // P1.1: controller init handshake -- MIDI OUT is up now (g_uartReady),
+  // so this is the earliest point the loaded .mdef's INIT SYSEX blobs
+  // (mdef.h's MidiControllerProfile::initBlobs) can actually reach the
+  // wire. No-op if no controller is wired or it declared no INIT lines
+  // (sendControllerInit walks an initCount of 0 zero times). Runs once,
+  // here, before the RX read loop below -- never touches
+  // ShowController/LiveControl (see controller_init.h's header comment).
+  if (g_txGpio >= 0 && g_controllerProfile != nullptr) {
+    DeviceMidiOutput out;
+    sendControllerInit(*g_controllerProfile, out);
+  }
+
   uint8_t buf[32];
   while (true) {
     int n = uart_read_bytes(port, buf, sizeof(buf), pdMS_TO_TICKS(50));
@@ -141,8 +156,17 @@ void midi_output_send3(uint8_t status, uint8_t data1, uint8_t data2) {
   uart_write_bytes(static_cast<uart_port_t>(g_uartNum), reinterpret_cast<const char*>(msg), sizeof(msg));
 }
 
+void midi_output_send_raw(const uint8_t* bytes, size_t len) {
+  if (g_txGpio < 0 || !g_uartReady || bytes == nullptr || len == 0) return;
+  uart_write_bytes(static_cast<uart_port_t>(g_uartNum), reinterpret_cast<const char*>(bytes), len);
+}
+
 void DeviceMidiOutput::send3(uint8_t status, uint8_t data1, uint8_t data2) {
   midi_output_send3(status, data1, data2);
+}
+
+void DeviceMidiOutput::sendRaw(const uint8_t* bytes, size_t len) {
+  midi_output_send_raw(bytes, len);
 }
 
 #endif

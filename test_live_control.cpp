@@ -626,6 +626,211 @@ void test_channel_agnostic_binding_unaffected_by_profile() {
   delete effects[0];
 }
 
+// ============================================================================
+// P1.2: generic continuous/discrete bindings (CueLevel, ParamSet, PitchBend,
+// Pressure, Program-as-scene-selector)
+// ============================================================================
+
+void test_pitchbend_bound_to_param() {
+  TEST("PitchBend -> ParamSet: the wheel drives a named parameter");
+
+  ShowController ctrl;
+  LiveControl live(ctrl);
+  uint16_t hueSlot = live.internParam("hue");
+  live.bindPitchBend(ActionKind::ParamSet, hueSlot);
+
+  live.handle({ControlType::PitchBend, 0, 0, false, 0.75f}, 0.0f);
+  CHECK_NEAR(live.paramValue("hue"), 0.75f);
+
+  // Center bend (0.5) updates it again -- last write wins, same as Master.
+  live.handle({ControlType::PitchBend, 0, 0, false, 0.5f}, 0.0f);
+  CHECK_NEAR(live.paramValue("hue"), 0.5f);
+}
+
+void test_pressure_bound_to_cue_level() {
+  TEST("Channel Pressure -> CueLevel: holds a cue at the pressure's level");
+
+  ShowController ctrl;
+  std::vector<IEffect*> effects;
+  effects.push_back(new ConstCapEffect{1, Capability::Dimmer, 1.0f});
+  uint16_t cueId = ctrl.addCue(effects, 0.0f, 0.0f, 0, 0.0f);
+
+  LiveControl live(ctrl);
+  live.bindPressure(ActionKind::CueLevel, cueId);
+
+  // Channel Pressure (0xDn) parses to Aftertouch id=0, exactly what
+  // bindPressure binds under.
+  ControlEvent ev;
+  uint8_t msg[] = {0xD3, 90};  // channel 3, pressure ~0.71
+  CHECK(parseMidi(msg, 2, ev));
+  live.handle(ev, 0.0f);
+  CHECK(ctrl.isActive(cueId));
+
+  std::vector<CapIntent> caps;
+  std::vector<AimIntent> aims;
+  ctrl.evaluate(0.0f, caps, aims);
+  CHECK(caps.size() == 1);
+  CHECK_NEAR(caps[0].norm01, 90.0f / 127.0f);
+
+  delete effects[0];
+}
+
+void test_fader_bound_to_cue_level_and_param() {
+  TEST("Fader -> CueLevel / ParamSet: the same continuous path as PitchBend/Pressure");
+
+  ShowController ctrl;
+  std::vector<IEffect*> effects;
+  effects.push_back(new ConstCapEffect{1, Capability::Dimmer, 1.0f});
+  uint16_t cueId = ctrl.addCue(effects, 0.0f, 0.0f, 0, 0.0f);
+
+  LiveControl live(ctrl);
+  live.bindFader(10, ActionKind::CueLevel, cueId);
+  uint16_t paramSlot = live.internParam("chorus-depth");
+  live.bindFader(11, ActionKind::ParamSet, paramSlot);
+
+  live.handle({ControlType::Fader, 10, 0, false, 0.4f}, 0.0f);
+  CHECK(ctrl.isActive(cueId));
+  std::vector<CapIntent> caps;
+  std::vector<AimIntent> aims;
+  ctrl.evaluate(0.0f, caps, aims);
+  CHECK_NEAR(caps[0].norm01, 0.4f);
+
+  live.handle({ControlType::Fader, 11, 0, false, 0.6f}, 0.0f);
+  CHECK_NEAR(live.paramValue("chorus-depth"), 0.6f);
+
+  delete effects[0];
+}
+
+void test_param_value_unbound_name_is_zero() {
+  TEST("paramValue on a name never bound to -- 0.0f, not an error");
+
+  ShowController ctrl;
+  LiveControl live(ctrl);
+  CHECK_NEAR(live.paramValue("never-bound"), 0.0f);
+}
+
+void test_intern_param_idempotent() {
+  TEST("internParam: same name -> same slot, two sources drive one param");
+
+  ShowController ctrl;
+  LiveControl live(ctrl);
+  uint16_t a = live.internParam("hue");
+  uint16_t b = live.internParam("hue");
+  CHECK(a == b);
+
+  live.bindPitchBend(ActionKind::ParamSet, a);
+  live.bindFader(20, ActionKind::ParamSet, b);
+
+  live.handle({ControlType::PitchBend, 0, 0, false, 0.3f}, 0.0f);
+  CHECK_NEAR(live.paramValue("hue"), 0.3f);
+  live.handle({ControlType::Fader, 20, 0, false, 0.8f}, 0.0f);
+  CHECK_NEAR(live.paramValue("hue"), 0.8f);  // last write wins
+}
+
+void test_program_change_selects_scene_by_number() {
+  TEST("Program N -> scene N selected (glow.bind.program's whole point)");
+
+  ShowController ctrl;
+  std::vector<IEffect*> effectsA;
+  effectsA.push_back(new ConstCapEffect{1, Capability::Dimmer, 1.0f});
+  std::vector<IEffect*> effectsB;
+  effectsB.push_back(new ConstCapEffect{2, Capability::Dimmer, 1.0f});
+  uint16_t cueA = ctrl.addCue(effectsA, 0.0f, 0.0f, 0, 0.0f);
+  uint16_t cueB = ctrl.addCue(effectsB, 0.0f, 0.0f, 0, 0.0f);
+  uint16_t sceneA = ctrl.addScene({cueA});
+  uint16_t sceneB = ctrl.addScene({cueB});
+  CHECK(sceneA == 0 && sceneB == 1);  // program numbers below match these directly
+
+  LiveControl live(ctrl);
+  live.bindProgram();
+
+  ControlEvent ev;
+  uint8_t msg[] = {0xC1, static_cast<uint8_t>(sceneB)};  // Program Change, channel 1, program = sceneB
+  CHECK(parseMidi(msg, 2, ev));
+  live.handle(ev, 0.0f);
+  CHECK(ctrl.isActive(cueB));
+  CHECK(!ctrl.isActive(cueA));
+
+  delete effectsA[0];
+  delete effectsB[0];
+}
+
+void test_program_change_noop_when_not_bound() {
+  TEST("Program Change with no bindProgram() call -- silent no-op");
+
+  ShowController ctrl;
+  std::vector<IEffect*> effects;
+  effects.push_back(new ConstCapEffect{1, Capability::Dimmer, 1.0f});
+  uint16_t cueId = ctrl.addCue(effects, 0.0f, 0.0f, 0, 0.0f);
+  uint16_t sceneId = ctrl.addScene({cueId});
+
+  LiveControl live(ctrl);  // bindProgram() never called
+
+  ControlEvent ev;
+  uint8_t msg[] = {0xC0, static_cast<uint8_t>(sceneId)};
+  CHECK(parseMidi(msg, 2, ev));
+  live.handle(ev, 0.0f);
+  CHECK(!ctrl.isActive(cueId));  // nothing happened
+
+  delete effects[0];
+}
+
+void test_clear_resets_params_and_program_binding() {
+  TEST("clear(): resets ParamSet slots and disables the Program->scene selector");
+
+  ShowController ctrl;
+  std::vector<IEffect*> effects;
+  effects.push_back(new ConstCapEffect{1, Capability::Dimmer, 1.0f});
+  uint16_t cueId = ctrl.addCue(effects, 0.0f, 0.0f, 0, 0.0f);
+  uint16_t sceneId = ctrl.addScene({cueId});
+
+  LiveControl live(ctrl);
+  uint16_t hueSlot = live.internParam("hue");
+  live.bindPitchBend(ActionKind::ParamSet, hueSlot);
+  live.handle({ControlType::PitchBend, 0, 0, false, 0.9f}, 0.0f);
+  CHECK_NEAR(live.paramValue("hue"), 0.9f);
+
+  live.bindProgram();
+  live.clear();
+
+  CHECK_NEAR(live.paramValue("hue"), 0.0f);  // slot gone, reads back as unbound
+
+  ControlEvent ev;
+  uint8_t msg[] = {0xC0, static_cast<uint8_t>(sceneId)};
+  CHECK(parseMidi(msg, 2, ev));
+  live.handle(ev, 0.0f);
+  CHECK(!ctrl.isActive(cueId));  // Program->scene selector was cleared too
+
+  delete effects[0];
+}
+
+// The controller-agnostic regression test (P1.2's whole point): the SAME
+// show.fnl-shaped bindings run against two controllers, one that sends a
+// pitch wheel and one that never does. The wheel binding is simply inert
+// on the controller without one -- no crash, no special case, no
+// per-controller branch anywhere in this dispatch.
+void test_two_controllers_same_show_wheel_only_fires_on_one() {
+  TEST("Two controllers, same show.fnl: the wheel binding no-ops on the one without a wheel");
+
+  ShowController ctrl;
+  LiveControl live(ctrl);
+  uint16_t hueSlot = live.internParam("hue");
+  live.bindPitchBend(ActionKind::ParamSet, hueSlot);   // "any controller with a wheel"
+  live.bindFader(7, ActionKind::Master);                // both controllers have this fader
+
+  // Controller WITHOUT a wheel: it simply never emits PitchBend events.
+  // Its fader still works fine.
+  live.handle({ControlType::Fader, 7, 0, false, 0.4f}, 0.0f);
+  CHECK_NEAR(live.masterLevel(), 0.4f);
+  CHECK_NEAR(live.paramValue("hue"), 0.0f);  // never touched -- still the default
+
+  // Controller WITH a wheel: same binding table, now the wheel binding
+  // actually fires because this controller's transport produces the event.
+  live.handle({ControlType::PitchBend, 0, 0, false, 0.66f}, 1.0f);
+  CHECK_NEAR(live.paramValue("hue"), 0.66f);
+  CHECK_NEAR(live.masterLevel(), 0.4f);  // untouched by the wheel event
+}
+
 int main() {
   test_cue_flash();
   test_cue_toggle();
@@ -653,6 +858,16 @@ int main() {
   test_midi_button_value_zeroed();
   test_channel_significant_pads_fire_independently();
   test_channel_agnostic_binding_unaffected_by_profile();
+
+  test_pitchbend_bound_to_param();
+  test_pressure_bound_to_cue_level();
+  test_fader_bound_to_cue_level_and_param();
+  test_param_value_unbound_name_is_zero();
+  test_intern_param_idempotent();
+  test_program_change_selects_scene_by_number();
+  test_program_change_noop_when_not_bound();
+  test_clear_resets_params_and_program_binding();
+  test_two_controllers_same_show_wheel_only_fires_on_one();
 
   if (g_failCount == 0) {
     printf("\nAll tests passed.\n");

@@ -64,6 +64,25 @@ static bool                  g_hasMaster    = false;
 
 static httpd_handle_t g_server = nullptr;
 
+// P1.3: see web_input.h's header comment on web_input_note_new_client --
+// a plain volatile flag, set from the httpd (WS) task on a new connection,
+// consumed (read + clear) from the render task once per frame. Not a
+// mutex-guarded structure like g_wsClientFds above: a torn read/write
+// isn't possible on a single bool, and the worst case from a race (two
+// connects landing in the same frame window) is one client's forced
+// broadcast waiting one extra ~23ms frame -- not a correctness issue.
+static volatile bool g_stateBroadcastForced = false;
+
+void web_input_note_new_client() {
+  g_stateBroadcastForced = true;
+}
+
+bool web_input_take_forced_state_broadcast() {
+  bool v = g_stateBroadcastForced;
+  g_stateBroadcastForced = false;
+  return v;
+}
+
 // --- WS client tracking ----------------------------------------------------
 //
 // A tiny fixed-size fd list, written by the httpd (WS) task on connect and
@@ -151,11 +170,12 @@ size_t web_input_build_config(char* buf, size_t bufLen) {
                          buf, bufLen);
 }
 
-// Build a `state` message into `buf` listing currently-active cue ids.
-// `activeIds` may be nullptr if nActive == 0.
-size_t web_input_build_state(const uint16_t* activeIds, size_t nActive,
+// Build a `state` message into `buf` listing currently-active cue ids plus
+// the current master level (P1.3). `activeIds` may be nullptr if
+// nActive == 0.
+size_t web_input_build_state(const uint16_t* activeIds, size_t nActive, float masterLevel,
                              char* buf, size_t bufLen) {
-  return buildStateJson(activeIds, nActive, buf, bufLen);
+  return buildStateJson(activeIds, nActive, masterLevel, buf, bufLen);
 }
 
 // WebInputAction is declared in web_input.h.
@@ -318,6 +338,12 @@ static esp_err_t ws_handler(httpd_req_t* req) {
     // esp-idf's documented way to detect "a client just connected".
     int fd = httpd_req_to_sockfd(req);
     wsClientAdd(fd);
+    // P1.3: this client has no idea which cues are active or what the
+    // master level is yet -- config alone (sent below) doesn't carry that.
+    // Force the render task's next state check to broadcast unconditionally
+    // so this client starts correct, not just eventually-correct on the
+    // next unrelated change (see web_input_note_new_client's comment).
+    web_input_note_new_client();
 
     static char cfgBuf[kWsBufCap];
     size_t n = web_input_build_config(cfgBuf, sizeof(cfgBuf));
