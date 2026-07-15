@@ -410,3 +410,98 @@ full writeup and the compiler's validation/overlap-detection rules.
   (Fennel, live-editable, no file format; see README_LIVE_CONTROL.md).
 - Bidirectional display feedback (text on a controller's own LCD).
 - MIDI 2.0 / MPE.
+
+# CFG1 Device Config Format
+
+## Overview
+
+CFG1 is a fixed-size binary blob carrying the device configuration that used to live only in `menuconfig`: WiFi SSID/password, DMX GPIOs, the status LED GPIO, the Art-Net fallback destination, and whether the USB-MIDI host transport is enabled. It's written by the browser flasher (or the device console's reconfigure page) into a raw `devcfg` data partition (`partitions.csv`, subtype `0x40`) and read once at boot -- the same "opaque blob in a raw partition, no filesystem" pattern `SHW1` already uses for the `show` partition, for the same reason: the browser can write raw bytes at a known flash offset, but can't easily construct a filesystem image, and doesn't need to for one fixed-size struct.
+
+Unlike PFX1/MDF1 (compiled from a text grammar via `provision.cpp`), CFG1 has no text form -- it's just a fixed-field struct, encoded/decoded directly by both `device_config.cpp` (the device parser, also usable as an on-device encoder for the reconfigure page's `GET /devcfg`) and `web/shared/devcfg.js` (the browser's independent implementation, proven byte-identical against the C++ side via a committed golden blob -- see `web/shared/test-devcfg.mjs`).
+
+**Kconfig values are defaults, not truth.** A valid `devcfg` partition overrides every compiled-in `CONFIG_GLOW_*` default; an absent or corrupt one falls back to those defaults, so a dev build driven purely by `menuconfig` (no CFG1 ever flashed) behaves exactly as it did before this format existed. See `firmware/main/Kconfig.projbuild` and `main.cpp`'s `defaultDeviceConfigFromKconfig`.
+
+## Format Specification
+
+The format is little-endian throughout, like every other format in this document. Kept deliberately simple and padded rather than compact -- it's read once at boot, and the `devcfg` partition (4 KB) has plenty of room beyond the 150 bytes CFG1 v1 actually uses.
+
+### Header (8 bytes)
+
+| Offset | Size | Name     | Type    | Description |
+|--------|------|----------|---------|--------------|
+| 0      | 4    | magic    | uint8[] | ASCII "CFG1" |
+| 4      | 1    | version  | uint8   | Format version: 1 |
+| 5      | 1    | flags    | uint8   | bit0: usbMidiHost, bit1: skipWifi. Bits 2-7 reserved, parsed over but not validated (forward-compatible) |
+| 6      | 2    | reserved | uint16  | Must be 0 on encode; parsed over, not validated, on decode |
+
+### Network (102 bytes, offset 8)
+
+| Offset | Size | Name             | Type    | Description |
+|--------|------|------------------|---------|--------------|
+| 8      | 32   | wifiSsid         | uint8[] | UTF-8, NUL-padded (not necessarily NUL-terminated if it fills all 32 bytes) |
+| 40     | 64   | wifiPass         | uint8[] | UTF-8, NUL-padded |
+| 104    | 4    | artnetFallbackIp | uint32  | Packed host-byte-order IPv4 (same convention as the old `GLOW_ARTNET_BRIDGE_IP` Kconfig value, e.g. `192.168.1.50` => `(192<<24)\|(168<<16)\|(1<<8)\|50`). **0 = broadcast.** See "The `artnetFallbackIp` field" below for what this value means and does *not* mean. |
+| 108    | 2    | artnetPort       | uint16  | Art-Net UDP port |
+
+### Pins (4 bytes, offset 110)
+
+| Offset | Size | Name       | Type  | Description |
+|--------|------|------------|-------|--------------|
+| 110    | 1    | dmxTxGpio  | uint8 | RS485 DI |
+| 111    | 1    | dmxRxGpio  | uint8 | RS485 RO |
+| 112    | 1    | dmxRtsGpio | uint8 | RS485 DE/RE (tied together) |
+| 113    | 1    | ledGpio    | uint8 | Status LED |
+
+### Tail (36 bytes, offset 114)
+
+| Offset | Size | Name      | Type    | Description |
+|--------|------|-----------|---------|--------------|
+| 114    | 32   | reserved2 | uint8[] | Must be 0. Room for the next few options -- a future field can be added here with **no version bump needed**, since existing parsers already skip over it as padding. |
+| 146    | 4    | crc32     | uint32  | CRC-32 (IEEE 802.3 / zlib / PNG: poly `0xEDB88320` reflected, init `0xFFFFFFFF`, final XOR `0xFFFFFFFF`) over every byte from offset 0 up to (not including) this field |
+
+**Total blob size: 150 bytes** (`DEVCFG_BLOB_SIZE`).
+
+## The `artnetFallbackIp` Field
+
+This field's name and scope are deliberate, and worth getting right now because a future feature (Wave 3) will collide with it otherwise.
+
+The obvious name -- `artnetIp`, "the bridge IP" -- would collide with Wave 3, which moves per-universe Art-Net routing into the `.show` itself (a `(IP, wire-universe)` table, so different universes can go to different Art-Net nodes). If this field meant "the" Art-Net destination, that meaning would have to be walked back or overloaded the moment Wave 3 landed.
+
+So it's defined, from the start, as: **the destination used for Art-Net universes the loaded `.show` does not route explicitly.** `0` means broadcast (`255.255.255.255`). Precedence, stated once and for all:
+
+```
+explicit route in the .show   >   CFG1 artnetFallbackIp   >   broadcast
+```
+
+Today, with no per-universe routing table in `.show` yet, `artnetFallbackIp` is the *only* routing there is -- every Art-Net universe goes to it (or broadcasts, if 0). That's not a contradiction of the precedence rule above; it's just that the first tier of it (explicit `.show` routes) is empty until Wave 3 ships. When it does, this field's meaning does not change at all -- only its role narrows to "what happens for the universes nobody explicitly routed," which is exactly what it was already defined to mean.
+
+## Validation Rules
+
+`parseDeviceConfig` (`device_config.cpp`) enforces (same strict, never-reads-out-of-bounds security-boundary contract as `parseProfile`/`parseMidiController`/`loadShow`):
+
+1. Buffer must be at least `DEVCFG_BLOB_SIZE` (150) bytes.
+2. Magic must be `"CFG1"`. This alone rejects an erased/all-`0xFF` partition (the common case on a fresh, never-configured board) and a half-written one, long before any field -- a GPIO byte of `0xFF`/255, for instance -- would ever be read as a real value.
+3. Version must be 1 (the only version defined today).
+4. The stored `crc32` must equal the CRC computed over bytes `[0, 146)`. This catches any single flipped bit anywhere in the blob, including a magic/version that happens to survive corruption elsewhere in the payload.
+
+If any rule is violated, the parser returns `false` and does not modify the output struct. **A bad CRC is not a partial config with some fields honored -- it's a total rejection, and the caller falls back to the compiled-in Kconfig defaults.** This is reported loudly, not silently: `main.cpp` logs both a human-readable line (serial) and, under `CONFIG_GLOW_SELFTEST`, a structured `GLOW-TEST: cfg source=devcfg|defaults ...` telemetry line the QEMU/HIL harnesses assert on. Neither line ever includes the WiFi password.
+
+## Boot Ordering
+
+`devcfg` is read at the very start of `app_main`, before the status LED initializes (needs `ledGpio`) and before DMX bring-up (needs the three `dmx*Gpio` fields) -- see `main.cpp`'s header comment on this. The read is local flash only (`esp_partition_read`); it never depends on, or waits for, the network. WiFi bring-up itself stays at the very end of `app_main`, unchanged from before CFG1 existed -- a WiFi stall must never block the lights.
+
+`usbMidiHost` and `skipWifi` are runtime switches, not compile-time gates: the USB-MIDI driver and every WiFi-dependent transport are compiled in unconditionally (mirrored by `CONFIG_GLOW_USB_MIDI_HOST`, default on, purely for people who want a smaller image with the driver removed entirely), and `main.cpp` checks `cfg.usbMidiHost`/`cfg.skipWifi` at the point each would otherwise start. This is what makes both a flash-time checkbox instead of a rebuild.
+
+## Reconfiguring Without Reflashing
+
+The device console exposes `GET /devcfg` (returns the currently-effective config -- whichever source won at boot, devcfg or defaults) and `POST /devcfg` (validates with the exact same `parseDeviceConfig` the boot-time loader uses, writes the partition only if that succeeds, then reboots). A malformed POST is rejected with `400` before any flash write happens -- the CRC-verified fallback-to-defaults path above is the safety net for the case this can't catch (a well-formed config for the wrong network): a corrupt or merely-wrong `devcfg` still boots on Kconfig defaults next time, not a brick.
+
+## Security
+
+The WiFi password sits in plaintext in the `devcfg` partition, exactly like every other field -- anyone with physical access to the board and `esptool` can read it out of flash directly. This is a deliberate, documented tradeoff for a hobby ESP32 project, not an oversight: flash/NVS encryption would close it, but is out of scope here (see the README). If this project is ever adapted into a shipping product, that's the point to revisit.
+
+## Out of Scope
+
+- Flash/NVS encryption (see "Security" above).
+- Per-universe Art-Net routing (the `.show`'s own `(IP, wire-universe)` table) -- that's Wave 3. `artnetFallbackIp` only ever defines the fallback, by design (see above).
+- Fleet provisioning (serial numbers, device management).

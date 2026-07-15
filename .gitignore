@@ -84,6 +84,11 @@ test_*
 fdef_check
 !fdef_check.cpp
 
+# devcfg_check: host CLI built from devcfg_check.cpp, used by
+# web/shared/test-devcfg.mjs as its round-trip oracle.
+devcfg_check
+!devcfg_check.cpp
+
 # WASM build artifacts (rebuilt in CI, not committed)
 web/provision-wasm/build/
 web/provision-wasm/provision-wasm.js

@@ -171,16 +171,19 @@ named ranges* onto PFX2. Pick the mode, review the channel table, edit if needed
 ## 5. Hardware
 
 - **MCU**: ESP32-S3 (dual-core, hardware FPU, PSRAM — the Lua VM lives there).
-- **DMX out**: RS-485 transceiver (e.g. MAX3485). Default GPIOs: TX 17, RX 18, DE/RTS 8.
+- **DMX out**: RS-485 transceiver (e.g. MAX3485). Default GPIOs: TX 17, RX 18, DE/RTS 8 —
+  all four (plus the status LED GPIO) are flash-time configurable now, see §6.
 - **Matrices**: Art-Net over WiFi → an Art-Net→DMX bridge.
 - **Inputs**: MIDI (DIN/UART, with MIDI OUT for LED feedback — see `.mdef`,
   FORMAT.md), OSC (UDP), a web console (HTTP + WebSocket) served from the
-  device, DJ-Link, and USB-MIDI host (`usb_midi_input.cpp`, opt-in via
-  `CONFIG_GLOW_USB_MIDI_HOST`, off by default — see README_LIVE_CONTROL.md's
+  device, DJ-Link, and USB-MIDI host (`usb_midi_input.cpp`). The driver
+  compiles in by default (`CONFIG_GLOW_USB_MIDI_HOST`) but only actually
+  starts if enabled via the flasher's checkbox or the device console's
+  reconfigure page (off by default — see README_LIVE_CONTROL.md's
   "Out of Scope"). USB-MIDI host needs a board respin for VBUS (the ESP32
   must supply 5V to the controller); a USB-host-to-DIN adapter works today
   with no hardware change if you'd rather skip that.
-- **Status LED**: GPIO 2.
+- **Status LED**: GPIO 2 by default (flash-time configurable, see §6).
 
 Render task pinned to core 1; WiFi/lwIP on core 0, so network work never jitters DMX timing.
 
@@ -194,21 +197,42 @@ Render task pinned to core 1; WiFi/lwIP on core 0, so network work never jitters
 `scripts/vendor_fennel.sh` — the repo ships no prebuilt file). `esp_dmx` and LittleFS come
 from the IDF Component Manager.
 
-**From the browser (easiest):** open the provisioner, plug in over USB, hit **Flash** — it
-writes bootloader, partition table, app, and your compiled patch. Chrome/Edge (Web Serial).
+**From the browser (easiest, no toolchain):** open the provisioner, fill in the device config
+form (WiFi SSID/password or "no WiFi", DMX/LED GPIOs — pre-filled with sane defaults, Art-Net
+fallback destination, USB-MIDI on/off), plug in over USB, hit **Flash** — it writes bootloader,
+partition table, app, your compiled patch, and that config (as a `CFG1` blob — see FORMAT.md).
+Chrome/Edge (Web Serial). Reflashing remembers your last config (`localStorage`), and the
+device console has its own reconfigure page (`/devcfg.html`) for changing WiFi etc. without a
+cable afterward.
 
 **From the CLI:**
 ```sh
 . $IDF_PATH/export.sh && cd firmware
 idf.py set-target esp32s3
-idf.py menuconfig                    # DMX GPIOs, LED, WiFi, Art-Net bridge IP
+idf.py menuconfig                    # DMX GPIOs, LED, WiFi, Art-Net bridge IP -- DEFAULTS only,
+                                      # see below; a flashed CFG1 blob overrides all of it
 ./scripts/build_sample_bundle.sh     # samples/demo.show → SHW1 bundle
 idf.py -p /dev/ttyUSB0 flash monitor
 ```
 The firmware is **not one binary**: bootloader (`0x0` — on the S3, not 0x1000), partition
-table (`0x8000`), otadata (`0x10000`), app (`0x20000`), and the show bundle. `flasher_args.json`
-carries the exact mapping; from `firmware/build/`: `esptool.py write_flash @flash_args`.
-On a fresh or wedged board, `erase_flash` first.
+table (`0x8000`), otadata (`0x10000`), app (`0x20000`), the show bundle, and the `devcfg`
+blob. `flasher_args.json` carries the exact mapping; from `firmware/build/`:
+`esptool.py write_flash @flash_args`. On a fresh or wedged board, `erase_flash` first.
+
+**`menuconfig` values are defaults, not truth.** WiFi SSID/password, DMX/LED GPIOs, the
+Art-Net fallback destination, and USB-MIDI-enabled all move into a small binary config blob
+(`CFG1`, see FORMAT.md) written by the browser at flash time — a `devcfg` raw partition, read
+once at boot, the same "opaque blob, no filesystem" pattern the show bundle already uses. A
+missing or corrupt `devcfg` (a blank board, or one flashed before this existed) falls back to
+whatever `menuconfig` set, so a CLI-only workflow with no browser involved still works exactly
+as before. This is what makes the browser flasher useful to someone who isn't you: it no
+longer ships your WiFi credentials compiled into the binary.
+
+**Security note:** the WiFi password sits in plaintext in the `devcfg` partition, like every
+other field — anyone with physical access to the board and `esptool` can read it out of flash.
+This is a deliberate tradeoff for a hobby project, not an oversight (see FORMAT.md's CFG1
+section); flash/NVS encryption would close it and is the right answer if this ever becomes a
+shipping product, but is out of scope here.
 
 ---
 
