@@ -486,6 +486,16 @@ test-console:
 	node scripts/test-ws-client.mjs
 	node web/console/test-reconcile.mjs
 
+# Multi-show project workspace (provisioner "Project" data model/storage/
+# export-import/device-sync -- see README_PROVISIONER.md). Pure JS, no C++
+# dependency, same "needs node" reason as test-devcfg/test-importers above.
+.PHONY: test-project-workspace
+test-project-workspace:
+	node web/shared/test-project-model.mjs
+	node web/shared/test-project-store.mjs
+	node web/shared/test-project-zip.mjs
+	node web/shared/test-device-sync.mjs
+
 # Clean build artifacts
 # NOTE: every *_OBJECTS/*_TARGET pair defined above must be listed here.
 # A target left out of `clean` keeps its stale .o files across a `make

@@ -30,6 +30,16 @@ web/
       provision-wasm.js
       provision-wasm.wasm
   shared/
+    project-model.js                # Project data model: patch + fixtures/controllers + many shows (see "Project workspace" below)
+    project-store.js                # persistence orchestration over a KV adapter (create/list/rename/duplicate/delete, migration, seeding)
+    kv-memory-adapter.js            # in-memory KV adapter (tests, and the no-IndexedDB fallback)
+    kv-indexeddb-adapter.js         # browser IndexedDB KV adapter
+    project-zip.js                  # export/import a Project to/from a portable .zip
+    zip-writer.js                   # dependency-free ZIP writer (pairs with importers/zip-lite.js's reader)
+    device-sync.js                  # push/pull .fnl shows to a live rig over the console's WebSocket script CRUD
+    ws-client.js                    # WsClient -- copy of web/console/ws-client.js for the provisioner's device-sync panel
+    test-project-model.mjs, test-project-store.mjs,
+    test-project-zip.mjs, test-device-sync.mjs   # `make test-project-workspace`
     importers/                     # QLC+/OFL/GDTF -> .fdef (see README_PROVISION.md)
       xml-lite.js, zip-lite.js     # dependency-free XML/ZIP parsing
       model.js                     # intermediate model + emitFdef()
@@ -50,23 +60,71 @@ port compiles the same files with the same `-Wall -Wextra -Werror` flags.
 2. `build-wasm.sh editor` compiles `provision.cpp` + deps + `wasm-glue.cpp`
    (embind bindings) to `provision-wasm.{js,wasm}`. The `.js` is an ES
    module that auto-loads the `.wasm`.
-3. `provisioner-static/app.js` imports the WASM module, manages a workspace
-   (one `.show` + a library of `.fdef` files), and renders a three-pane
-   editor: file sidebar / textarea / live preview+diagnostics.
+3. `provisioner-static/app.js` imports the WASM module, manages the active
+   *Project* (one `.show` patch + a `.fdef`/`.mdef` library + many `.fnl`
+   shows -- see "Project workspace" below), and renders a four-pane editor:
+   project file tree / tabs+editor / live preview+diagnostics.
 
 ## Editor features
 
-- **File sidebar**: one `.show` file plus a library of `.fdef` files.
-  Click to switch, double-click to rename, hover for copy/download/delete.
+- **Project tree**: the patch (`.show` + fixture library), the `.mdef`
+  controller library, and the `.fnl` show library, all in one tree.
+  Click to open a tab, hover for copy/download/delete, + to add.
+- **Tabbed editor**: several files open at once; a dirty dot marks a tab
+  with changes not yet autosaved.
 - **Live preview**: parsed structure of the current file (fixture caps,
-  show universes/fixtures/matrices) updates as you type. `.fdef` files
-  re-parse on a 250ms debounce; the `.show` file compiles on demand.
-- **Diagnostics tab**: per-file ok/error status with details.
+  show universes/fixtures/matrices) updates as you type. `.fdef`/`.mdef`
+  files re-parse on a 250ms debounce; the `.show` file compiles on demand.
+- **Diagnostics tab**: per-file ok/error status with details, across the
+  whole project (patch, every fixture/controller, every show).
 - **Bundle size meter**: shows the compiled SHW1 byte size after Compile.
-- **Download**: `.fdef` text, `.show` text, or compiled `.shw1` binary.
+- **Download**: any file's text, or the compiled `.shw1` binary.
 - **Copy-to-clipboard** for any file's text.
-- **Drag-drop import**: drop `.fdef` / `.show` files onto the window.
+- **Drag-drop import**: drop `.fdef`/`.mdef`/`.show`/`.fnl` files, or a
+  whole project `.zip`, onto the window.
 - **IDE-dark theme** (VS Code-like, `#1e1e1e` background).
+
+## Project workspace
+
+A **Project** is the unit of portability: one patch (`.show` + a `.fdef`
+library), a `.mdef` controller library, and *many* `.fnl` shows -- a boot
+show, per-gig shows, experiments -- with one of them explicitly marked as
+the show that boots on the rig (the ★ in the tree). See
+`web/shared/project-model.js` for the exact shape and every CRUD operation
+(add/rename/delete/duplicate a show/fixture/controller, the boot marker,
+renaming/duplicating the whole project).
+
+**Storage.** The active project autosaves (500ms after the last edit) to
+IndexedDB via `web/shared/project-store.js` -- bigger than `localStorage`'s
+~5MB cap and survives more, but still browser-local and gone on a cache
+clear. The project switcher (topbar → project name) says so explicitly and
+always offers the real backup: **Export project (.zip)** and, in Chrome/
+Edge, **Save to folder** (File System Access API) map a project onto a
+`.zip` or a real directory you own; **Import project (.zip)** / **Open
+folder** bring one back. That export/import round trip is
+byte-identical -- wipe the browser, import the zip, everything is back
+(`web/shared/test-project-zip.mjs`). A project zip never contains CFG1 (the
+device's WiFi password): that's per-device, lives in its own `localStorage`
+key (`devcfg.js`), and `project-model.js`'s shape has no field for it at
+all, so there's nothing for the exporter to leak.
+
+Anyone who used this editor before the multi-project rewrite had their one
+in-memory workspace migrated into a project automatically on first load, no
+data lost (`project-store.js`'s `migrateLegacyIfNeeded`); a brand-new
+install seeds a small demo project instead so the tree isn't empty.
+
+**Device sync** (topbar → Device sync) connects the workspace to a *live*
+rig over the same `script_list`/`script_load`/`script_save` WebSocket
+protocol the device console's REPL/editor already uses
+(`README_WEB_CONSOLE.md`) -- develop a show here in the richer editor, push
+it live, jam on it at a gig, then pull back whatever you changed on the
+device. It never silently overwrites either side: `web/shared/device-sync.js`
+tracks the text both sides last agreed on and classifies each show as
+in-sync / safe-to-push / safe-to-pull / **conflict**, and a conflict always
+prompts ("device has a newer version of `boot.fnl` -- keep which?") rather
+than guessing. Only `.fnl` shows sync this way -- the patch (`.show` →
+`SHW1`) is a raw flashed partition, so it only ever goes through **Flash
+device**, never this channel.
 - **Fixture importer**: drop a manufacturer's QLC+ `.qxf`, GDTF `.gdtf`, or
   Open Fixture Library `.json` file (or paste a GitHub URL to one) — see
   "Fixture importer" below.
@@ -173,10 +231,9 @@ clean workaround. So this half of the feature is deliberately **offline
 authoring + compile-check + bake-in**, not a live connection; see
 `README_WEB_CONSOLE.md` for the live REPL half.
 
-A "Show script" entry (`boot.fnl`) sits in the sidebar alongside the
-`.show`/`.fdef` files, using the same shared CodeMirror component as the
-device console (`web/shared/fennel-editor.js` — bracket matching,
-auto-close, Parinfer, Clojure-mode highlighting). Three pieces:
+Every `.fnl` show in the project tree gets the same shared CodeMirror
+component as the device console (`web/shared/fennel-editor.js` — bracket
+matching, auto-close, Parinfer, Clojure-mode highlighting). Three pieces:
 
 1. **Author offline.** Plain text editing, no device needed; Save/
    Download/Copy work the same as the other file types.
@@ -192,9 +249,11 @@ auto-close, Parinfer, Clojure-mode highlighting). Three pieces:
    nil), but **this is a syntax check, not a dry run**: argument types,
    fixture ids, and anything inside a function that's never called at the
    top level aren't checked. The UI says so.
-3. **Bake into the flash image.** The Flash modal's "Bake boot.fnl into
-   the scripts partition" checkbox calls `boot-image.js`'s
-   `buildScriptsImage`, which drives `web/vendor/littlefs-image.wasm` — the
+3. **Bake into the flash image.** The Flash modal's "Bake &lt;show&gt; into
+   the scripts partition" checkbox takes whichever show is marked ★ boot in
+   the tree (any project can have many `.fnl` shows; exactly one is
+   flashed) and calls `boot-image.js`'s `buildScriptsImage`, which drives
+   `web/vendor/littlefs-image.wasm` — the
    *real* upstream littlefs C library, pinned to the exact commit
    `joltwallet/littlefs` vendors (firmware's LittleFS component), compiled
    freestanding to wasm32 with clang+wasm-ld (no Emscripten, no libc; see
@@ -209,6 +268,9 @@ auto-close, Parinfer, Clojure-mode highlighting). Three pieces:
 
 One page: author patch → author show → flash → lights on.
 
-Scope note: baking only writes `boot.fnl`. Additional scripts saved later
-via `glow.save`/the console's Script tab live alongside it on the same
-LittleFS partition (this bake step doesn't touch or know about them).
+Scope note: baking only writes the boot-marked show's content, always
+under the device's `boot.fnl` filename regardless of what it's called in
+the project. Additional scripts saved later via `glow.save`/the console's
+Script tab (or pushed live via Device sync, above) live alongside it on
+the same LittleFS partition -- this bake step doesn't touch or know about
+them.
