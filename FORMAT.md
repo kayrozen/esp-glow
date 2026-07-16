@@ -432,8 +432,11 @@ to keep note and CC ids from colliding). `LiveControl::effectiveId`
 `ControlEvent` by consulting the wired `MidiControllerProfile`;
 `glow.bind.pad-xy` (`glow_lua_api.cpp`, via `resolvePadXY` in `mdef.h`) binds
 under the same packed id, so an incoming event and its binding always agree.
-A channel-agnostic range's id is never packed -- unpacked, exactly as before
-v2 existed.
+`glow.led.set-xy`/`glow.led.auto-xy` resolve the same `(col, row)` through the
+same `resolvePadXY` and feed the resulting channel into `LedFeedback`'s
+channel-aware `set`/`setAuto` overloads below, so a pad's binding and its LED
+feedback always land on the same channel too. A channel-agnostic range's id
+is never packed -- unpacked, exactly as before v2 existed.
 
 **⚠️ LED-output channel significance is independent of the PAD/FADER range's
 own flag, and can be narrower** (this is a real hardware quirk, not
@@ -450,12 +453,16 @@ otherwise they fall back to the ordinary `midiChannel`-derived nibble, same
 as the plain (channel-agnostic) overloads.
 
 `resolvePadXY(profile, col, row, &note, &channel)` (`mdef.h`/`mdef.cpp`) is
-`glow.bind.pad-xy`'s grid resolver: it walks a profile's PAD declarations in
-order, treats each **channel-significant, single-note** one (`noteFrom ==
-noteTo`) as one grid row, and maps `row` to the row-th such declaration and
-`col` to a channel within that row's span. This is exactly the shape
-`samples/apc40.mdef` declares (5 separate `PAD <note> CH 0 7` lines, one per
-scene row) -- it is a convention on top of the format, not a distinct field.
+the grid resolver shared by `glow.bind.pad-xy` and `glow.led.set-xy`/
+`glow.led.auto-xy`: it walks a profile's PAD declarations in order, treats
+each **channel-significant, single-note** one (`noteFrom == noteTo`) as one
+grid row, and maps `row` to the row-th such declaration and `col` to a
+channel within that row's span. This is exactly the shape `samples/apc40.mdef`
+declares (5 separate `PAD <note> CH 0 7` lines, one per scene row) -- it is a
+convention on top of the format, not a distinct field. `(col, row)` is the
+primary way every pad-addressing entry point (bind AND LED) names a pad; the
+raw note/CC forms (`glow.bind.pad`, `glow.led.set`/`glow.led.auto`) remain the
+escape hatch for controllers with no grid.
 
 ## Validation Rules
 

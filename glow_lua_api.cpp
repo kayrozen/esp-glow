@@ -842,6 +842,55 @@ int GlowLuaApi::l_led_auto(lua_State* L) {
   return 0;
 }
 
+// glow.led.set-xy / glow.led.auto-xy: the same (col, row) -> (note, channel)
+// resolution as glow.bind.pad-xy above, feeding the channel-aware
+// LedFeedback::set/setAuto overload so a channel-multiplexed pad (the
+// APC40's clip grid) lights on the pad's actual channel, not channel 0.
+// Same graceful-degradation contract as glow.bind.pad-xy: no LedFeedback
+// wired, or no PAD at (col, row) in this controller's .mdef, is a silent
+// no-op, not an error.
+
+int GlowLuaApi::l_led_set_xy(lua_State* L) {
+  GlowLuaApi& api = self(L);
+  lua_Integer col = luaL_checkinteger(L, 1);
+  lua_Integer row = luaL_checkinteger(L, 2);
+  const char* colorName = luaL_checkstring(L, 3);
+
+  if (api.ledFeedback_ == nullptr) return 0;  // no LED capability on this device -- no-op
+
+  uint8_t note, channel;
+  if (!resolvePadXY(api.ledFeedback_->profile(), static_cast<int>(col), static_cast<int>(row), note, channel)) {
+    return 0;
+  }
+
+  api.ledFeedback_->set(note, channel, colorName);
+  return 0;
+}
+
+int GlowLuaApi::l_led_auto_xy(lua_State* L) {
+  GlowLuaApi& api = self(L);
+  lua_Integer col = luaL_checkinteger(L, 1);
+  lua_Integer row = luaL_checkinteger(L, 2);
+  const char* cueName = luaL_checkstring(L, 3);
+  const char* activeColor = luaL_checkstring(L, 4);
+  const char* inactiveColor = luaL_checkstring(L, 5);
+
+  uint16_t cueId;
+  if (!api.cueIdForName(cueName, cueId)) {
+    return luaL_error(L, "glow.led.auto-xy: unknown cue '%s'", cueName);
+  }
+
+  if (api.ledFeedback_ == nullptr) return 0;  // no LED capability on this device -- no-op
+
+  uint8_t note, channel;
+  if (!resolvePadXY(api.ledFeedback_->profile(), static_cast<int>(col), static_cast<int>(row), note, channel)) {
+    return 0;
+  }
+
+  api.ledFeedback_->setAuto(note, channel, cueId, activeColor, inactiveColor);
+  return 0;
+}
+
 // --- glow.param.* -- P1.2's ParamSet read side (LiveControl::paramValue) ---
 
 int GlowLuaApi::l_param_get(lua_State* L) {
@@ -1015,6 +1064,8 @@ void GlowLuaApi::install() {
   lua_newtable(L);  // glow.led
   registerFn(L, -1, "set", &GlowLuaApi::l_led_set, this);
   registerFn(L, -1, "auto", &GlowLuaApi::l_led_auto, this);
+  registerFn(L, -1, "set-xy", &GlowLuaApi::l_led_set_xy, this);
+  registerFn(L, -1, "auto-xy", &GlowLuaApi::l_led_auto_xy, this);
   lua_setfield(L, glowIdx, "led");
 
   lua_newtable(L);  // glow.param
