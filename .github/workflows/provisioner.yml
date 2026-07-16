@@ -1,29 +1,37 @@
-# Provisioning editor + web flasher — build WASM + deploy static site to
-# GitHub Pages.
+# Provisioning editor + web flasher + docs site — build WASM, generate +
+# drift-check the docs, deploy both as one static site to GitHub Pages.
 #
-# Three jobs:
+# Jobs:
 #   1. build-wasm: installs emsdk, compiles provision.cpp + wasm-glue.cpp
 #      to provision-wasm.{js,wasm}, runs the 14 C++ tests under Node to
 #      verify the WASM build matches the host build, uploads the artifacts.
-#   2. fetch-firmware: grabs the latest successful "Firmware build" run's
-#      firmware-esp32s3 artifact (bootloader, partition table, otadata, app,
-#      demo show bundle, flasher_args.json) so the web flasher can fetch it
-#      same-origin — no CORS, and no hardcoded offsets (flasher_args.json is
-#      authoritative).
-#   3. deploy-pages: downloads both artifact sets, assembles the static
-#      editor bundle (web/provisioner-static/), deploys to GitHub Pages.
+#   2. build-docs: regenerates docs/generated/ from source
+#      (glow_lua_api.cpp, provision.cpp, live_control.h, Makefile) via
+#      docs/build/gen-reference.mjs and fails the build if the committed
+#      copy doesn't match a fresh generation (the anti-drift guard --
+#      see docs/build/gen-reference.mjs's own header) -- also runs the
+#      generator's unit tests and the interactive demo walkthrough's
+#      Playwright test.
+#   3. deploy-pages: needs both of the above. Downloads the WASM +
+#      firmware artifacts, assembles the static editor bundle
+#      (web/provisioner-static/), renders the docs site into its `docs/`
+#      subdirectory, and deploys the whole tree to GitHub Pages as one
+#      artifact.
 #
-# The editor is plain HTML/JS/CSS — no build step. The WASM + firmware
-# artifacts are copied alongside it. The whole thing is served as static
-# files.
+# The editor and the docs site are both plain HTML/JS/CSS — no build
+# step beyond the docs generator/renderer, no framework. The WASM +
+# firmware artifacts are copied alongside it. The whole thing is served
+# as static files.
 #
 # Trigger: any push or pull request touching web/provision-wasm/**,
 # web/provisioner-static/**, provision.cpp, provision.h, fixture_profile.*,
-# profile_encoder.*, show_bundle.*, test_provision.cpp, or the workflow
-# itself -- build-wasm runs
-# (and must pass) on every branch/PR, not just main, so a WASM-only
-# regression is caught before merge instead of after (this used to be
-# push-to-main-only, so a WASM build/test break could merge cleanly and only
+# profile_encoder.*, show_bundle.*, test_provision.cpp, docs/**,
+# glow_lua_api.{cpp,h}, live_control.h, pixel_patterns.*,
+# samples/demo-boot.fnl, Makefile, or the workflow itself -- build-wasm and
+# build-docs both run (and must pass) on every branch/PR, not just main, so
+# a WASM regression or a `glow.*`/grammar change without a regenerated
+# docs/generated/ is caught before merge instead of after (this used to be
+# push-to-main-only for build-wasm, so a break could merge cleanly and only
 # surface once it hit main). deploy-pages still only fires for an actual
 # push to main (or the Firmware build workflow finishing on main, or manual
 # dispatch) -- see its own `if:` below.
@@ -47,6 +55,14 @@ on:
       - "show_bundle.*"
       - "vec_math.*"
       - "test_provision.cpp"
+      - "docs/**"
+      - "glow_lua_api.cpp"
+      - "glow_lua_api.h"
+      - "live_control.h"
+      - "pixel_patterns.cpp"
+      - "pixel_patterns.h"
+      - "samples/demo-boot.fnl"
+      - "Makefile"
       - ".github/workflows/provisioner.yml"
   pull_request:
     paths:
@@ -64,6 +80,14 @@ on:
       - "show_bundle.*"
       - "vec_math.*"
       - "test_provision.cpp"
+      - "docs/**"
+      - "glow_lua_api.cpp"
+      - "glow_lua_api.h"
+      - "live_control.h"
+      - "pixel_patterns.cpp"
+      - "pixel_patterns.h"
+      - "samples/demo-boot.fnl"
+      - "Makefile"
       - ".github/workflows/provisioner.yml"
   workflow_run:
     workflows: ["Firmware build"]
@@ -164,9 +188,40 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  build-docs:
+    name: Generate + drift-check docs
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the generator's unit tests (regex extraction against fixtures)
+        run: node docs/build/gen-reference.test.mjs
+
+      - name: Drift guard -- fail if docs/generated/ doesn't match a fresh generation
+        run: |
+          # A glow.* or grammar change without a regenerate leaves
+          # docs/generated/ stale -- --check compares a fresh generation
+          # against the committed files in-memory (writes nothing) and
+          # fails instead of silently letting the reference drift (see
+          # docs/build/gen-reference.mjs's own header for why).
+          node docs/build/gen-reference.mjs --check
+
+      - name: Install Playwright + Chromium (oracle browser for the demo walkthrough test below)
+        run: |
+          # docs/interactive/demo-walkthrough.html runs fennel-check.js,
+          # which needs a real browser JS environment (see the equivalent
+          # step in build-wasm above for why). --no-save so this doesn't
+          # create/modify a repo package.json.
+          npm install --no-save playwright@1.56.1
+          npx playwright install --with-deps chromium
+
+      - name: Run the interactive demo walkthrough's Playwright test
+        run: node docs/build/test-demo-walkthrough.mjs
+
   deploy-pages:
     name: Deploy to GitHub Pages
-    needs: build-wasm
+    needs: [build-wasm, build-docs]
     # build-wasm now runs on every push/PR so a WASM regression is caught
     # before merge, but only an actual push to main (or the Firmware build
     # workflow finishing on main, or a manual dispatch) should publish --
@@ -220,6 +275,20 @@ jobs:
           test -f web/provisioner-static/vendor/fennel.lua
           test -f web/provisioner-static/vendor/littlefs-image.wasm
 
+      - name: Render docs site into web/provisioner-static/docs/
+        run: |
+          # build-docs already proved the committed docs/generated/ matches
+          # a fresh generation from source, and that the interactive
+          # walkthrough compiles clean -- this just renders the Markdown
+          # (hand-written docs/*.md + the already-committed docs/generated/
+          # *.md) to static HTML and copies the interactive page + the real
+          # samples/demo-boot.fnl it fetches. One deploy, two artifacts,
+          # alongside the provisioner above.
+          node docs/build/render-site.mjs --out web/provisioner-static/docs
+          test -f web/provisioner-static/docs/index.html
+          test -f web/provisioner-static/docs/interactive/demo-walkthrough.html
+          test -f web/provisioner-static/docs/samples/demo-boot.fnl
+
       - name: Build static site
         run: |
           # The static site is web/provisioner-static/ — plain HTML/JS/CSS,
@@ -238,27 +307,20 @@ jobs:
             echo "::warning::no firmware artifacts found; the web flasher's Flash step will be unavailable on this deploy."
           fi
 
-      - name: Verify no parent-relative imports at the site root
+      - name: Verify no relative import/fetch/src/href escapes the site root
         run: |
           # web/provisioner-static/ becomes the *root* of the deployed site
-          # (kayrozen.github.io/esp-glow/), with shared/ and vendor/ copied
-          # in above as its direct children. A "../shared/..." or
-          # "../vendor/..." import/fetch from a file at this top level
-          # resolves ABOVE the site (to the domain root) and 404s on Pages —
-          # even though `test -f` on the copied files passes, and even
-          # though it happens to work in local dev (static-server.js serves
-          # from the domain root, so "../" there also lands on "/shared").
-          # Files inside shared/ or vendor/ themselves may legitimately use
-          # "../" to reach a sibling within that same tree, so only the
-          # top-level files are checked.
-          bad=0
-          for f in web/provisioner-static/*.js; do
-            if grep -nE "\.\./(shared|vendor)/" "$f"; then
-              echo "::error file=$f::parent-relative import escapes the GitHub Pages subpath; use ./shared/... or ./vendor/... instead"
-              bad=1
-            fi
-          done
-          exit $bad
+          # (kayrozen.github.io/esp-glow/), with shared/, vendor/, and now
+          # docs/ (nested, itself with its own docs/interactive/ subfolder)
+          # living under it. A relative reference with enough "../" to walk
+          # above this root resolves off the actual site and 404s on Pages
+          # -- even though it can happen to work in local dev, and even
+          # though a file nested under docs/ legitimately NEEDS "../../" to
+          # reach shared/vendor at the root (a blanket "no .. allowed" rule
+          # would reject that valid code, which is why this is a depth-aware
+          # check -- see docs/build/check-relative-paths.mjs -- not the
+          # top-level-only grep this replaced).
+          node docs/build/check-relative-paths.mjs web/provisioner-static
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

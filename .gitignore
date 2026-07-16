@@ -44,6 +44,10 @@ test_aim
 build/
 Build/
 build-*/
+# docs/build/ is source (the docs generator/renderer/tests), not a build
+# output directory -- the generic "build/" rule above would otherwise
+# match it at any depth and silently exclude it from `git add`.
+!docs/build/
 
 # CMake generated files
 CMakeFiles/
