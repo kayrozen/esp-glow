@@ -136,7 +136,11 @@ jobs:
           node web/console/test-reconcile.mjs
 
       - name: Run project workspace tests (multi-show data model, storage, zip export/import, device sync)
-        run: make test-project-workspace
+        run: |
+          node web/shared/test-project-model.mjs
+          node web/shared/test-project-store.mjs
+          node web/shared/test-project-zip.mjs
+          node web/shared/test-device-sync.mjs
 
       - name: Upload WASM artifacts
         uses: actions/upload-artifact@v4
