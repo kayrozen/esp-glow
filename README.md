@@ -147,8 +147,10 @@ channel-agnostic. Binary bundles are versioned and backward-compatible (`SHW1` v
 ## 8. Testing
 
 ```sh
-make test    # 34 suites, -Wall -Wextra -Werror + ASan/UBSan (TSan on the queue suite)
+make test    # -Wall -Wextra -Werror + ASan/UBSan (TSan on the queue suite)
 ```
+(suite count drifts as suites are added -- see `docs/generated/test-status.md` on the docs
+site for the current count, generated from the `Makefile` rather than hand-typed here.)
 Host-tested: the engine, the Lua layer (emission, error policy, infinite-loop hook, memory cap,
 a zero-allocation check), the PLL beat clock (jitter rejection, monotonicity), every binary
 format (fuzzed), MIDI parsing, and the importers. **QEMU** boots the real image in CI (asserts

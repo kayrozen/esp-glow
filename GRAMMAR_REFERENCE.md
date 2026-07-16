@@ -1,9 +1,15 @@
 # esp-glow — text format reference (`.fdef` / `.show` / `.mdef`)
 
 Author-facing grammar for the three text formats the browser provisioner compiles into the
-device's binary bundle (`PFX2` fixtures, `SHW1` show, `MDF1` controller). Verified against the
-compiler on `main`. `#` starts a comment; indentation attaches sub-lines to the preceding
-`CAP`/`LED`.
+device's binary bundle (`PFX2` fixtures, `SHW1` show, `MDF1` controller). `#` starts a comment;
+indentation attaches sub-lines to the preceding `CAP`/`LED`.
+
+**The keyword list itself is generated, not hand-copied, on the docs site**
+(`docs/generated/grammar-reference.md`, built by `docs/build/gen-reference.mjs` straight from
+`provision.cpp`'s `cmd == "..."` checks) — if this file and the generated page ever disagree,
+the generated one is correct; this file drifted. This file's own prose/examples are still
+useful as a hand-written tutorial, but keyword existence should be cross-checked against the
+generated page rather than assumed.
 
 ---
 
@@ -99,9 +105,8 @@ LED CC 48 55 value                      # fader-ring LEDs driven by CC value
 
 ```fennel
 ;; discrete
-(glow.bind.pad 53 :flash :chorus)          ; note 53 → momentary cue
+(glow.bind.pad 53 :flash :chorus)          ; note 53 → momentary cue (mode is :flash or :toggle)
 (glow.bind.pad-xy 0 0 :toggle :verse)      ; grid (col,row) → cue, resolved via the .mdef
-(glow.bind.scene 61 :chorus)               ; a pad → a scene
 (glow.bind.program :scene)                 ; program-change N → scene N (any keyboard)
 
 ;; continuous — named by SOURCE SHAPE, so any controller works
