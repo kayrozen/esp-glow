@@ -1425,7 +1425,17 @@ function renderFnlEditorPane() {
     panels.push(
       d.ok
         ? el("div", { class: "boot-check-ok" }, icon("ok"), " No syntax errors found.")
-        : el("div", { class: "boot-check-err" }, icon("err"), " ", d.err),
+        : el(
+            "div",
+            { class: "boot-check-err" },
+            icon("err"),
+            el("span", { class: "boot-check-err-text" }, d.err),
+            el(
+              "span",
+              { class: "actions" },
+              el("button", { title: "Copy error text", onclick: () => copyText(d.err) }, icon("copy")),
+            ),
+          ),
     );
   }
   const lints = lintFootguns(getEditorDoc(view));
@@ -1575,7 +1585,18 @@ function errorBlock(title, detail, hint) {
     "div",
     { class: "preview-error" },
     el("span", { class: "icon err", html: ICON.err }),
-    el("div", {}, el("div", { class: "title" }, title), el("div", { class: "detail" }, detail), hint && el("div", { class: "hint" }, hint)),
+    el(
+      "div",
+      { style: "flex: 1; min-width: 0;" },
+      el(
+        "div",
+        { class: "error-block-title-row" },
+        el("div", { class: "title" }, title),
+        detail && el("button", { class: "btn-copy-error", title: "Copy error text", onclick: () => copyText(detail) }, icon("copy")),
+      ),
+      el("div", { class: "detail" }, detail),
+      hint && el("div", { class: "hint" }, hint),
+    ),
   );
 }
 function diagRow(label, ok, err, extra) {
@@ -1585,7 +1606,18 @@ function diagRow(label, ok, err, extra) {
     ok === true && el("span", { class: "icon ok", html: ICON.ok }),
     ok === false && el("span", { class: "icon err", html: ICON.err }),
     ok === undefined && el("span", { class: "icon" }),
-    el("div", {}, el("div", { class: "label" }, label), ok === false && err && el("div", { class: "detail" }, err), ok === true && extra && el("div", { class: "extra" }, extra)),
+    el(
+      "div",
+      { style: "flex: 1; min-width: 0;" },
+      el(
+        "div",
+        { class: "diag-row-label-row" },
+        el("div", { class: "label" }, label),
+        ok === false && err && el("button", { class: "btn-copy-error", title: "Copy error text", onclick: () => copyText(err) }, icon("copy")),
+      ),
+      ok === false && err && el("div", { class: "detail" }, err),
+      ok === true && extra && el("div", { class: "extra" }, extra),
+    ),
   );
 }
 

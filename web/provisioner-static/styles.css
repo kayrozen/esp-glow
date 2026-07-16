@@ -331,8 +331,25 @@ html, body {
 }
 .preview-error .icon { flex-shrink: 0; margin-top: 2px; }
 .preview-error .title { font-weight: 600; margin-bottom: 4px; }
-.preview-error .detail { color: var(--text-bright); font-size: 11px; }
-.preview-error .hint { color: var(--text-dim); font-size: 11px; margin-top: 8px; }
+.error-block-title-row, .diag-row-label-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.btn-copy-error {
+  flex-shrink: 0;
+  background: none;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 2px 4px;
+  display: inline-flex;
+  align-items: center;
+}
+.btn-copy-error:hover { background: #3c3c3c; color: var(--text-bright); }
+.preview-error .detail { color: var(--text-bright); font-size: 11px; user-select: text; }
+.preview-error .hint { color: var(--text-dim); font-size: 11px; margin-top: 8px; user-select: text; }
 
 .diag-row {
   display: flex;
@@ -344,7 +361,7 @@ html, body {
 .diag-row .icon.ok { color: var(--ok); }
 .diag-row .icon.err { color: var(--err); }
 .diag-row .label { color: var(--text-bright); word-break: break-all; }
-.diag-row .detail { color: var(--err); font-size: 11px; margin-top: 2px; word-break: break-word; }
+.diag-row .detail { color: var(--err); font-size: 11px; margin-top: 2px; word-break: break-word; user-select: text; }
 .diag-row .extra { color: var(--text-dim); font-size: 11px; margin-top: 2px; }
 
 .preview-footer {
@@ -580,6 +597,17 @@ html, body {
 }
 .boot-check-ok { color: var(--ok); }
 .boot-check-err { color: var(--err); }
+.boot-check-err-text { user-select: text; flex: 1; }
+.boot-check-err .actions { flex-shrink: 0; }
+.boot-check-err .actions button {
+  background: none;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.boot-check-err .actions button:hover { background: #3c3c3c; color: var(--text-bright); }
 
 .lint-hints {
   padding: 4px 16px 8px;
@@ -906,4 +934,4 @@ html, body {
   word-break: break-word;
   font-size: 11px;
 }
-.lint-hint { color: var(--warn, #e2b93d); font-size: 11px; }
+.lint-hint { color: var(--warn, #e2b93d); font-size: 11px; user-select: text; }
