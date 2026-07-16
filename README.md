@@ -1,17 +1,18 @@
-# esp-glow - it's like wled dated afterglow
+# esp-glow
 
-A live-codable DMX lighting engine for the ESP32-S3 — an Afterglow-style show system with
-no JVM, running standalone on a microcontroller. Native C++ does the hard real-time work;
-your show is written in **Fennel** (a Lisp), compiled **on the device**, and hot-swapped
-while the rig is running.
+A live-codable DMX lighting engine for the ESP32-S3 — an Afterglow-style show system with no
+JVM, running standalone on a microcontroller. Native C++ does the hard real-time work; your
+show is written in **Fennel** (a Lisp), compiled **on the device**, and hot-swapped while the
+rig is running.
 
-Point a moving head at a spot in the room, scroll a plasma across an LED matrix, lock a
-strobe to the beat of a track playing on a CDJ — then change any of it from a REPL,
-mid-song, without reflashing.
+Point a moving head at a spot in the room, scroll a plasma across an LED matrix, lock a strobe
+to a CDJ's beat — then change any of it from a REPL, mid-song, without reflashing. A MIDI
+controller's pads light up to mirror the show.
 
-> **Status:** every subsystem is built, merged, and green on host (25 test suites,
-> `-Wall -Wextra -Werror` + ASan/UBSan/TSan). **It has never run on silicon.** Bring-up is
-> the next step — see §9.
+> **Status:** every subsystem is built, merged, and green on host (34 test suites,
+> `-Wall -Wextra -Werror` + ASan/UBSan/TSan). The firmware **boots and runs in QEMU** (render
+> loop at 44 Hz, Lua/Fennel VM up, bundle + scripts loaded). **It has not yet run on real
+> silicon** — hardware bring-up is the next step (§9).
 
 ---
 
@@ -20,40 +21,32 @@ mid-song, without reflashing.
 ```
 Fennel         — Lisp surface. Self-hosted compiler runs ON the device.
     ↓
-Lua VM         — effects, cues, scenes, config. Composes and parameterises.
+Lua VM         — effects, cues, scenes, bindings. Composes and parameterises.
     ↓
-C++ / FreeRTOS — render loop @44 Hz, DMX + Art-Net out, pixel engine, aim geometry,
-                 beat clock. Hard real-time. Never blocked by scripts.
+C++ / FreeRTOS — render loop @44 Hz, DMX + Art-Net/sACN out, pixel engine, aim geometry,
+                 PLL beat clock. Hard real-time, pinned to core 1. Never blocked by scripts.
 ```
 
-**The load-bearing rule: Lua composes, C runs the tight loops.** Scripts choose *what*
-happens and with *which parameters*; the C engine executes the per-pixel and per-channel
-work. (The same lesson Pixelblaze learned — a general-purpose language cannot drive 15,000
-pixel updates a second on an MCU, but it is perfect for describing a show.)
+**Load-bearing rule: Lua composes, C runs the tight loops.** **Concurrency invariant:** the
+render task is the *only* thing that mutates engine state; every input — WebSocket, MIDI, OSC,
+DJ-Link/beat packets, script submissions — is parsed on its own task and **pushed onto a
+queue**, drained on the render core each frame. Core 1 runs the render loop and nothing else;
+all other tasks are pinned to core 0.
 
-The engine turns *time* into *DMX frames*. Effects emit abstract **intents** — "this fixture
-is blue at 80%", "this head points at that spot" — a resolve layer maps them to channel
-values via per-fixture profiles, and cues blend overlapping intents (HTP for intensity, LTP
-for position) before the result is flushed to the wire.
+The engine turns *time* into *DMX frames*: effects emit abstract **intents** ("this fixture is
+blue at 80%", "this head points there"), a resolve layer maps them to channels via per-fixture
+profiles, and cues blend overlapping intents (HTP intensity, LTP position) before the frame is
+flushed.
 
-**Concurrency, in one sentence:** the render task is the *only* thing that mutates engine
-state. Every input — WebSocket, MIDI, OSC, beat packets, script submissions — is parsed on
-its own task and **pushed onto a queue**, drained on the render core each frame. This
-invariant is the backbone of the whole system.
-
-### Two data paths
-
-- **Per-fixture** — moving heads, PARs, wash, smoke. One resolved value per capability.
-  Heads add pan/tilt inverse kinematics: aim at a *point*, not an angle.
-- **Per-pixel** — RGB matrices. A C pattern engine renders a 2D canvas, packed into DMX
-  universes and sent over Art-Net.
+Two data paths: **per-fixture** (heads/PARs — one value per capability; heads add aim
+inverse-kinematics) and **per-pixel** (RGB matrices — a C pattern engine over Art-Net/sACN).
 
 ### Two halves of a show
 
 | | **Patch** | **Show** |
 |---|---|---|
-| What | Which fixtures exist, addresses, geometry, matrices | What they *do* over time |
-| Format | `.fdef` / `.show` → binary `PFX2`/`SHW1` bundle | **Fennel** |
+| What | Fixtures, addresses, geometry, matrices, controller | What the fixtures *do* over time |
+| Format | `.fdef`/`.show`/`.mdef` → binary `PFX2`/`SHW1`/`MDF1` | **Fennel** |
 | Changes when | You change the rig | Every song |
 | Lives in | A raw flash partition (browser-flashable) | LittleFS (writable, hot-swappable) |
 
@@ -61,281 +54,130 @@ invariant is the backbone of the whole system.
 
 ## 2. Scripting: Fennel on the device
 
-An effect is a function of time that **emits** intents — it never returns them (returning
-tables would allocate every frame and feed the GC).
+An effect is a function of time that **emits** intents (never returns them — that would
+allocate every frame and feed the GC):
 
 ```fennel
 (fn breathe [t]
   (glow.set 1 :dimmer (* 0.5 (+ 1 (math.sin (* t 2)))))
-  (glow.set 1 :red 1.0))
+  (glow.slot 1 :color-wheel "red"))          ; named function-range slot (PFX2)
 
-(glow.cue.define :warm-breath {:effects [breathe] :fade-in 2.0 :fade-out 1.0})
-(glow.cue.go :warm-breath)
+(glow.cue.define :warm {:effects [breathe] :fade-in 2.0})
+(glow.cue.go :warm)
 ```
-Send that over the WebSocket REPL; the light responds immediately.
+Send it over the WebSocket REPL; the light responds immediately. See `GRAMMAR_REFERENCE.md`
+for the full `glow.*` API (set/aim/slot/cue/scene/fx/matrix/beat/bind/led/save).
 
-### The `glow.*` API
+**Effects must not stutter:** allocate nothing in an effect body (string *literals* are
+interned and free; concatenation and table construction allocate), and never loop per-pixel in
+Lua — use `glow.matrix.pattern`.
+
+**The show goes on.** A syntax error, a runtime error, an infinite loop, or out-of-memory each
+leaves the rig still rendering: the offending effect is disabled and reported (`fx_error`), its
+cue keeps running its other effects. A broken `boot.fnl` falls back to safe blackout, never a
+brick.
+
+---
+
+## 3. Musical time
+
+A **PLL `BeatClock`** turns jittery clock sources into a smooth phase (gradual correction, no
+snapping, monotonic beat number, free-run on dropout). Sources: **MIDI clock**, **Pro DJ Link**
+(passive CDJ beat packets — gives true downbeats), **tap tempo**, internal. `(glow.beat)`,
+`(glow.bar)`, `(glow.bpm)`, `(glow.locked?)` drive beat-synced effects; when no source is live
+they free-run rather than freeze.
+
+---
+
+## 4. Controllers (MIDI) — described, not hardcoded
+
+A controller is a **`.mdef` file**, not C++. It declares pads, faders, encoders, LED palette,
+per-range MIDI-channel handling, and an opaque `INIT SYSEX` sent on connect (e.g. the APC40's
+Mode-0 message). Bindings live in Fennel and are named by **source shape**, so one show runs on
+any controller:
 
 ```fennel
-;; Emit (inside an effect callback only)
-(glow.set 1 :dimmer 0.8)                 ; capability → normalized [0,1]
-(glow.aim  2 [0 2 5])                    ; point a head at a world point
-
-;; Named function ranges (PFX2) — how you actually drive a moving head
-(glow.slot 1 :color-wheel "red")         ; discrete slot → centre of its DMX range
-(glow.slot 1 :gobo "dots")
-(glow.slot 1 :gobo 3)                    ; …or by index
-(glow.slot 1 :shutter-strobe "strobe" 0.8)  ; continuous sub-range → 80% across it
-(glow.ranges 1 :gobo)                    ; discover what this fixture can do
-
-;; Musical time
-(glow.beat)  (glow.bar)  (glow.bpm)  (glow.beat-number)  (glow.locked?)
-
-;; Built-in C effects — fast, use them freely
-(glow.fx.hue-rotate [1 2 3] {:period 4.0})
-(glow.fx.chase [1 2 3 4] {:period 2.0})
-(glow.fx.sweep 5 [0 0 1] [1 0 1] {:period 6.0})
-
-;; Cues, scenes, matrices, persistence
-(glow.cue.define :verse {:effects [breathe] :fade-in 2.0 :priority 0})
-(glow.scene.define :chorus [:verse :strobe-hit])
-(glow.matrix.pattern 0 :plasma {:speed 0.5 :scale 0.2})
-(glow.save :boot "(glow.cue.go :verse)")
+(glow.bind.pad-xy 0 0 :toggle :chorus)   ; grid (col,row), resolved via the .mdef
+(glow.bind.pitchbend :param :hue)        ; any pitch wheel drives a parameter
+(glow.led.auto 53 :chorus :green :off)   ; the pad lights when its cue is active
 ```
-
-Emitting a capability (or a slot) a fixture doesn't have is a harmless **no-op** — so cues
-written for one head degrade gracefully on another.
-
-### Writing effects that don't stutter
-
-At 44 Hz you have 22.7 ms per frame. A GC pause drops a DMX frame, and a dropped frame is
-*visible on stage*.
-
-- **Allocate nothing in an effect body.** String *literals* (`:dimmer`) are interned at
-  compile time and cost nothing. String *concatenation* (`(.. "dim" n)`), table
-  construction, and per-call closures all allocate. Build them once, outside.
-- **No per-pixel loops in Lua.** Use `glow.matrix.pattern`; add a C pattern if you need a
-  new one.
-
-### The show goes on
-
-Live-coding means you *will* ship a bug mid-set. Nothing a script does can take the rig
-down:
-
-| Failure | What happens |
-|---|---|
-| Syntax error | Reported to the console; nothing changes |
-| Runtime error in an effect | That effect is disabled and reported (`fx_error`); **its cue keeps running its other effects**; the rig keeps rendering |
-| Infinite loop | An instruction-count hook aborts it |
-| Out of memory | The script is aborted; rendering continues |
-| Broken `boot.fnl` | Safe blackout + report — never a brick |
-
-Every script call is protected. Nothing unwinds the render loop.
+Every binding is a no-op if the controller lacks that control. LED feedback and the web console
+read the **same active-cue state**, so a cue fired anywhere updates the pads and every console
+together. Adding a new controller is a new `.mdef` — zero code.
 
 ---
 
-## 3. Musical time (beat sync)
+## 5. Fixtures & import
 
-The feature that made Afterglow *Afterglow*. Clock sources are discrete and jittery; effects
-need a smooth phase. A **PLL-based `BeatClock`** reconciles them — gradual phase correction
-(never snapping), garbage rejection, free-run on dropout, and a strictly monotonic beat
-number.
-
-Sources: **MIDI clock** (24 PPQN) · **Pro DJ Link** (passive listening to CDJ beat packets —
-gives you true *downbeats*, parsed against Deep Symmetry's protocol documentation) ·
-**tap tempo** · an internal clock. When no source is live, `(glow.beat)` free-runs rather
-than freezing — a show shouldn't die because a DJ unplugged a CDJ.
+Four archetypes: **wash/PARs** (RGBWAUV + dimmer + strobe), **moving heads** (16-bit pan/tilt +
+aim geometry; **PFX2 named ranges** make colour wheels, gobos, prisms, strobe modes addressable
+by name), **smoke/haze**, **RGB matrices** (serpentine/progressive, colour order,
+multi-universe). Don't hand-write profiles: the browser provisioner **imports QLC+, Open Fixture
+Library, and GDTF**, mapping channels *and* named ranges onto PFX2.
 
 ---
 
-## 4. Fixtures
+## 6. Hardware & flashing
 
-Four archetypes, four costs:
+ESP32-S3 (dual-core, FPU, PSRAM — the Lua VM lives there). DMX out via an RS-485 transceiver
+(MAX3485; default GPIOs TX 17 / RX 18 / DE-RTS 8). Matrices via Art-Net or sACN over WiFi.
+Inputs: MIDI (DIN/UART or native USB host), OSC (UDP), DJ-Link, and a device-served web console.
 
-- **Wash / PARs** — trivial. RGB(W/A/UV) + dimmer + strobe.
-- **Moving heads** (*lyres*) — the expressive case. 16-bit pan/tilt, and with `POS`/`ROT` in
-  the patch the aim engine computes pan/tilt from a target point. **PFX2 named ranges** make
-  colour wheels, gobos, prisms, and strobe modes addressable by name.
-- **Smoke / haze** — few channels, but with timing semantics (warm-up, duty cycle).
-- **RGB matrices** — the per-pixel path. Wiring (serpentine/progressive), colour order, and
-  multi-universe spans are all config. ~170 RGB pixels per universe.
+**Flash-time config (no toolchain):** the browser flasher writes a `CFG1` blob — WiFi
+credentials, DMX GPIOs, Art-Net fallback, and a **USB-MIDI checkbox** — so a stranger can flash a
+working rig without ESP-IDF. Config is also editable from the device console. A missing/corrupt
+config boots on compiled-in defaults and says so.
 
-### Importing real fixtures
-
-Don't hand-write profiles from a PDF. The browser provisioner imports **QLC+ (`.qxf`)**,
-**Open Fixture Library (JSON)**, and **GDTF (`.gdtf`)** — mapping their channels *and their
-named ranges* onto PFX2. Pick the mode, review the channel table, edit if needed, save.
+**Build** (ESP-IDF v5.1+): Lua 5.4.6 (`luaconf.h` **must** set `LUA_32BITS 1` — edit the file,
+not `-D`) + Fennel 1.6.1 (generated single file via `scripts/vendor_fennel.sh`). See
+`BENCH_RUNBOOK.md` for the full bring-up ladder.
 
 ---
 
-## 5. Hardware
+## 7. Formats
 
-- **MCU**: ESP32-S3 (dual-core, hardware FPU, PSRAM — the Lua VM lives there).
-- **DMX out**: RS-485 transceiver (e.g. MAX3485). Default GPIOs: TX 17, RX 18, DE/RTS 8 —
-  all four (plus the status LED GPIO) are flash-time configurable now, see §6.
-- **Matrices**: Art-Net over WiFi → an Art-Net→DMX bridge.
-- **Inputs**: MIDI (DIN/UART, with MIDI OUT for LED feedback — see `.mdef`,
-  FORMAT.md), OSC (UDP), a web console (HTTP + WebSocket) served from the
-  device, DJ-Link, and USB-MIDI host (`usb_midi_input.cpp`). The driver
-  compiles in by default (`CONFIG_GLOW_USB_MIDI_HOST`) but only actually
-  starts if enabled via the flasher's checkbox or the device console's
-  reconfigure page (off by default — see README_LIVE_CONTROL.md's
-  "Out of Scope"). USB-MIDI host needs a board respin for VBUS (the ESP32
-  must supply 5V to the controller); a USB-host-to-DIN adapter works today
-  with no hardware change if you'd rather skip that.
-- **Status LED**: GPIO 2 by default (flash-time configurable, see §6).
-
-Render task pinned to core 1; WiFi/lwIP on core 0, so network work never jitters DMX timing.
+See `GRAMMAR_REFERENCE.md` for `.fdef` / `.show` / `.mdef`. Key points: `.show` is **1-indexed**
+and requires a `SHOW 2` header (un-migrated files are rejected loudly); the compiler **errors on
+address collisions**; a `CAP` with no `SLOT`/`RANGE` is linear; a control with no `CH` clause is
+channel-agnostic. Binary bundles are versioned and backward-compatible (`SHW1` v4, `PFX2` v2,
+`MDF1` v3, `CFG1` v1 — older versions still load).
 
 ---
 
-## 6. Build & flash
-
-**ESP-IDF v5.1+.** Vendored: **Lua 5.4.6** (`luaconf.h` **must** have `#define LUA_32BITS 1`
-— float/int32 to match the S3's single-precision FPU; it cannot be set with `-D`) and
-**Fennel 1.6.1** as a generated single `fennel.lua` (regenerate via
-`scripts/vendor_fennel.sh` — the repo ships no prebuilt file). `esp_dmx` and LittleFS come
-from the IDF Component Manager.
-
-**From the browser (easiest, no toolchain):** open the provisioner, fill in the device config
-form (WiFi SSID/password or "no WiFi", DMX/LED GPIOs — pre-filled with sane defaults, Art-Net
-fallback destination, USB-MIDI on/off), plug in over USB, hit **Flash** — it writes bootloader,
-partition table, app, your compiled patch, and that config (as a `CFG1` blob — see FORMAT.md).
-Chrome/Edge (Web Serial). Reflashing remembers your last config (`localStorage`), and the
-device console has its own reconfigure page (`/devcfg.html`) for changing WiFi etc. without a
-cable afterward.
-
-**From the CLI:**
-```sh
-. $IDF_PATH/export.sh && cd firmware
-idf.py set-target esp32s3
-idf.py menuconfig                    # DMX GPIOs, LED, WiFi, Art-Net bridge IP -- DEFAULTS only,
-                                      # see below; a flashed CFG1 blob overrides all of it
-./scripts/build_sample_bundle.sh     # samples/demo.show → SHW1 bundle
-idf.py -p /dev/ttyUSB0 flash monitor
-```
-The firmware is **not one binary**: bootloader (`0x0` — on the S3, not 0x1000), partition
-table (`0x8000`), otadata (`0x10000`), app (`0x20000`), the show bundle, and the `devcfg`
-blob. `flasher_args.json` carries the exact mapping; from `firmware/build/`:
-`esptool.py write_flash @flash_args`. On a fresh or wedged board, `erase_flash` first.
-
-**`menuconfig` values are defaults, not truth.** WiFi SSID/password, DMX/LED GPIOs, the
-Art-Net fallback destination, and USB-MIDI-enabled all move into a small binary config blob
-(`CFG1`, see FORMAT.md) written by the browser at flash time — a `devcfg` raw partition, read
-once at boot, the same "opaque blob, no filesystem" pattern the show bundle already uses. A
-missing or corrupt `devcfg` (a blank board, or one flashed before this existed) falls back to
-whatever `menuconfig` set, so a CLI-only workflow with no browser involved still works exactly
-as before. This is what makes the browser flasher useful to someone who isn't you: it no
-longer ships your WiFi credentials compiled into the binary.
-
-**Security note:** the WiFi password sits in plaintext in the `devcfg` partition, like every
-other field — anyone with physical access to the board and `esptool` can read it out of flash.
-This is a deliberate tradeoff for a hobby project, not an oversight (see FORMAT.md's CFG1
-section); flash/NVS encryption would close it and is the right answer if this ever becomes a
-shipping product, but is out of scope here.
-
----
-
-## 7. Patch language
-
-```
-# fixture type — .fdef
-FIXTURE Moving Head
-FOOTPRINT 16
-HEAD
-PANRANGE 540
-TILTRANGE 270
-CAP Dimmer 0
-CAP Pan 1 2                # 16-bit: coarse, fine
-CAP Tilt 3 4
-CAP ColorWheel 5
-  SLOT 0 9    open
-  SLOT 10 19  red
-  SLOT 20 29  blue
-CAP ShutterStrobe 6
-  SLOT 0 31   closed
-  SLOT 32 63  open
-  RANGE 64 95 strobe       # continuous sub-range
-```
-```
-# patch — .show (SHOW 2: universes and DMX addresses are 1-indexed)
-SHOW 2
-UNIVERSE 1 DMX
-UNIVERSE 2 ARTNET
-FIXTURE samples/head.fdef 1 22
-POS 2.0 1.0 0.0            # metres — this is what enables aim-at-a-point
-ROT 0 0 0
-MATRIX 2 1 16 8 SERP H RGB
-```
-A `CAP` with no `SLOT`/`RANGE` lines stays linear — every v1 profile still works.
-
----
-
-## 8. Development & testing
+## 8. Testing
 
 ```sh
-make test    # 25 suites, -Wall -Wextra -Werror + ASan/UBSan (TSan on the queue suite)
+make test    # 34 suites, -Wall -Wextra -Werror + ASan/UBSan (TSan on the queue suite)
 ```
-Host-tested: the whole engine, the Lua layer (effect emission, error policy, the
-infinite-loop hook, the memory cap, a **zero-allocation check**), the PLL beat clock (jitter
-rejection, monotonicity), the binary formats (fuzzed against malformed input), and the
-importers.
-
-**QEMU boot test** (`tests/qemu/`) boots the real flash image — bootloader, partition table,
-app, the `SHW1` bundle — under Espressif's QEMU fork, no board required, and asserts the
-`GLOW-TEST:` boot telemetry (same wire format `tests/hil/` reads off real serial). It catches
-init order, the show-bundle load, the LittleFS `scripts` mount, and the Lua/Fennel VM coming
-up — everything up to the first render tick — but not DMX timing, real-time GC pacing, or
-anything needing a peripheral QEMU doesn't model. Runs in CI on every PR
-(`.github/workflows/qemu-boot.yml`).
-
-**Hardware-in-the-loop** (`tests/hil/`) covers what QEMU cannot: DMX timing, Art-Net on
-the wire, WS/OSC/MIDI round-trips, the Fennel REPL end to end, every scripting failure mode,
-OTA/rollback, and a **10-minute soak**. Two things stay human: whether a head physically aims
-right, and whether the colours look right.
+Host-tested: the engine, the Lua layer (emission, error policy, infinite-loop hook, memory cap,
+a zero-allocation check), the PLL beat clock (jitter rejection, monotonicity), every binary
+format (fuzzed), MIDI parsing, and the importers. **QEMU** boots the real image in CI (asserts
+boot telemetry, a 5× anti-flake loop, addr2line-symbolicated crashes). **HIL** (`tests/hil/`)
+covers what neither can: DMX timing, Art-Net on the wire, the Fennel REPL end-to-end, and a
+10-minute soak. Two things stay human: whether a head physically aims right, and colour.
 
 ---
 
 ## 9. Status & next steps
 
-**Done, merged, host-green:** the engine · aim geometry · cues with fades and HTP/LTP
-blending · pixel matrices · PFX2 named ranges · the Lua/Fennel live-coding layer with its
-real-time guards · the concurrency-safe input dispatch · firmware F0–F5 (DMX, WiFi/Art-Net,
-show load, WebSocket + MIDI + OSC transports, OTA with rollback, watchdog, safe blackout) ·
-musical time (PLL beat clock, MIDI clock, DJ-Link, tap tempo) · the web console with the
-Fennel REPL · the browser provisioner, fixture importers, and USB flasher · the HIL suite.
+**Done, merged, host-green, boots in QEMU:** engine · aim geometry · cues/scenes with HTP/LTP
+blending · pixel matrices · PFX2 named ranges · the Lua/Fennel live-coding layer with real-time
+guards · concurrency-safe input dispatch · firmware F0–F5 (DMX, WiFi/Art-Net/sACN, show load,
+WS/MIDI/OSC/DJ-Link transports, OTA+rollback, watchdog, safe blackout) · musical time · web
+console with the Fennel REPL and device-pushed state · controller-agnostic MIDI with LED
+feedback and `INIT SYSEX` · CFG1 flash-time config · multi-node Art-Net + ArtSync + WLED · the
+browser provisioner, fixture importers, and USB flasher · the QEMU + HIL harnesses.
 
-**Not done: it has never run on real hardware.** `tests/qemu/` now proves the firmware boots
-in emulation — init order, the show-bundle load, the Lua/Fennel VM coming up, a clean first
-render tick — but a green QEMU boot means the software starts, not that the rig works. DMX
-timing, real GC pacing under load, and PSRAM/USB/MIDI are outside what QEMU models. Getting it
-on an actual board is still the next and only real step.
+**Not done: it has never run on real hardware.** That is the next and only real step. The
+bring-up ladder (`BENCH_RUNBOOK.md`): boot → **DMX out** (the milestone) → WiFi/Art-Net → console
+→ live-coding → HIL → **the soak** — the one unvalidated risk in the whole stack: whether the Lua
+GC, paced in the frame slack, ever drops a DMX frame under load. No host or QEMU test can answer
+that.
 
-The bring-up ladder (see `BENCH_RUNBOOK.md`): boot → DMX out (**the milestone — a real
-fixture responding to the engine**) → WiFi/Art-Net → web console → live-coding → HIL → the
-**soak**. QEMU clears the boot rung before any board arrives. The soak stays the one
-unvalidated risk QEMU can't touch: whether the Lua GC, paced in the frame slack, ever drops a
-DMX frame under load. No host test — and no emulator — can answer that.
+**Later:** semantic colour mapping (`:red` → nearest wheel slot or RGB — profile v3, the format
+byte is reserved) · gamma correction · audio-reactive matrix patterns · matrices inside the
+cue/blend engine · Ableton Link · a richer web file/asset workflow (multiple shows & scripts,
+export).
 
-**Later:** semantic colour mapping (`:red` → nearest wheel slot *or* RGB — profile v3, the
-format byte is already reserved) · gamma correction and audio-reactive matrix patterns ·
-matrices inside the cue/blend engine · Ableton Link.
-
----
-
-## 10. Repository layout
-
-```
-*.cpp / *.h              engine, Lua layer, provisioning, live control (host-buildable)
-test_*.cpp               host unit tests            (make test)
-samples/                 example .fdef / .mdef / .show
-scripts/                 vendor_fennel.sh, vendor_lua.sh, build_sample_bundle.sh
-tests/qemu/              QEMU boot test (no board required, runs in CI)
-tests/hil/               hardware-in-the-loop suite
-firmware/                ESP-IDF application
-  main/                  main.cpp, render_task, wifi/storage/ota managers
-  components/glow_core/  the engine as an IDF component
-  components/lua/        Lua 5.4.6 (LUA_32BITS) + embedded fennel.lua
-web/                     console (Preact + Fennel REPL) · provisioner (WASM, importers,
-                         Web Serial flasher) · shared editor
-```
+**Known limitations (for a shipping product):** WiFi password in plaintext in flash, no console
+auth, unsigned OTA images. Documented choices, not accidents — revisit as a block if productized.
