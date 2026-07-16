@@ -230,17 +230,88 @@ ENCODER CC 13 relative-2c   # tempo knob (0x0D)
 ENCODER CC 47 relative-2c   # cue level (0x2F)
 
 # --- LED feedback ------------------------------------------------------
+# RGB clip grid: velocity picks a colour from the mkII's 128-entry palette
+# (representative subset). Blink/pulse variants use the MIDI channel, not
+# velocity, so aren't encoded here.
 LED NOTE 0 39 velocity
   COLOR off       0
+  COLOR grey-dim  1
+  COLOR grey      2
+  COLOR white     3
   COLOR red       5
+  COLOR orange    9
+  COLOR yellow    13
+  COLOR lime      17
   COLOR green     21
+  COLOR spring    29
+  COLOR aqua      33
+  COLOR sky-blue  37
   COLOR blue      41
+  COLOR indigo    45
+  COLOR violet    49
+  COLOR magenta   53
+  COLOR pink      57
 LED NOTE 82 86 velocity
   COLOR off   0
   COLOR white 3
   COLOR red   5
   COLOR green 21
   COLOR blue  41
+LED NOTE 52 52 velocity
+  COLOR off   0
+  COLOR on    1
+  COLOR blink 2
+LED NOTE 66 66 velocity
+  COLOR off    0
+  COLOR yellow 1
+  COLOR orange 2
+`);
+  PM.addController(p, "apc40-original.mdef", `# Akai APC40 (original 2009 model, not the mkII). Transcribed from Akai's
+# "Generic Communication Protocol for Akai APC40" Rev 1 (2009), Generic Mode.
+# The original's clip grid is five CLIP LAUNCH note rows (0x35..0x39) with the
+# track chosen by MIDI channel, and a fixed green/red/yellow LED palette (with
+# blink variants) rather than the mkII's RGB scheme. MDF1 is single-channel and
+# parseMidi ignores the channel, so per-track duplicates collapse to one entry.
+
+CONTROLLER Akai APC40
+MIDI_CHANNEL 0
+
+# --- Pads (Note-on buttons) --------------------------------------------
+PAD 48 52     # per-track: record-arm, solo, activator, select, clip-stop (0x30..0x34)
+PAD 53 57     # clip-launch rows 1..5 (0x35..0x39, track = MIDI channel)
+PAD 58 65     # device / view / record-mode buttons (0x3A..0x41)
+PAD 80 81     # master-select + stop-all-clips (0x50..0x51)
+PAD 82 86     # scene launch 1..5 (0x52..0x56)
+PAD 87 90     # pan + send A/B/C selectors (0x57..0x5A)
+PAD 91 101    # transport + navigation (0x5B..0x65)
+
+# --- Faders / absolute knobs (CC) --------------------------------------
+FADER CC 7   track      # 8 track level faders (0x07, track = MIDI channel)
+FADER CC 14  master     # master level (0x0E)
+FADER CC 15  crossfader # crossfader (0x0F)
+FADER CC 16 23          # 8 device-control knobs (0x10..0x17), absolute
+FADER CC 48 55          # 8 track-control knobs (0x30..0x37), absolute
+
+# --- Relative encoders (CC) --------------------------------------------
+ENCODER CC 47 relative-2c   # cue level (0x2F, two's-complement deltas)
+
+# --- LED feedback ------------------------------------------------------
+LED NOTE 53 57 velocity
+  COLOR off          0
+  COLOR green        1
+  COLOR green-blink  2
+  COLOR red          3
+  COLOR red-blink    4
+  COLOR yellow       5
+  COLOR yellow-blink 6
+LED NOTE 52 52 velocity
+  COLOR off   0
+  COLOR on    1
+  COLOR blink 2
+LED NOTE 82 86 velocity
+  COLOR off   0
+  COLOR on    1
+  COLOR blink 2
 `);
   PM.addShow(p, "boot.fnl", `;; boot.fnl -- evaluated once at startup; authored here, baked into
 ;; the flash image's "scripts" partition by the Flash step below.
