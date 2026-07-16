@@ -5,37 +5,51 @@
 // exactly the errors the device would -- because it is literally the same
 // compiler, not a JS reimplementation.
 //
-// Scope, honestly: this checks SYNTAX AND COMPILATION, not behaviour.
-// glow.* is stubbed (see buildGlowStub below) with every known field name
-// as a no-op function, so a call to a *misspelled* field (`glow.st`)
-// throws "attempt to call a nil value" at eval time and is caught here
-// too -- but argument types, fixture ids, and everything else that only
-// the real render loop can validate are NOT checked. Callers must present
-// this as a syntax check, not a dry run (see app.js's "Check syntax"
-// button copy).
+// Scope, deliberately: this checks SYNTAX AND COMPILATION ONLY, never
+// behaviour or glow.* name correctness. `glow` is bound to an
+// accept-everything proxy (see makeProxy below) -- every field access at
+// any depth returns another proxy that is itself callable, so ANY
+// syntactically valid glow.* usage (glow.bind.pad-xy, glow.led.auto-xy,
+// glow.slot, a brand new subtable added to glow_lua_api.cpp tomorrow,
+// anything) type-checks with no maintenance here. A misspelled field name
+// is NOT caught by this checker -- the device REPL reports that
+// immediately, with a real line number, the moment the script actually
+// runs. That's the right trade: this file used to hand-list every glow.*
+// subtable name, the list drifted out of sync with glow_lua_api.cpp, and
+// the drift showed up as REJECTING valid scripts (e.g. any use of
+// glow.bind) -- a worse failure than missing a typo, because it makes the
+// tool lie about correct code. Do not reintroduce a hand-maintained name
+// list here; if browser-side typo-catching is wanted later, generate the
+// allow-list from glow_lua_api.cpp's registerFn calls at build time and
+// fail CI on drift, never hand-list it again.
 //
 
 import { LuaFactory } from "./vendor/wasmoon-bundle.mjs";
 
 let enginePromise = null;
 
-// Every field GlowLuaApi::install() registers (glow_lua_api.cpp), stubbed
-// as a no-op so a real call compiles and runs without error, but a typo'd
-// field name is still nil and throws when called -- the one behavioural
-// signal this checker can give for free.
+// A value that is simultaneously:
+//   * indexable to any depth        (glow.bind.pad-xy)  -> returns another proxy
+//   * callable with any args        ((glow.set) 1 :dimmer 0.5) -> returns a proxy
+//   * usable as a number/string sink where the code expects a return
+// so ANY syntactically-valid glow.* usage type-checks. This is a SYNTAX
+// check; API-name correctness is validated on the device, not here.
+// Recursion is bounded by the input, not infinite: a proxy is only
+// created when the script actually indexes/calls one.
 const GLOW_STUB_SRC = `
-local function noop() return nil end
-local function stubtable(names)
-  local t = {}
-  for _, n in ipairs(names) do t[n] = noop end
-  return t
+local function makeProxy()
+  local function noop() return makeProxy() end
+  return setmetatable({}, {
+    __index    = function() return makeProxy() end,
+    __call     = function(...) return makeProxy() end,
+    -- arithmetic/concat sinks: glow.beat used in (* 0.5 (glow.beat)) etc.
+    __add = noop, __sub = noop, __mul = noop, __div = noop,
+    __mod = noop, __pow = noop, __unm = noop, __concat = noop,
+    __len = function() return 0 end,
+    __tostring = function() return "" end,
+  })
 end
-glow = stubtable({"set", "aim"})
-glow.CAP = setmetatable({}, { __index = function() return 0 end })
-glow.cue = stubtable({"define", "go", "release"})
-glow.scene = stubtable({"define", "go", "release"})
-glow.fx = stubtable({"hue-rotate", "chase", "sweep"})
-glow.matrix = stubtable({"pattern", "brightness"})
+glow = makeProxy()
 `;
 
 async function getEngine() {
@@ -64,12 +78,12 @@ export async function checkFennelSyntax(src) {
   try {
     const lua = await getEngine();
     // Using fennel.eval (compile + run), not just fennel.compileString: a
-    // misspelled field like `glow.st` compiles fine either way (it's
-    // valid Lua once compiled) and only fails when that call actually
-    // executes -- see this file's header. eval catches it for any
-    // top-level call; a typo buried inside a function body that's never
-    // invoked here still won't be caught, same as it wouldn't be on a
-    // bare `eval` on the real device.
+    // top-level form can be syntactically valid Lua once compiled but
+    // still throw when actually run (e.g. calling a real Lua stdlib
+    // function with the wrong arity) -- see this file's header for why
+    // glow.* itself never throws here, proxy or not. A form buried inside
+    // a function body that's never invoked here still won't be caught,
+    // same as it wouldn't be on a bare `eval` on the real device.
     //
     // wasmoon's doString only surfaces a Lua chunk's FIRST return value to
     // JS (verified against the real vendored wasmoon build -- a Lua
