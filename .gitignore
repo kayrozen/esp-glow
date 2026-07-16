@@ -98,3 +98,8 @@ web/provisioner-static/wasm/
 # Firmware build artifacts (rebuilt in CI, not committed)
 firmware/build/
 firmware/main/data/show.shw1
+
+# Playwright (installed ad hoc in CI to run
+# web/provisioner-static/test-fennel-check.mjs against a real Chromium --
+# see .github/workflows/provisioner.yml -- never committed)
+node_modules/

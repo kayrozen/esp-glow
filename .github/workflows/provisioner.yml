@@ -142,6 +142,18 @@ jobs:
           node web/shared/test-project-zip.mjs
           node web/shared/test-device-sync.mjs
 
+      - name: Install Playwright + Chromium (oracle browser for the fennel-check test below)
+        run: |
+          # fennel-check.js runs the vendored wasmoon (WASM Lua) bundle, which is
+          # built for a real browser JS environment only -- it does not run under
+          # plain Node. --no-save so this doesn't create/modify a repo package.json;
+          # node_modules/ here is CI-run-local and never committed.
+          npm install --no-save playwright@1.56.1
+          npx playwright install --with-deps chromium
+
+      - name: Run fennel-check.js browser compile-check tests (glow.* accept-everything proxy)
+        run: node web/provisioner-static/test-fennel-check.mjs
+
       - name: Upload WASM artifacts
         uses: actions/upload-artifact@v4
         with:
