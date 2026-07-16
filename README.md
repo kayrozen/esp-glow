@@ -97,9 +97,9 @@ Mode-0 message). Bindings live in Fennel and are named by **source shape**, so o
 any controller:
 
 ```fennel
-(glow.bind.pad-xy 0 0 :toggle :chorus)   ; grid (col,row), resolved via the .mdef
-(glow.bind.pitchbend :param :hue)        ; any pitch wheel drives a parameter
-(glow.led.auto 53 :chorus :green :off)   ; the pad lights when its cue is active
+(glow.bind.pad-xy 0 0 :toggle :chorus)    ; grid (col,row), resolved via the .mdef
+(glow.bind.pitchbend :param :hue)         ; any pitch wheel drives a parameter
+(glow.led.auto-xy 0 0 :chorus :green :off) ; same (col,row): the pad lights when its cue is active
 ```
 Every binding is a no-op if the controller lacks that control. LED feedback and the web console
 read the **same active-cue state**, so a cue fired anywhere updates the pads and every console

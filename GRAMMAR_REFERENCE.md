@@ -109,8 +109,10 @@ LED CC 48 55 value                      # fader-ring LEDs driven by CC value
 (glow.bind.pitchbend :param :hue)          ; a pitch wheel → an effect parameter
 (glow.bind.pressure :cue-level :chorus)    ; channel pressure → hold a cue's level
 
-;; LED feedback
-(glow.led.set 53 :red)
+;; LED feedback — (col,row) is primary, resolved the same way as bind.pad-xy
+(glow.led.set-xy  0 0 :red)                ; grid (col,row) -> pad's LED, on the resolved channel
+(glow.led.auto-xy 0 0 :chorus :green :off) ; pad (0,0) tracks the cue: green when active
+(glow.led.set  53 :red)                    ; raw note, channel-agnostic — the escape hatch
 (glow.led.auto 53 :chorus :green :off)     ; pad tracks the cue: green when active
 (glow.bind.clear)                          ; wipe all bindings
 ```

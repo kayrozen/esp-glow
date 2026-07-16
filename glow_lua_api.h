@@ -90,6 +90,20 @@ public:
 //                                 for a controller with a .mdef. No-op, not
 //                                 an error, when null or the addressed pad/
 //                                 fader has no LED (see mdef.h/FORMAT.md).
+//                                 Raw note address, channel-agnostic -- the
+//                                 escape hatch for simple controllers.
+//   glow.led.set-xy/auto-xy    — like glow.led.set/auto, but resolves a grid
+//                                 (col, row) coordinate to a (note, channel)
+//                                 via resolvePadXY (mdef.h), same as
+//                                 glow.bind.pad-xy, and drives the
+//                                 channel-aware LedFeedback::set/setAuto
+//                                 overload so a channel-multiplexed pad (the
+//                                 APC40's clip grid) lights on the right
+//                                 channel. No-op, not an error, when there is
+//                                 no LED capability or the coordinate is out
+//                                 of range -- the primary, controller-
+//                                 agnostic form; glow.led.set/auto above is
+//                                 the raw-note fallback.
 //   glow.wled.fx/color/on/off/fx-broadcast — wraps WledManager (nullable):
 //                                 named WLED UDP Notifier targets declared
 //                                 by the .show file's WLED directive (see
@@ -193,6 +207,8 @@ private:
   static int l_bind_clear(lua_State* L);
   static int l_led_set(lua_State* L);
   static int l_led_auto(lua_State* L);
+  static int l_led_set_xy(lua_State* L);
+  static int l_led_auto_xy(lua_State* L);
   static int l_param_get(lua_State* L);
 
   static int l_wled_fx(lua_State* L);

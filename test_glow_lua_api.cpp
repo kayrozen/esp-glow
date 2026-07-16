@@ -46,6 +46,13 @@ std::string readFennelSource() {
   return ss.str();
 }
 
+std::string readDemoBootFnl() {
+  std::ifstream f("samples/demo-boot.fnl", std::ios::binary);
+  std::stringstream ss;
+  ss << f.rdbuf();
+  return ss.str();
+}
+
 class FakeMatrixRegistry : public IMatrixRegistry {
 public:
   explicit FakeMatrixRegistry(std::vector<PixelMatrix*> mats) : mats_(std::move(mats)) {}
@@ -760,6 +767,49 @@ MidiControllerProfile buildGridProfile() {
   }
   return p;
 }
+
+// Same grid, but with a channel-significant LED range covering both rows
+// (mirrors the APC40's clip grid, where LED output honours the channel) --
+// this is the shape glow.led.set-xy/auto-xy need to prove the resolved
+// channel actually reaches the emitted MIDI bytes.
+MidiControllerProfile buildGridProfileWithLed() {
+  ControllerBuilder b;
+  b.name = "Test Grid With LED";
+  b.pads.push_back({53, 53, 0, 3});  // row 0
+  b.pads.push_back({54, 54, 0, 3});  // row 1
+
+  ControllerLedSpec led;
+  led.msgType = LedMsgType::Note;
+  led.addrFrom = 53;
+  led.addrTo = 54;
+  led.semantic = LedSemantic::Velocity;
+  led.colors.push_back({"off", 0});
+  led.colors.push_back({"green", 1});
+  led.channelFrom = 0;
+  led.channelTo = 3;
+  b.leds.push_back(led);
+
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  MidiControllerProfile p;
+  if (!err.empty() || !parseMidiController(blob.data(), blob.size(), p)) {
+    printf("FATAL: buildGridProfileWithLed failed: %s\n", err.c_str());
+    std::abort();
+  }
+  return p;
+}
+
+struct SentMsg {
+  uint8_t status, data1, data2;
+};
+
+class FakeMidiOutput : public IMidiOutput {
+public:
+  void send3(uint8_t status, uint8_t data1, uint8_t data2) override {
+    sent.push_back({status, data1, data2});
+  }
+  std::vector<SentMsg> sent;
+};
 }  // namespace
 
 void test_bind_pad_xy_resolves_grid_and_binds_packed_id() {
@@ -817,6 +867,283 @@ void test_bind_pad_xy_no_led_feedback_is_a_no_op() {
 
   h.evalOrDie("(glow.cue.define :a {:effects []})");
   CHECK(h.eval("(glow.bind.pad-xy 0 0 :flash :a)"));
+}
+
+// ============================================================================
+// glow.led.set-xy / glow.led.auto-xy: the LED half of pad-addressing parity
+// -- resolves (col, row) via the same resolvePadXY as glow.bind.pad-xy, and
+// the regression test for the channel bug: the resolved channel must reach
+// the emitted MIDI status byte, not just get computed and dropped.
+// ============================================================================
+
+void test_led_set_xy_emits_resolved_channel() {
+  TEST("glow.led.set-xy: resolves (col,row) -> (note,channel) and emits on that channel");
+
+  MidiControllerProfile profile = buildGridProfileWithLed();
+  FakeMidiOutput out;
+  LedFeedback lf(profile, &out, 1000.0f);
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc, nullptr, nullptr, &lf);
+
+  h.evalOrDie("(glow.led.set-xy 2 0 :green)");  // col=2,row=0 -> note 53, channel 2
+  lf.refresh(h.show, 0.0f);
+
+  CHECK(out.sent.size() == 1);
+  CHECK(out.sent[0].status == (0x90 | 0x02));  // Note On, channel nibble 2
+  CHECK(out.sent[0].data1 == 53 && out.sent[0].data2 == 1);
+}
+
+void test_led_auto_xy_emits_resolved_channel() {
+  TEST("glow.led.auto-xy: tracks a cue and emits on the resolved channel");
+
+  MidiControllerProfile profile = buildGridProfileWithLed();
+  FakeMidiOutput out;
+  LedFeedback lf(profile, &out, 1000.0f);
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc, nullptr, nullptr, &lf);
+
+  h.evalOrDie("(glow.cue.define :chorus {:effects []})");
+  h.evalOrDie("(glow.led.auto-xy 1 1 :chorus :green :off)");  // col=1,row=1 -> note 54, channel 1
+
+  // Initial paint: cue inactive -> "off".
+  lf.refresh(h.show, 0.0f);
+  CHECK(out.sent.size() == 1);
+  CHECK(out.sent[0].status == (0x90 | 0x01));  // channel nibble 1
+  CHECK(out.sent[0].data1 == 54 && out.sent[0].data2 == 0);
+  out.sent.clear();
+
+  uint16_t cueId;
+  CHECK(h.api.cueIdForName("chorus", cueId));
+  h.show.go(cueId, 0.1f);
+  lf.refresh(h.show, 0.1f);
+  CHECK(out.sent.size() == 1);
+  CHECK(out.sent[0].status == (0x90 | 0x01));
+  CHECK(out.sent[0].data1 == 54 && out.sent[0].data2 == 1);  // "green"
+}
+
+void test_led_xy_out_of_range_is_a_no_op() {
+  TEST("glow.led.set-xy/auto-xy: out-of-range (col,row) -> no-op, not an error");
+
+  MidiControllerProfile profile = buildGridProfileWithLed();
+  FakeMidiOutput out;
+  LedFeedback lf(profile, &out, 1000.0f);
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc, nullptr, nullptr, &lf);
+
+  h.evalOrDie("(glow.cue.define :a {:effects []})");
+  CHECK(h.eval("(glow.led.set-xy 0 5 :green)"));   // row 5 doesn't exist
+  CHECK(h.eval("(glow.led.set-xy 9 0 :green)"));   // col 9 past this grid's channel span
+  CHECK(h.eval("(glow.led.auto-xy 0 5 :a :green :off)"));
+  CHECK(h.eval("(glow.led.auto-xy 9 0 :a :green :off)"));
+
+  lf.refresh(h.show, 0.0f);
+  CHECK(out.sent.empty());
+}
+
+void test_led_xy_no_led_feedback_is_a_no_op() {
+  TEST("glow.led.set-xy/auto-xy: no LedFeedback wired (no .mdef) -- no-op, not an error");
+
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc);  // no LedFeedback
+
+  h.evalOrDie("(glow.cue.define :a {:effects []})");
+  CHECK(h.eval("(glow.led.set-xy 0 0 :green)"));
+  CHECK(h.eval("(glow.led.auto-xy 0 0 :a :green :off)"));
+}
+
+void test_bind_pad_xy_and_led_auto_xy_agree_on_note_and_channel() {
+  TEST("glow.bind.pad-xy and glow.led.auto-xy on the same (col,row) resolve to the same (note,channel)");
+
+  MidiControllerProfile profile = buildGridProfileWithLed();
+  FakeMidiOutput out;
+  LedFeedback lf(profile, &out, 1000.0f);
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc, nullptr, nullptr, &lf);
+  h.live.setControllerProfile(&profile);
+
+  h.evalOrDie("(glow.cue.define :a {:effects []})");
+  h.evalOrDie("(glow.bind.pad-xy 2 0 :flash :a)");        // col=2,row=0 -> note 53, channel 2
+  h.evalOrDie("(glow.led.auto-xy 2 0 :a :green :off)");    // same coordinate
+
+  // Initial paint: inactive -> off, on channel 2.
+  lf.refresh(h.show, 0.0f);
+  CHECK(out.sent.size() == 1);
+  CHECK(out.sent[0].status == (0x90 | 0x02));
+  CHECK(out.sent[0].data1 == 53 && out.sent[0].data2 == 0);
+  out.sent.clear();
+
+  // The incoming MIDI event that bind.pad-xy actually resolved to (note 53,
+  // channel 2) activates the cue -- proving bind and feedback agree.
+  uint16_t cueId;
+  CHECK(h.api.cueIdForName("a", cueId));
+  ControlEvent ev;
+  uint8_t msg[] = {0x92, 53, 100};  // Note On, channel 2, note 53
+  CHECK(parseMidi(msg, 3, ev));
+  h.live.handle(ev, 0.1f);
+  CHECK(h.show.isActive(cueId));
+
+  lf.refresh(h.show, 0.1f);
+  CHECK(out.sent.size() == 1);
+  CHECK(out.sent[0].status == (0x90 | 0x02));
+  CHECK(out.sent[0].data1 == 53 && out.sent[0].data2 == 1);  // "green"
+}
+
+void test_led_set_raw_note_unchanged() {
+  TEST("glow.led.set: raw-note form unchanged (channel-agnostic) for a simple controller");
+
+  ControllerBuilder b;
+  b.name = "Simple";
+  b.pads.push_back({53, 53});
+  ControllerLedSpec led;
+  led.msgType = LedMsgType::Note;
+  led.addrFrom = 53;
+  led.addrTo = 53;
+  led.semantic = LedSemantic::Velocity;
+  led.colors.push_back({"off", 0});
+  led.colors.push_back({"on", 1});
+  b.leds.push_back(led);
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  MidiControllerProfile profile;
+  CHECK(parseMidiController(blob.data(), blob.size(), profile));
+
+  FakeMidiOutput out;
+  LedFeedback lf(profile, &out, 1000.0f);
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc, nullptr, nullptr, &lf);
+
+  h.evalOrDie("(glow.led.set 53 :on)");
+  lf.refresh(h.show, 0.0f);
+  CHECK(out.sent.size() == 1);
+  CHECK(out.sent[0].status == 0x90);  // channel nibble 0, unchanged behaviour
+  CHECK(out.sent[0].data1 == 53 && out.sent[0].data2 == 1);
+}
+
+void test_led_auto_raw_note_unchanged() {
+  TEST("glow.led.auto: raw-note form unchanged (channel-agnostic) for a simple controller");
+
+  ControllerBuilder b;
+  b.name = "Simple";
+  b.pads.push_back({53, 53});
+  ControllerLedSpec led;
+  led.msgType = LedMsgType::Note;
+  led.addrFrom = 53;
+  led.addrTo = 53;
+  led.semantic = LedSemantic::Velocity;
+  led.colors.push_back({"off", 0});
+  led.colors.push_back({"on", 1});
+  b.leds.push_back(led);
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  MidiControllerProfile profile;
+  CHECK(parseMidiController(blob.data(), blob.size(), profile));
+
+  FakeMidiOutput out;
+  LedFeedback lf(profile, &out, 1000.0f);
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc, nullptr, nullptr, &lf);
+
+  h.evalOrDie("(glow.cue.define :chorus {:effects []})");
+  h.evalOrDie("(glow.led.auto 53 :chorus :on :off)");
+  lf.refresh(h.show, 0.0f);
+  CHECK(out.sent.size() == 1);
+  CHECK(out.sent[0].status == 0x90);  // channel nibble 0, unchanged behaviour
+  CHECK(out.sent[0].data1 == 53 && out.sent[0].data2 == 0);
+}
+
+// ============================================================================
+// samples/demo-boot.fnl: the acceptance case. Mirrors samples/apc40.mdef's
+// 8-track x 5-scene clip-launch grid (notes 53..57, channel = track) --
+// the real .mdef text isn't parsed here (parseControllerDef/provision.h
+// aren't linked into this test binary; see the Makefile's
+// GLOW_LUA_API_SOURCES), so it's built directly via ControllerBuilder,
+// same approach as buildGridProfile/buildGridProfileWithLed above.
+// ============================================================================
+
+namespace {
+MidiControllerProfile buildApc40GridProfile() {
+  ControllerBuilder b;
+  b.name = "Akai APC40 mkII (grid only)";
+  for (uint8_t note = 53; note <= 57; ++note) {
+    b.pads.push_back({note, note, 0, 7});
+  }
+
+  ControllerLedSpec led;
+  led.msgType = LedMsgType::Note;
+  led.addrFrom = 53;
+  led.addrTo = 57;
+  led.semantic = LedSemantic::Velocity;
+  led.colors.push_back({"off", 0});
+  led.colors.push_back({"red", 5});
+  led.colors.push_back({"yellow", 13});
+  led.colors.push_back({"green", 21});
+  led.colors.push_back({"blue", 41});
+  led.channelFrom = 0;
+  led.channelTo = 7;
+  b.leds.push_back(led);
+
+  std::string err;
+  std::vector<uint8_t> blob = b.encode(err);
+  MidiControllerProfile p;
+  if (!err.empty() || !parseMidiController(blob.data(), blob.size(), p)) {
+    printf("FATAL: buildApc40GridProfile failed: %s\n", err.c_str());
+    std::abort();
+  }
+  return p;
+}
+}  // namespace
+
+void test_demo_boot_fnl_loads_clean_and_pads_mirror_cues() {
+  TEST("samples/demo-boot.fnl loads clean on the APC40 grid; pads mirror their cues");
+
+  MidiControllerProfile profile = buildApc40GridProfile();
+  FakeMidiOutput out;
+  LedFeedback lf(profile, &out, 1000.0f);
+  std::string fsrc = readFennelSource();
+  Harness h(fsrc, nullptr, nullptr, &lf);
+  h.live.setControllerProfile(&profile);
+
+  std::string demoBoot = readDemoBootFnl();
+  CHECK(!demoBoot.empty());
+  std::string err;
+  if (!h.eval(demoBoot.c_str(), &err)) {
+    printf("FAIL: samples/demo-boot.fnl did not load clean: %s\n", err.c_str());
+    g_failCount++;
+    return;
+  }
+
+  // Initial LED paint: every bound pad's cue starts inactive -> "off".
+  lf.refresh(h.show, 0.0f);
+  out.sent.clear();
+
+  // col=0,row=0 -> note 53, channel 0, bound to :warm (flash), LED red/off.
+  uint16_t warmId;
+  CHECK(h.api.cueIdForName("warm", warmId));
+  ControlEvent ev;
+  uint8_t msg[] = {0x90, 53, 100};  // Note On, channel 0, note 53
+  CHECK(parseMidi(msg, 3, ev));
+  h.live.handle(ev, 0.1f);
+  CHECK(h.show.isActive(warmId));
+
+  lf.refresh(h.show, 0.1f);
+  CHECK(out.sent.size() == 1);
+  CHECK(out.sent[0].status == 0x90);  // channel nibble 0 -- the bind and the LED agree
+  CHECK(out.sent[0].data1 == 53 && out.sent[0].data2 == 5);  // "red"
+  out.sent.clear();
+
+  // col=1,row=1 -> note 54, channel 1, bound to :verse (toggle), LED yellow/off.
+  uint16_t verseId;
+  CHECK(h.api.cueIdForName("verse", verseId));
+  ControlEvent ev2;
+  uint8_t msg2[] = {0x91, 54, 100};  // Note On, channel 1, note 54
+  CHECK(parseMidi(msg2, 3, ev2));
+  h.live.handle(ev2, 0.2f);
+  CHECK(h.show.isActive(verseId));
+
+  lf.refresh(h.show, 0.2f);
+  CHECK(out.sent.size() == 1);
+  CHECK(out.sent[0].status == (0x90 | 0x01));  // channel nibble 1
+  CHECK(out.sent[0].data1 == 54 && out.sent[0].data2 == 13);  // "yellow"
 }
 
 // ============================================================================
@@ -1007,6 +1334,15 @@ int main() {
   test_bind_pad_xy_resolves_grid_and_binds_packed_id();
   test_bind_pad_xy_out_of_range_is_a_no_op();
   test_bind_pad_xy_no_led_feedback_is_a_no_op();
+
+  test_led_set_xy_emits_resolved_channel();
+  test_led_auto_xy_emits_resolved_channel();
+  test_led_xy_out_of_range_is_a_no_op();
+  test_led_xy_no_led_feedback_is_a_no_op();
+  test_bind_pad_xy_and_led_auto_xy_agree_on_note_and_channel();
+  test_led_set_raw_note_unchanged();
+  test_led_auto_raw_note_unchanged();
+  test_demo_boot_fnl_loads_clean_and_pads_mirror_cues();
 
   test_bind_pitchbend_param_drives_glow_param_get();
   test_bind_pressure_cue_level_holds_cue();

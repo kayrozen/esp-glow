@@ -200,25 +200,49 @@ bindable instead of collapsing onto the same cue.
 
 ### LED feedback: `glow.led.*` (needs a `.mdef`)
 
+`(col, row)` is the primary way to address a pad's LED, resolved through the
+same `resolvePadXY` grid `glow.bind.pad-xy` uses -- so a pad bound by
+`(col, row)` gets its feedback by the same `(col, row)`, with no note number
+ever hand-copied between the two. Raw note stays available as the escape
+hatch for controllers with no grid (a single fader-ring LED, an agnostic pad):
+
 ```fennel
-(glow.led.set 53 :red)                  ; by colour name, from the pad's
-                                        ;  own LED range palette (.mdef)
-(glow.led.set 53 :off)
-(glow.led.auto 53 :chorus :green :off)  ; pad 53 tracks cue :chorus: green
-                                        ;  while active, off while not
+(glow.led.set-xy  0 0 :red)                     ; grid (col,row) -> the pad's
+                                                 ;  own LED range palette (.mdef),
+                                                 ;  on the resolved channel
+(glow.led.set-xy  0 0 :off)
+(glow.led.auto-xy 0 0 :chorus :green :off)      ; pad (0,0) tracks cue :chorus:
+                                                 ;  green while active, off while not
+
+(glow.led.set  53 :red)                         ; raw note, channel-agnostic --
+(glow.led.auto 53 :chorus :green :off)          ;  the escape hatch, unchanged
 ```
 
-`glow.led.auto` is the one that makes a controller feel alive: register it
-once per pad and it stays in sync with the show with no further scripting.
-Internally it re-evaluates every render frame against `ShowController`
-(`LedFeedback::refresh`, see `led_feedback.h`) and only ever sends MIDI when
-a pad's colour actually changes -- a static show emits zero ongoing MIDI
-traffic, and a burst of simultaneous changes (a scene cut touching 40 pads)
-is rate-limited (default 100 msg/sec) rather than flooding the DIN link.
+`glow.led.auto`/`glow.led.auto-xy` are what make a controller feel alive:
+register one per pad and it stays in sync with the show with no further
+scripting. Internally it re-evaluates every render frame against
+`ShowController` (`LedFeedback::refresh`, see `led_feedback.h`) and only ever
+sends MIDI when a pad's colour actually changes -- a static show emits zero
+ongoing MIDI traffic, and a burst of simultaneous changes (a scene cut
+touching 40 pads) is rate-limited (default 100 msg/sec) rather than flooding
+the DIN link.
 
-Both `glow.led.*` calls are **no-ops**, not errors, when:
+The `-xy` forms are the functional fix for a channel-multiplexed grid (the
+APC40's clip-launch pads, which multiplex track onto the MIDI channel):
+`resolvePadXY` returns both the note AND the channel, and `LedFeedback`
+carries that channel all the way into the emitted status byte's nibble (see
+its channel-aware `set`/`setAuto` overloads) -- so pad `(2, 0)` and pad `(5,
+0)` (same note, different track/channel) light independently instead of one
+stomping the other. The raw-note forms have no channel concept at all, which
+is exactly why they can't address a channel-multiplexed grid pad on their
+own -- they're the right fallback for a controller where channel doesn't
+carry addressing meaning.
+
+Every `glow.led.*` call is a **no-op**, not an error, when:
 - the device has no `LedFeedback` wired up at all (no `.mdef` was embedded
   in the SHW1 bundle, or the device build has no MIDI OUT transport), or
+- (`-xy` forms only) the `(col, row)` coordinate is out of range for the
+  loaded controller's declared grid (`resolvePadXY` returns false), or
 - the addressed note/CC has no `LED` range in the loaded `.mdef`, or
 - the colour name isn't in that LED range's palette.
 
