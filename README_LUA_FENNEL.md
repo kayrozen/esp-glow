@@ -7,13 +7,14 @@ The C++ engine keeps doing hard real-time; Lua composes and parameterises
 it.
 
 **The `glow.*` function list below is illustrative, not authoritative** --
-the full, always-current signature list is generated straight from
-`glow_lua_api.cpp` on the docs site (`docs/generated/api-reference.md`,
-built by `docs/build/gen-reference.mjs`; CI fails if it's ever out of sync
-with the source). See `docs/architecture.md` for this same "why" narrative
-kept in sync with the generated reference. This file's real-time-safety and
-sandboxing sections are the canonical hand-written explanation of *why*
-the layer is shaped this way.
+see `docs/reference.md` for the full, hand-written entry on every function
+(and `docs/authoring.md` for a concept-first guide to using them). CI
+checks `docs/reference.md` against the real names registered in
+`glow_lua_api.cpp` and fails the build if they ever disagree
+(`docs/build/gen-reference.mjs`), so that page can't silently go stale.
+See `docs/architecture.md` for this same "why" narrative. This file's
+real-time-safety and sandboxing sections are the canonical hand-written
+explanation of *why* the layer is shaped this way.
 
 ```
 C++ / FreeRTOS   — DMX + Art-Net out, render loop @44 Hz, pixel engine, aim geometry

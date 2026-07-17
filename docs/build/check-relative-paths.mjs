@@ -11,10 +11,9 @@
 // still work in local dev, where static-server.js's ROOT is one level
 // higher (see provisioner.yml's original top-level-only version of this
 // check, which only covered that one case). This is a depth-aware
-// generalization covering files nested arbitrarily deep too (e.g.
-// docs/interactive/demo-walkthrough.js), where the CORRECT relative path
-// legitimately contains "../../..." and a blanket "no .. allowed" rule
-// would reject valid code.
+// generalization covering files nested arbitrarily deep too, where the
+// CORRECT relative path legitimately contains "../../..." and a blanket
+// "no .. allowed" rule would reject valid code.
 //
 // Usage: node docs/build/check-relative-paths.mjs <site-root-directory>
 

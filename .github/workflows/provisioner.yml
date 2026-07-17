@@ -5,13 +5,15 @@
 #   1. build-wasm: installs emsdk, compiles provision.cpp + wasm-glue.cpp
 #      to provision-wasm.{js,wasm}, runs the 14 C++ tests under Node to
 #      verify the WASM build matches the host build, uploads the artifacts.
-#   2. build-docs: regenerates docs/generated/ from source
-#      (glow_lua_api.cpp, provision.cpp, live_control.h, Makefile) via
-#      docs/build/gen-reference.mjs and fails the build if the committed
-#      copy doesn't match a fresh generation (the anti-drift guard --
-#      see docs/build/gen-reference.mjs's own header) -- also runs the
-#      generator's unit tests and the interactive demo walkthrough's
-#      Playwright test.
+#   2. build-docs: extracts the real glow.* API names + text-format grammar
+#      keywords from source (glow_lua_api.cpp, provision.cpp) via
+#      docs/build/gen-reference.mjs, fails the build if docs/generated/
+#      glow-api-names.json doesn't match a fresh extraction, and fails the
+#      build if the hand-written docs/reference.md / docs/grammar.md don't
+#      document exactly that set (the anti-drift guard, now enforced as
+#      completeness rather than generated prose -- see
+#      docs/build/gen-reference.mjs's own header) -- also runs the
+#      checker's own unit tests.
 #   3. deploy-pages: needs both of the above. Downloads the WASM +
 #      firmware artifacts, assembles the static editor bundle
 #      (web/provisioner-static/), renders the docs site into its `docs/`
@@ -29,8 +31,9 @@
 # glow_lua_api.{cpp,h}, live_control.h, pixel_patterns.*,
 # samples/demo-boot.fnl, Makefile, or the workflow itself -- build-wasm and
 # build-docs both run (and must pass) on every branch/PR, not just main, so
-# a WASM regression or a `glow.*`/grammar change without a regenerated
-# docs/generated/ is caught before merge instead of after (this used to be
+# a WASM regression or a `glow.*`/grammar change without a matching update
+# to docs/reference.md / docs/grammar.md is caught before merge instead of
+# after (this used to be
 # push-to-main-only for build-wasm, so a break could merge cleanly and only
 # surface once it hit main). deploy-pages still only fires for an actual
 # push to main (or the Firmware build workflow finishing on main, or manual
@@ -189,35 +192,26 @@ jobs:
           retention-days: 7
 
   build-docs:
-    name: Generate + drift-check docs
+    name: Check docs completeness
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run the generator's unit tests (regex extraction against fixtures)
+      - name: Run the checker's unit tests (regex extraction + completeness diff, against fixtures)
         run: node docs/build/gen-reference.test.mjs
 
-      - name: Drift guard -- fail if docs/generated/ doesn't match a fresh generation
+      - name: Drift guard -- fail if docs/generated/glow-api-names.json doesn't match a fresh extraction,
+              or if docs/reference.md / docs/grammar.md don't cover exactly the real glow.* API / grammar
         run: |
-          # A glow.* or grammar change without a regenerate leaves
-          # docs/generated/ stale -- --check compares a fresh generation
-          # against the committed files in-memory (writes nothing) and
-          # fails instead of silently letting the reference drift (see
-          # docs/build/gen-reference.mjs's own header for why).
+          # Two failure modes, both fatal: (1) glow-api-names.json stale --
+          # --check compares a fresh extraction against the committed file
+          # in-memory (writes nothing); (2) the hand-written docs/reference.md
+          # or docs/grammar.md documents a glow.* name / grammar keyword that
+          # doesn't exist in source, or is missing one that does -- see
+          # docs/build/gen-reference.mjs's own header for why this replaced
+          # generating the prose itself.
           node docs/build/gen-reference.mjs --check
-
-      - name: Install Playwright + Chromium (oracle browser for the demo walkthrough test below)
-        run: |
-          # docs/interactive/demo-walkthrough.html runs fennel-check.js,
-          # which needs a real browser JS environment (see the equivalent
-          # step in build-wasm above for why). --no-save so this doesn't
-          # create/modify a repo package.json.
-          npm install --no-save playwright@1.56.1
-          npx playwright install --with-deps chromium
-
-      - name: Run the interactive demo walkthrough's Playwright test
-        run: node docs/build/test-demo-walkthrough.mjs
 
   deploy-pages:
     name: Deploy to GitHub Pages
@@ -277,17 +271,13 @@ jobs:
 
       - name: Render docs site into web/provisioner-static/docs/
         run: |
-          # build-docs already proved the committed docs/generated/ matches
-          # a fresh generation from source, and that the interactive
-          # walkthrough compiles clean -- this just renders the Markdown
-          # (hand-written docs/*.md + the already-committed docs/generated/
-          # *.md) to static HTML and copies the interactive page + the real
-          # samples/demo-boot.fnl it fetches. One deploy, two artifacts,
-          # alongside the provisioner above.
+          # build-docs already proved docs/reference.md and docs/grammar.md
+          # cover exactly the real glow.* API and text-format grammar --
+          # this just renders the hand-written Markdown (docs/*.md) to
+          # static HTML. One deploy, two artifacts, alongside the
+          # provisioner above.
           node docs/build/render-site.mjs --out web/provisioner-static/docs
           test -f web/provisioner-static/docs/index.html
-          test -f web/provisioner-static/docs/interactive/demo-walkthrough.html
-          test -f web/provisioner-static/docs/samples/demo-boot.fnl
 
       - name: Build static site
         run: |
@@ -311,8 +301,7 @@ jobs:
         run: |
           # web/provisioner-static/ becomes the *root* of the deployed site
           # (kayrozen.github.io/esp-glow/), with shared/, vendor/, and now
-          # docs/ (nested, itself with its own docs/interactive/ subfolder)
-          # living under it. A relative reference with enough "../" to walk
+          # docs/ living under it. A relative reference with enough "../" to walk
           # above this root resolves off the actual site and 404s on Pages
           # -- even though it can happen to work in local dev, and even
           # though a file nested under docs/ legitimately NEEDS "../../" to
