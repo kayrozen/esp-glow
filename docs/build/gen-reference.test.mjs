@@ -1,27 +1,31 @@
-// gen-reference.test.mjs — unit tests for gen-reference.mjs's extraction
-// regexes, run against small fixture strings (not the real source files) so
-// a source-format change that breaks extraction is caught here directly,
-// rather than only showing up as an empty/wrong generated page later.
+// gen-reference.test.mjs — unit tests for gen-reference.mjs, the docs
+// completeness checker, run against small fixture strings (not the real
+// source/doc files) so a source- or doc-format change that breaks
+// extraction is caught here directly, rather than only showing up as a
+// checker that silently stops checking anything.
 //
-// Also proves the anti-drift guard has teeth: mutates a fixture "source
-// file" (a name a script would extract) and asserts the generator's output
-// actually changes -- if it didn't, `git diff --exit-code docs/generated/`
-// in CI would never fire on a real drift either.
+// The property that matters most: the checker has teeth. A `glow.*` name
+// (or grammar keyword) present in "source" but missing from "docs" must be
+// reported as undocumented; one present in "docs" but absent from "source"
+// must be reported as documenting something nonexistent; and a fixture pair
+// that matches exactly must report zero problems. If any of those three
+// didn't hold, `node docs/build/gen-reference.mjs --check` in CI would never
+// fire on a real drift either.
 //
 // Run: node docs/build/gen-reference.test.mjs
 
 import {
   extractFunctionBody,
-  inferArgs,
   extractGlowApiStructure,
-  extractCapabilities,
-  extractMatrixPatterns,
-  buildGlowApi,
+  namesFromGlowApiStructure,
+  extractGlowApiNames,
   extractKeywords,
   buildGrammar,
-  extractActionKinds,
-  extractTestSuiteCount,
-  generateAll,
+  grammarKeywordsByFormat,
+  extractDocumentedGlowNames,
+  extractDocumentedGrammarKeywords,
+  diffNames,
+  checkCompleteness,
 } from "./gen-reference.mjs";
 
 let failures = 0;
@@ -47,41 +51,7 @@ function check(name, cond, detail) {
 
 check("extractFunctionBody returns null for an absent signature", extractFunctionBody("int foo() {}", /int missing\(\)\s*/g) === null);
 
-// --- inferArgs -----------------------------------------------------------
-
-{
-  const body = `
-    uint16_t fid = checkFixtureId(L, 1);
-    double v = luaL_checknumber(L, 2);
-  `;
-  const args = inferArgs(body);
-  check("inferArgs reads recognized helpers in stack-index order", JSON.stringify(args) === JSON.stringify(["fixture", "number"]), JSON.stringify(args));
-}
-
-{
-  // Ambiguous: index 2 touched by two different recognized helpers across
-  // branches -- must fall back to the generic "value", not silently pick one.
-  const body = `
-    uint16_t fid = checkFixtureId(L, 1);
-    if (x) { double v = luaL_checknumber(L, 2); } else { luaL_checkstring(L, 2); }
-  `;
-  const args = inferArgs(body);
-  check("inferArgs falls back to generic 'value' on ambiguous branches", args[1] === "value", JSON.stringify(args));
-}
-
-{
-  const body = `
-    uint16_t fid = checkFixtureId(L, 1);
-    double b = 0.5;
-    if (lua_gettop(L) >= 2 && !lua_isnil(L, 2)) { b = luaL_checknumber(L, 2); }
-  `;
-  const args = inferArgs(body);
-  check("inferArgs marks a guarded trailing argument optional", args[1] === "number?", JSON.stringify(args));
-}
-
-check("inferArgs returns null when nothing recognizable is present", inferArgs("return 0;") === null);
-
-// --- extractGlowApiStructure / extractCapabilities / extractMatrixPatterns
+// --- extractGlowApiStructure / namesFromGlowApiStructure ------------------
 
 const FIXTURE_GLOW_API_CPP = `
 constexpr CapName kCapNames[] = {
@@ -105,16 +75,10 @@ void GlowLuaApi::install() {
   lua_setglobal(L, "glow");
 }
 
-int GlowLuaApi::l_set(lua_State* L) {
-  uint16_t fid = checkFixtureId(L, 1);
-  return 0;
-}
+int GlowLuaApi::l_set(lua_State* L) { return 0; }
 int GlowLuaApi::l_cue_define(lua_State* L) { return 0; }
 int GlowLuaApi::l_cue_go(lua_State* L) { return 0; }
 int GlowLuaApi::l_beat_phase(lua_State* L) { return 0; }
-
-  if (std::strcmp(patName, "plasma") == 0) {}
-  else if (std::strcmp(patName, "rainbow") == 0) {}
 `;
 
 {
@@ -128,19 +92,12 @@ int GlowLuaApi::l_beat_phase(lua_State* L) { return 0; }
 }
 
 {
-  const caps = extractCapabilities(FIXTURE_GLOW_API_CPP);
-  check("extractCapabilities parses the kCapNames array", caps.length === 2 && caps[0].name === "dimmer" && caps[0].enumMember === "Dimmer", JSON.stringify(caps));
-}
-
-{
-  const patterns = extractMatrixPatterns(FIXTURE_GLOW_API_CPP);
-  check("extractMatrixPatterns parses the strcmp chain", JSON.stringify(patterns) === JSON.stringify(["plasma", "rainbow"]), JSON.stringify(patterns));
-}
-
-{
-  const api = buildGlowApi(FIXTURE_GLOW_API_CPP);
-  const setFn = api.groups.find((g) => g.name === null).fns.find((f) => f.luaName === "set");
-  check("buildGlowApi attaches inferred args to each function", JSON.stringify(setFn.args) === JSON.stringify(["fixture"]), JSON.stringify(setFn));
+  const names = extractGlowApiNames(FIXTURE_GLOW_API_CPP);
+  check(
+    "extractGlowApiNames produces sorted dotted names",
+    JSON.stringify(names) === JSON.stringify(["glow.beat", "glow.cue.define", "glow.cue.go", "glow.set"]),
+    JSON.stringify(names),
+  );
 }
 
 // --- grammar keyword extraction ------------------------------------------
@@ -156,74 +113,210 @@ int GlowLuaApi::l_beat_phase(lua_State* L) { return 0; }
   check("extractKeywords dedupes repeated keywords, keeps first-seen order", JSON.stringify(keywords) === JSON.stringify(["FIXTURE", "FOOTPRINT"]), JSON.stringify(keywords));
 }
 
-{
-  const src = `
+const FIXTURE_PROVISION_CPP = `
 bool parseFixtureDef(const std::string& text, FixtureDef& out, std::string& err) {
   if (cmd == "FIXTURE") {}
   else if (cmd == "CAP") {}
   return true;
 }`;
-  const grammar = buildGrammar(src);
+
+{
+  const grammar = buildGrammar(FIXTURE_PROVISION_CPP);
   const fdef = grammar.find((g) => g.format === ".fdef");
   check("buildGrammar extracts .fdef keywords from parseFixtureDef", JSON.stringify(fdef.keywords) === JSON.stringify(["FIXTURE", "CAP"]), JSON.stringify(fdef));
   const mdef = grammar.find((g) => g.format === ".mdef");
   check("buildGrammar reports non-extraction when a signature is absent", mdef.extracted === false && mdef.keywords.length === 0);
 }
 
-// --- ActionKind -----------------------------------------------------------
-
 {
-  const src = `enum class ActionKind : uint8_t { CueFlash, CueToggle, SceneGo, SceneToggle, Master, CueLevel, ParamSet };`;
-  const kinds = extractActionKinds(src);
-  check("extractActionKinds parses the enum member list", kinds.length === 7 && kinds[0] === "CueFlash" && kinds[6] === "ParamSet", JSON.stringify(kinds));
+  const byFormat = grammarKeywordsByFormat(FIXTURE_PROVISION_CPP);
+  check("grammarKeywordsByFormat keys by format", JSON.stringify(byFormat[".fdef"]) === JSON.stringify(["FIXTURE", "CAP"]), JSON.stringify(byFormat));
 }
 
-check("extractActionKinds returns [] when the enum isn't found", JSON.stringify(extractActionKinds("// nothing here")) === "[]");
-
-// --- test suite count -----------------------------------------------------
+// --- extractDocumentedGlowNames -------------------------------------------
 
 {
-  const makefile = `
-.PHONY: test
+  const md = `
+# Reference
 
-test: $(AIM_TARGET) $(FP_TARGET)
-\t./$(AIM_TARGET)
-\t./$(FP_TARGET)
+## Fixtures
 
-test-importers: $(FDEF_CHECK_TARGET)
-\tnode web/shared/importers/test-importers.mjs
+### glow.set(fixtureId, capability, value)
+Sets one capability.
+
+### \`glow.aim(fixtureId, point)\`
+Aims a head.
+
+Some prose mentioning glow.set again inline, not a heading.
 `;
-  check("extractTestSuiteCount counts only the test: recipe's invocation lines", extractTestSuiteCount(makefile) === 2, extractTestSuiteCount(makefile));
+  const names = extractDocumentedGlowNames(md);
+  check(
+    "extractDocumentedGlowNames finds plain and backtick-wrapped headings, dedupes, ignores inline mentions",
+    JSON.stringify(names) === JSON.stringify(["glow.aim", "glow.set"]),
+    JSON.stringify(names),
+  );
 }
 
-// --- the drift guard has teeth: renaming a registered function in the
-// "source" changes the generated API reference output. This is the actual
-// property the CI guard (`git diff --exit-code docs/generated/`) depends
-// on -- if mutating source didn't change the generator's output, the guard
-// would be a no-op that could never catch real drift.
+// --- extractDocumentedGrammarKeywords -------------------------------------
 
 {
-  const before = renderApiOutputFor(FIXTURE_GLOW_API_CPP);
-  const mutated = FIXTURE_GLOW_API_CPP.replace(/"set"/, '"set-renamed"');
-  const after = renderApiOutputFor(mutated);
-  check("renaming a registered glow.* function changes the generated API reference", before !== after);
-  const afterNames = JSON.parse(after).groups.find((g) => g.name === null).fns.map((f) => f.luaName);
-  check("the renamed function's new name appears in the regenerated output", afterNames.includes("set-renamed") && !afterNames.includes("set"), afterNames);
+  const md = `
+# Grammar
+
+## \`.fdef\` — fixture definition
+
+### FIXTURE
+text
+
+### \`CAP\`
+text
+
+## \`.mdef\` — controller definition
+
+### CONTROLLER
+text
+`;
+  const byFormat = extractDocumentedGrammarKeywords(md);
+  check(
+    "extractDocumentedGrammarKeywords scopes keywords to their section, handles backticks",
+    JSON.stringify(byFormat[".fdef"]) === JSON.stringify(["CAP", "FIXTURE"]) && JSON.stringify(byFormat[".mdef"]) === JSON.stringify(["CONTROLLER"]),
+    JSON.stringify(byFormat),
+  );
+  check("extractDocumentedGrammarKeywords reports an empty array for a format with no section", JSON.stringify(byFormat[".show"]) === JSON.stringify([]));
 }
 
-function renderApiOutputFor(glowLuaApiCppSrc) {
-  const api = buildGlowApi(glowLuaApiCppSrc);
-  return JSON.stringify(api);
-}
-
-// --- generateAll produces every expected file, deterministically ---------
+// --- diffNames --------------------------------------------------------------
 
 {
-  const files = generateAll({});
-  const expected = ["api-reference.md", "grammar-reference.md", "enumerations.md", "test-status.md", "glow-api-names.json"];
-  check("generateAll produces exactly the expected file set", expected.every((f) => f in files) && Object.keys(files).length === expected.length, Object.keys(files));
-  const files2 = generateAll({});
-  check("generateAll is deterministic given the same source tree", JSON.stringify(files) === JSON.stringify(files2));
+  const d = diffNames(["a", "b", "c"], ["b", "c", "d"]);
+  check("diffNames reports names in real but not documented as missing", JSON.stringify(d.missing) === JSON.stringify(["a"]), JSON.stringify(d));
+  check("diffNames reports names in documented but not real as stale", JSON.stringify(d.stale) === JSON.stringify(["d"]), JSON.stringify(d));
+}
+
+check("diffNames reports nothing for identical sets", JSON.stringify(diffNames(["a"], ["a"])) === JSON.stringify({ missing: [], stale: [] }));
+
+// --- checkCompleteness: the guard has teeth --------------------------------
+//
+// Three fixtures sharing the same "source": exactly matching docs (must
+// pass clean), docs missing one real name (must fail as undocumented), and
+// docs with one extra nonexistent name (must fail as documenting something
+// that doesn't exist). This is the actual property CI's
+// `node docs/build/gen-reference.mjs --check` depends on.
+
+const MATCHING_REFERENCE_MD = `
+### glow.set(fixtureId, capability, value)
+### glow.cue.define(name, opts)
+### glow.cue.go(name)
+### glow.beat()
+`;
+
+const MATCHING_GRAMMAR_MD = `
+## \`.fdef\` (fixture definition)
+
+### FIXTURE
+### CAP
+
+## \`.mdef\` (controller definition)
+
+## \`.show\` (the patch)
+`;
+
+{
+  const errors = checkCompleteness({
+    glowLuaApiCppSrc: FIXTURE_GLOW_API_CPP,
+    referenceMd: MATCHING_REFERENCE_MD,
+    provisionCppSrc: FIXTURE_PROVISION_CPP,
+    grammarMd: MATCHING_GRAMMAR_MD,
+  });
+  check("checkCompleteness reports nothing when docs match source exactly", errors.length === 0, JSON.stringify(errors));
+}
+
+{
+  // glow.beat exists in source but drop it from the docs fixture -- the
+  // checker must catch the omission, not silently pass.
+  const referenceMissingBeat = MATCHING_REFERENCE_MD.replace("### glow.beat()\n", "");
+  const errors = checkCompleteness({
+    glowLuaApiCppSrc: FIXTURE_GLOW_API_CPP,
+    referenceMd: referenceMissingBeat,
+    provisionCppSrc: FIXTURE_PROVISION_CPP,
+    grammarMd: MATCHING_GRAMMAR_MD,
+  });
+  check(
+    "checkCompleteness catches a glow.* name present in code but missing from docs/reference.md",
+    errors.some((e) => e.includes("undocumented API: glow.beat")),
+    JSON.stringify(errors),
+  );
+}
+
+{
+  // A name documented that was never registered in source -- the stale
+  // direction, e.g. a renamed/removed function whose doc entry lingers.
+  const referenceWithStaleName = MATCHING_REFERENCE_MD + "\n### glow.nonexistent()\n";
+  const errors = checkCompleteness({
+    glowLuaApiCppSrc: FIXTURE_GLOW_API_CPP,
+    referenceMd: referenceWithStaleName,
+    provisionCppSrc: FIXTURE_PROVISION_CPP,
+    grammarMd: MATCHING_GRAMMAR_MD,
+  });
+  check(
+    "checkCompleteness catches a glow.* name documented but absent from source",
+    errors.some((e) => e.includes("documents nonexistent glow.nonexistent")),
+    JSON.stringify(errors),
+  );
+}
+
+{
+  // Same two directions, for grammar keywords: FOOTPRINT is never added to
+  // GRAMMAR_SOURCES' .fdef body in this fixture pairing test, so use CAP's
+  // removal/an invented keyword instead.
+  const grammarMissingCap = MATCHING_GRAMMAR_MD.replace("### CAP\n", "");
+  const errorsMissing = checkCompleteness({
+    glowLuaApiCppSrc: FIXTURE_GLOW_API_CPP,
+    referenceMd: MATCHING_REFERENCE_MD,
+    provisionCppSrc: FIXTURE_PROVISION_CPP,
+    grammarMd: grammarMissingCap,
+  });
+  check(
+    "checkCompleteness catches a grammar keyword present in code but missing from docs/grammar.md",
+    errorsMissing.some((e) => e.includes("undocumented grammar keyword: CAP (.fdef")),
+    JSON.stringify(errorsMissing),
+  );
+
+  const grammarWithStaleKeyword = MATCHING_GRAMMAR_MD.replace("### FIXTURE\n", "### FIXTURE\n### GHOST\n");
+  const errorsStale = checkCompleteness({
+    glowLuaApiCppSrc: FIXTURE_GLOW_API_CPP,
+    referenceMd: MATCHING_REFERENCE_MD,
+    provisionCppSrc: FIXTURE_PROVISION_CPP,
+    grammarMd: grammarWithStaleKeyword,
+  });
+  check(
+    "checkCompleteness catches a grammar keyword documented but absent from source",
+    errorsStale.some((e) => e.includes("documents nonexistent grammar keyword: GHOST (.fdef")),
+    JSON.stringify(errorsStale),
+  );
+}
+
+// --- checkCompleteness against the REAL repo files ------------------------
+//
+// The fixture-based tests above prove the mechanism has teeth; this proves
+// the real docs/reference.md and docs/grammar.md in this repo actually
+// satisfy it right now -- the same check CI runs via --check, run here as
+// an ordinary unit test so `node docs/build/gen-reference.test.mjs` alone
+// catches a real drift, not just the fixture-based teeth tests above.
+
+{
+  const { readFileSync } = await import("node:fs");
+  const { join, dirname } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+  const errors = checkCompleteness({
+    glowLuaApiCppSrc: readFileSync(join(REPO_ROOT, "glow_lua_api.cpp"), "utf8"),
+    referenceMd: readFileSync(join(REPO_ROOT, "docs", "reference.md"), "utf8"),
+    provisionCppSrc: readFileSync(join(REPO_ROOT, "provision.cpp"), "utf8"),
+    grammarMd: readFileSync(join(REPO_ROOT, "docs", "grammar.md"), "utf8"),
+  });
+  check("the real docs/reference.md and docs/grammar.md are complete against the real source", errors.length === 0, JSON.stringify(errors));
 }
 
 console.log(`\n${count - failures}/${count} checks passed.`);

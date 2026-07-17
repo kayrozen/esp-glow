@@ -38,9 +38,8 @@ hardware load.
 make test
 ```
 
-Runs the host-tested suite — see the [generated test status page](generated/test-status.html)
-for the exact suite count and pass/fail as of the last docs build (extracted from the
-`Makefile`, not hand-copied, so it can't go stale the way a hand-typed count would).
+Runs the host-tested suite; see CI for the current pass/fail (a hand-typed suite count here
+would just be one more thing to keep in sync with the `Makefile`).
 
 **QEMU** boots the real firmware image in CI (asserts boot telemetry, a 5× anti-flake
 loop, addr2line-symbolicated crashes on failure). **HIL** (`tests/hil/`) covers what

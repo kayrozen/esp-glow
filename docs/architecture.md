@@ -13,15 +13,16 @@ Fennel           — Lisp surface, self-hosted compiler running ON the device
 **Lua composes and parameterises; C++ runs the tight loops.** Every design decision in
 this file exists to enforce that rule, not just to make the VM work. `glow.*` (the
 functions Fennel scripts call) is a thin, sandboxed C API surface over the existing C++
-engine — see the [generated API reference](generated/api-reference.html) for exactly
-what it exposes today; this page only covers *why* it's shaped the way it is.
+engine — see the [API reference](reference.html) for exactly what it exposes today, and
+[Writing a show](authoring.html) for how to use it; this page only covers *why* it's shaped
+the way it is.
 
 ## Patch vs. show
 
 The **patch** — which fixtures exist, what DMX channels they occupy, where they physically
 are, which universes/transports carry them — lives in the binary-encoded `.fdef`/`.show`/
 `.mdef` bundle the browser provisioner compiles and flashes (see the
-[grammar reference](generated/grammar-reference.html)). It changes rarely and is not
+[grammar reference](grammar.html)). It changes rarely and is not
 something a live-coded script can redefine; a script that could redefine channel counts
 mid-show is a script that can corrupt the render loop's fixed-size intent buffers.
 
@@ -89,8 +90,10 @@ entirely.
 
 ## Further reading
 
-- [API reference](generated/api-reference.html) / [Grammar reference](generated/grammar-reference.html) / [Enumerations](generated/enumerations.html) — generated, always current.
-- [Interactive demo walkthrough](interactive/demo-walkthrough.html) — learn the `glow.*`
-  vocabulary by editing the real demo show.
+- [Writing a show](authoring.html) — concept-first guide to the Fennel authoring layer,
+  with real examples.
+- [API reference](reference.html) / [Grammar reference](grammar.html) — every `glow.*` call
+  and every `.fdef`/`.show`/`.mdef` keyword, hand-written and checked against source in CI
+  (`docs/build/gen-reference.mjs`) so neither can silently go stale.
 - `README_LIVE_CONTROL.md`, `README_WLED.md`, `README_PIXEL_MATRIX.md` in the repo root —
   deeper hand-written notes on specific subsystems.

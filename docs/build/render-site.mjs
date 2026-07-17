@@ -1,22 +1,17 @@
 #!/usr/bin/env node
 //
-// render-site.mjs — renders docs/*.md (hand-written) and docs/generated/*.md
-// (generator output) into a small static HTML site, plus copies the
-// hand-written interactive walkthrough and the real samples/demo-boot.fnl
-// it loads. No SSG framework: markdown-lite.mjs is a few dozen lines
-// covering exactly what these pages use (see its header).
+// render-site.mjs — renders docs/*.md (all hand-written) into a small
+// static HTML site. No SSG framework: markdown-lite.mjs is a few dozen
+// lines covering exactly what these pages use (see its header).
 //
 // Usage: node docs/build/render-site.mjs --out <directory>
 //
 // The output directory becomes DOCS_ROOT inside the eventual site root --
 // i.e. pass `web/provisioner-static/docs` in the real Pages deploy (where
 // `shared/` and `vendor/` are copied in as siblings of `docs/` by the
-// existing CI step), or any scratch directory for local preview/testing as
-// long as `shared/` and `vendor/` are copied to be *its* siblings too (see
-// docs/build/test-demo-walkthrough.mjs for how the Playwright test does
-// this for a temp directory).
+// existing CI step), or any scratch directory for local preview/testing.
 
-import { readFileSync, writeFileSync, mkdirSync, cpSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { renderMarkdown, extractTitle } from "./markdown-lite.mjs";
@@ -31,21 +26,20 @@ const DOCS_SRC = join(REPO_ROOT, "docs");
 const PAGES = [
   { src: "index.md", nav: "Home" },
   { src: "architecture.md", nav: "Architecture" },
+  { src: "authoring.md", nav: "Writing a show" },
+  { src: "reference.md", nav: "API reference" },
+  { src: "grammar.md", nav: "Grammar reference" },
   { src: "bring-up.md", nav: "Bring-up" },
-  { src: "generated/api-reference.md", nav: "API reference" },
-  { src: "generated/grammar-reference.md", nav: "Grammar reference" },
-  { src: "generated/enumerations.md", nav: "Enumerations" },
-  { src: "generated/test-status.md", nav: "Test status" },
 ];
-const INTERACTIVE_NAV = { href: "interactive/demo-walkthrough.html", nav: "Interactive demo walkthrough" };
 
 function htmlOutPath(src) {
   return src.replace(/\.md$/, ".html");
 }
 
 // Depth of a docs-relative path below docs/ itself (index.md -> 0,
-// generated/api-reference.md -> 1) -- how many "../" to prepend to reach
-// docs/ (add one more to reach the site root above docs/).
+// a hypothetical subdir/page.md -> 1) -- how many "../" to prepend to reach
+// docs/ (add one more to reach the site root above docs/). Every page today
+// is top-level (depth 0); kept general in case a page ever nests.
 function depthOf(relPath) {
   return relPath.split("/").length - 1;
 }
@@ -57,7 +51,6 @@ function template({ title, bodyHtml, depth, currentSrc }) {
     const active = p.src === currentSrc ? ' class="active"' : "";
     return `<a href="${href}"${active}>${p.nav}</a>`;
   });
-  nav.push(`<a href="${depth === 0 ? INTERACTIVE_NAV.href : toDocsRoot + "/" + INTERACTIVE_NAV.href}">${INTERACTIVE_NAV.nav}</a>`);
 
   return `<!doctype html>
 <html lang="en">
@@ -153,26 +146,9 @@ function main() {
   renderPages(outDir);
   writeFileSync(join(outDir, "style.css"), STYLE_CSS);
 
-  // The interactive walkthrough is hand-written HTML (not Markdown --
-  // it's a live editor + compile-check UI, not prose), copied as-is.
-  const interactiveSrc = join(DOCS_SRC, "interactive");
-  const interactiveOut = join(outDir, "interactive");
-  cpSync(interactiveSrc, interactiveOut, { recursive: true });
-
-  // The walkthrough fetches the REAL samples/demo-boot.fnl (not a copy
-  // pasted into the page) -- copy it alongside so a same-origin relative
-  // fetch works under any Pages subpath.
-  const samplesOut = join(outDir, "samples");
-  mkdirSync(samplesOut, { recursive: true });
-  cpSync(join(REPO_ROOT, "samples", "demo-boot.fnl"), join(samplesOut, "demo-boot.fnl"));
-
   console.log(`docs site rendered to ${outDir}`);
 }
 
 if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
-  if (!existsSync(join(DOCS_SRC, "generated", "api-reference.md"))) {
-    console.error("docs/generated/ is missing -- run `node docs/build/gen-reference.mjs` first.");
-    process.exit(1);
-  }
   main();
 }

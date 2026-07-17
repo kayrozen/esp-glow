@@ -65,8 +65,9 @@ allocate every frame and feed the GC):
 (glow.cue.define :warm {:effects [breathe] :fade-in 2.0})
 (glow.cue.go :warm)
 ```
-Send it over the WebSocket REPL; the light responds immediately. See `GRAMMAR_REFERENCE.md`
-for the full `glow.*` API (set/aim/slot/cue/scene/fx/matrix/beat/bind/led/save).
+Send it over the WebSocket REPL; the light responds immediately. See `docs/reference.md`
+for the full `glow.*` API (set/aim/slot/cue/scene/fx/matrix/beat/bind/led/param/wled), or
+`docs/authoring.md` for a concept-first guide to writing a show.
 
 **Effects must not stutter:** allocate nothing in an effect body (string *literals* are
 interned and free; concatenation and table construction allocate), and never loop per-pixel in
@@ -136,7 +137,7 @@ not `-D`) + Fennel 1.6.1 (generated single file via `scripts/vendor_fennel.sh`).
 
 ## 7. Formats
 
-See `GRAMMAR_REFERENCE.md` for `.fdef` / `.show` / `.mdef`. Key points: `.show` is **1-indexed**
+See `docs/grammar.md` for `.fdef` / `.show` / `.mdef`. Key points: `.show` is **1-indexed**
 and requires a `SHOW 2` header (un-migrated files are rejected loudly); the compiler **errors on
 address collisions**; a `CAP` with no `SLOT`/`RANGE` is linear; a control with no `CH` clause is
 channel-agnostic. Binary bundles are versioned and backward-compatible (`SHW1` v4, `PFX2` v2,
@@ -149,8 +150,8 @@ channel-agnostic. Binary bundles are versioned and backward-compatible (`SHW1` v
 ```sh
 make test    # -Wall -Wextra -Werror + ASan/UBSan (TSan on the queue suite)
 ```
-(suite count drifts as suites are added -- see `docs/generated/test-status.md` on the docs
-site for the current count, generated from the `Makefile` rather than hand-typed here.)
+(suite count drifts as suites are added -- see CI for the current pass/fail rather than a
+hand-typed count here.)
 Host-tested: the engine, the Lua layer (emission, error policy, infinite-loop hook, memory cap,
 a zero-allocation check), the PLL beat clock (jitter rejection, monotonicity), every binary
 format (fuzzed), MIDI parsing, and the importers. **QEMU** boots the real image in CI (asserts
