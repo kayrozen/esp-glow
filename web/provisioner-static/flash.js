@@ -12,7 +12,10 @@
 // which the firmware build emits. The show-partition offset for the user's
 // own compiled bundle is read from the same file (see SHOW_PARTITION_LABEL).
 
-import { ESPLoader, Transport } from "https://unpkg.com/esptool-js/bundle.js";
+// Pinned to 0.5.7: the version confirmed working with the ESP Web Tools /
+// esptool-js flashing flow. Later releases should work too once espressif/esptool-js#235
+// lands -- check esptool-js release notes before bumping.
+import { ESPLoader, Transport } from "https://unpkg.com/esptool-js@0.5.7/bundle.js";
 
 export function serialSupported() {
   return typeof navigator !== "undefined" && "serial" in navigator;
