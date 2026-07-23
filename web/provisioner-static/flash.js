@@ -274,6 +274,7 @@ export async function flash(opts) {
     flashMode: "keep",
     flashFreq: "keep",
     eraseAll: false,
+    compress: true, // without this, esptool-js throws "Yet to handle Non Compressed writes"
     reportProgress: (fileIndex, written, total) => {
       onProgress(fileIndex, fileArray.length, total > 0 ? written / total : 0);
     },
