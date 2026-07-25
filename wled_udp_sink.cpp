@@ -4,6 +4,7 @@
 #include "esp_log.h"
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
+#include <fcntl.h>
 
 static const char* TAG = "wled_udp_sink";
 
@@ -21,11 +22,15 @@ bool WledUdpSink::begin() {
     return false;
   }
 
-  // Bound send timeout, same rationale as ArtNetSink::begin(): a stalled or
-  // unreachable WLED device must never stall the render loop.
-  struct timeval tv = {};
-  tv.tv_usec = 5 * 1000;
-  setsockopt(sock_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+  // Non-blocking, same rationale and measurement as ArtNetSink::begin(): a
+  // blocking sendto() waits for the WiFi driver to actually get the packet
+  // on the air (measured in the hundreds of us, not the sub-us cost of a
+  // buffer copy), and the render loop pays that cost per target, per
+  // frame. Non-blocking turns a busy TX path into an immediate
+  // EWOULDBLOCK (dropped packet, logged at debug below) instead of a
+  // stall; the next frame is only ~23 ms away.
+  int flags = fcntl(sock_, F_GETFL, 0);
+  fcntl(sock_, F_SETFL, flags | O_NONBLOCK);
 
   // WLED targets are addressed by name/IP at send time (unlike ArtNetSink's
   // single connect()ed bridge), so broadcast is enabled unconditionally --

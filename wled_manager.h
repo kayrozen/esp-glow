@@ -18,7 +18,7 @@
 #include <vector>
 
 // Injected UDP transport. send() must not block the caller for long (see
-// wled_udp_sink.h's SO_SNDTIMEO) and never allocates.
+// wled_udp_sink.h's O_NONBLOCK socket) and never allocates.
 class IWledSink {
 public:
   virtual ~IWledSink() = default;
