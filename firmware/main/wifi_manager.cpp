@@ -107,6 +107,12 @@ static void on_event(void* arg, esp_event_base_t base, int32_t id, void* data) {
   } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
     ip_event_got_ip_t* ev = (ip_event_got_ip_t*)data;
     s_connected = true;
+    // Modem-sleep power-save buffers packets for a "sleeping" station between
+    // beacon intervals; some APs drop Art-Net/OSC UDP instead of queuing it,
+    // which reads as intermittent packet loss that varies by router. Disable
+    // it here (post-association) rather than before connecting, since an
+    // early call can be overwritten by the association itself.
+    esp_wifi_set_ps(WIFI_PS_NONE);
     xEventGroupSetBits(s_evt, BIT_GOT_IP);
     ESP_LOGI(TAG, "got ip: " IPSTR, IP2STR(&ev->ip_info.ip));
     ESP_LOGI(TAG, "GLOW-TEST: wifi state=connected attempts=%u", (unsigned)s_attempts);
