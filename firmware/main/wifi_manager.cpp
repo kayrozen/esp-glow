@@ -41,6 +41,11 @@ static char s_ssid[33] = {0};
 static char s_pass[65] = {0};
 static bool s_ap_fallback_requested = false;
 
+// See wifi_manager_set_on_got_ip's header comment: the arming point for
+// every network service that touches a socket, fired once from
+// net_start_task below rather than from app_main or the event-loop task.
+static void (*s_on_got_ip)(void) = nullptr;
+
 // F5 telemetry: consecutive failed attempts since the last successful
 // connect (reset to 0 on IP_EVENT_STA_GOT_IP). Read by the reconnect task
 // and by the event handler's telemetry log line.
@@ -151,6 +156,23 @@ static void reconnect_task(void*) {
   }
 }
 
+// Waits for the FIRST GOT_IP (pdFALSE: don't clear the bit -- a later
+// LOST_IP/reconnect cycle must not re-arm services that are already up),
+// runs the registered callback exactly once, then exits. Runs off the
+// event-loop task on purpose: httpd_start() plus several
+// httpd_register_uri_handler() calls (web_input.cpp) is more stack and
+// latency than the small default sys_evt task should absorb, and blocking
+// there would delay every other WiFi/IP event behind it.
+static void net_start_task(void*) {
+  xEventGroupWaitBits(s_evt, BIT_GOT_IP, pdFALSE, pdTRUE, portMAX_DELAY);
+  if (s_on_got_ip) s_on_got_ip();
+  vTaskDelete(nullptr);
+}
+
+void wifi_manager_set_on_got_ip(void (*cb)(void)) {
+  s_on_got_ip = cb;
+}
+
 bool wifi_start_sta(const WifiStaConfig* cfg) {
   if (!cfg || !cfg->ssid) return false;
 
@@ -192,6 +214,16 @@ bool wifi_start_sta(const WifiStaConfig* cfg) {
   // instead of a boot hang). See led_status.cpp and the CI xTaskCreate guard.
   xTaskCreatePinnedToCore(reconnect_task, "wifi_rc", 2560, nullptr,
                           tskIDLE_PRIORITY + 1, nullptr, 0);
+
+  // Arm network services on GOT_IP instead of right here -- see
+  // wifi_manager_set_on_got_ip's header comment. Core 0, same as every
+  // other WiFi-adjacent task; only spawned if the caller actually
+  // registered a callback (main.cpp does, unconditionally, before this
+  // call, whenever cfg.skipWifi is false).
+  if (s_on_got_ip) {
+    xTaskCreatePinnedToCore(net_start_task, "net_start", 4096 / sizeof(StackType_t),
+                            nullptr, tskIDLE_PRIORITY + 1, nullptr, 0);
+  }
   return true;
 }
 

@@ -933,6 +933,74 @@ static bool setup_show_from_bundle() {
   return true;
 }
 
+// Arming point for every network service that touches a socket -- see
+// wifi_manager_set_on_got_ip's header comment. Registered with the WiFi
+// manager before wifi_start_sta() and invoked exactly once, the first time
+// IP_EVENT_STA_GOT_IP fires, from a dedicated task (not app_main, not the
+// event-loop task). Everything here used to run synchronously right after
+// wifi_start_sta() returned -- which does not block on association -- so
+// on a real join it ran seconds before the netif had an address: Art-Net's
+// sendto() into that gap is the errno 118 storm, and httpd_start() that
+// early is a console that "starts" without yet being reachable at the
+// address it's about to be told about.
+static void start_network_services(void) {
+  // --- F2: Art-Net sink begin() -- opens the UDP socket now that the STA
+  // netif actually has an address. g_artnet itself was already constructed
+  // earlier so bundle patching above could route ArtNet universes to it
+  // before WiFi was even attempted. ---
+  if (!g_artnet->begin()) {
+    ESP_LOGE(TAG, "Art-Net socket failed; matrix output disabled.");
+  } else {
+#ifdef CONFIG_GLOW_SELFTEST
+    printf("GLOW-TEST: artnet tx=ok\n");
+#endif
+    // Wave 3 Phase 3: ArtPoll discovery, own socket + own task -- fills in
+    // only the universes the .show left unspecified (see g_artnetShowDest's
+    // comment); a node vanishing reverts its universes to
+    // fallback/broadcast, never darkness.
+    artnet_discovery_task_init(g_artnet, g_artnetShowDest, g_artnetUniverseCount);
+    xTaskCreatePinnedToCore(artnet_discovery_task, "artnet_disc", 4096 / sizeof(StackType_t),
+                            nullptr, 5, nullptr, 0);
+  }
+
+  // --- WLED UDP Notifier sink begin() -- same "constructed early, begun
+  // once the netif has an address" split as Art-Net above. g_wled itself
+  // was already populated by setup_show_from_bundle so glow.wled.* is
+  // patchable from boot.fnl regardless of when/whether the socket comes
+  // up. ---
+  if (!g_wledSink.begin()) {
+    ESP_LOGE(TAG, "WLED UDP socket failed; glow.wled.* sends disabled.");
+  } else {
+#ifdef CONFIG_GLOW_SELFTEST
+    printf("GLOW-TEST: wled tx=ok\n");
+#endif
+  }
+
+  // --- F4/F5: web console (WS httpd + console static files + /ota +
+  // /devcfg) + OSC -- any g_liveControl bindings needed to already be in
+  // place before either of these start, and they have been since long
+  // before WiFi was even attempted (see g_wsCues' comment). ---
+  web_input_init(*g_controlQueue, *g_evalQueue,
+                 g_nWsCues ? g_wsCues : nullptr, g_nWsCues,
+                 /*scenes=*/nullptr, /*nScenes=*/0,
+                 /*hasMaster=*/true);
+  web_server_task(nullptr);  // starts httpd; not a FreeRTOS task itself (see web_input.h)
+
+  osc_input_init(*g_controlQueue, g_oscMap, static_cast<uint16_t>(CONFIG_GLOW_OSC_UDP_PORT));
+  xTaskCreatePinnedToCore(osc_server_task, "osc", 4096 / sizeof(StackType_t),
+                          nullptr, 5, nullptr, 0);
+
+  // Musical time: passive Pro DJ Link listener (Afterglow's signature
+  // feature -- see djlink_parser.h's header). Two tasks, one per UDP port:
+  // beat packets (50001, the actual sync source) and CDJ status's
+  // tempo-master flag (50002, gates which player's beats get accepted).
+  djlink_input_init(*g_beatQueue);
+  xTaskCreatePinnedToCore(djlink_beat_task, "djlink_beat", 4096 / sizeof(StackType_t),
+                          nullptr, 5, nullptr, 0);
+  xTaskCreatePinnedToCore(djlink_status_task, "djlink_status", 4096 / sizeof(StackType_t),
+                          nullptr, 5, nullptr, 0);
+}
+
 extern "C" void app_main(void) {
 #ifdef CONFIG_GLOW_SELFTEST
   // Captured first, before anything else can fail/return early -- see
@@ -1209,69 +1277,21 @@ extern "C" void app_main(void) {
   if (!cfg.skipWifi) {
     // --- F2/F5: WiFi (STA), with a SoftAP fallback after repeated failed
     // reconnects so the console stays reachable even when the venue's WiFi
-    // is gone (see wifi_manager.h's HIL flag on AP+DMX coexistence). ---
+    // is gone (see wifi_manager.h's HIL flag on AP+DMX coexistence).
+    //
+    // start_network_services (above) is what actually opens the Art-Net/
+    // WLED sockets and starts the web console/OSC/DJ Link -- it's armed
+    // here, before wifi_start_sta(), but only RUNS once IP_EVENT_STA_GOT_IP
+    // fires (see wifi_manager_set_on_got_ip's header comment). Registering
+    // it after wifi_start_sta() would race a fast association: GOT_IP can
+    // fire before this function even returns. ---
+    wifi_manager_set_on_got_ip(start_network_services);
+
     WifiStaConfig wc = {};
     wc.ssid = cfg.wifiSsid;
     wc.password = cfg.wifiPass;
     wc.ap_fallback = true;
     wifi_start_sta(&wc);
-
-    // --- F2: Art-Net sink begin() -- opens the UDP socket now that
-    // netif/lwIP is up (wifi_start_sta() brings that up regardless of
-    // whether STA ever associates). g_artnet itself was already constructed
-    // earlier so bundle patching above could route ArtNet universes to it. ---
-    if (!g_artnet->begin()) {
-      ESP_LOGE(TAG, "Art-Net socket failed; matrix output disabled.");
-    } else {
-#ifdef CONFIG_GLOW_SELFTEST
-      printf("GLOW-TEST: artnet tx=ok\n");
-#endif
-      // Wave 3 Phase 3: ArtPoll discovery, own socket + own task -- fills
-      // in only the universes the .show left unspecified (see
-      // g_artnetShowDest's comment); a node vanishing reverts its
-      // universes to fallback/broadcast, never darkness.
-      artnet_discovery_task_init(g_artnet, g_artnetShowDest, g_artnetUniverseCount);
-      xTaskCreatePinnedToCore(artnet_discovery_task, "artnet_disc", 4096 / sizeof(StackType_t),
-                              nullptr, 5, nullptr, 0);
-    }
-
-    // --- WLED UDP Notifier sink begin() -- same "constructed early, begun
-    // once netif is up" split as Art-Net above. g_wled itself was already
-    // populated by setup_show_from_bundle so glow.wled.* is patchable from
-    // boot.fnl regardless of when/whether the socket comes up. ---
-    if (!g_wledSink.begin()) {
-      ESP_LOGE(TAG, "WLED UDP socket failed; glow.wled.* sends disabled.");
-    } else {
-#ifdef CONFIG_GLOW_SELFTEST
-      printf("GLOW-TEST: wled tx=ok\n");
-#endif
-    }
-
-    // --- F4/F5: web console (WS httpd + console static files + /ota +
-    // /devcfg) + OSC -- any g_liveControl bindings would need to already
-    // be in place before either of these start -- "configured once,
-    // before tasks start, and never mutated" is what makes transport-side
-    // binding reads race-free (none are bound yet -- see g_wsCues'
-    // comment).
-    web_input_init(*g_controlQueue, *g_evalQueue,
-                   g_nWsCues ? g_wsCues : nullptr, g_nWsCues,
-                   /*scenes=*/nullptr, /*nScenes=*/0,
-                   /*hasMaster=*/true);
-    web_server_task(nullptr);  // starts httpd; not a FreeRTOS task itself (see web_input.h)
-
-    osc_input_init(*g_controlQueue, g_oscMap, static_cast<uint16_t>(CONFIG_GLOW_OSC_UDP_PORT));
-    xTaskCreatePinnedToCore(osc_server_task, "osc", 4096 / sizeof(StackType_t),
-                            nullptr, 5, nullptr, 0);
-
-    // Musical time: passive Pro DJ Link listener (Afterglow's signature
-    // feature -- see djlink_parser.h's header). Two tasks, one per UDP
-    // port: beat packets (50001, the actual sync source) and CDJ status's
-    // tempo-master flag (50002, gates which player's beats get accepted).
-    djlink_input_init(*g_beatQueue);
-    xTaskCreatePinnedToCore(djlink_beat_task, "djlink_beat", 4096 / sizeof(StackType_t),
-                            nullptr, 5, nullptr, 0);
-    xTaskCreatePinnedToCore(djlink_status_task, "djlink_status", 4096 / sizeof(StackType_t),
-                            nullptr, 5, nullptr, 0);
   } else {
     ESP_LOGW(TAG, "cfg.skipWifi: WiFi/Art-Net/web console/OSC/DJ Link all skipped -- "
                   "DMX output and Lua/Fennel cues run standalone.");

@@ -36,6 +36,24 @@ struct WifiStaConfig {
   bool ap_fallback;
 };
 
+// Register a callback to run the FIRST time the STA gets an IP
+// (IP_EVENT_STA_GOT_IP). Must be called BEFORE wifi_start_sta().
+//
+// Anything that touches a socket -- httpd_start, ArtNetSink::begin,
+// osc_input_init, djlink_input_init -- races the DHCP/association path if
+// started right after wifi_start_sta() returns (wifi_start_sta does not
+// block on association, see below): the netif exists but has no address
+// yet, so a socket armed that early sends into a black hole (Art-Net's
+// sendto() errno storm) or a listener that "starts" but isn't actually
+// reachable at the address the console tells you it's on. This callback
+// is the arming point instead -- it runs on a dedicated task once GOT_IP
+// fires, off both app_main and the event-loop task, so a slow httpd_start
+// or many httpd_register_uri_handler calls can't stall event dispatch.
+// Fires once per boot even across later reconnects (a dropped/regained
+// link doesn't need services re-armed -- their sockets are already bound
+// to INADDR_ANY/already open).
+void wifi_manager_set_on_got_ip(void (*cb)(void));
+
 // Initialise the WiFi subsystem in STA mode and begin connecting. Returns
 // true if the STA started (not necessarily connected yet — watch
 // wifi_is_connected()).
