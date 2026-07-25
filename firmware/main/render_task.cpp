@@ -27,6 +27,9 @@
 #include "esp_log.h"
 #include "esp_task_wdt.h"
 
+#include <cstdio>
+#include <cstring>
+
 static const char* TAG = "render_task";
 
 static TaskHandle_t s_task = nullptr;
@@ -92,6 +95,15 @@ static void render_loop(void*) {
   uint64_t flushUsSum = 0;
   uint32_t flushUsMax = 0;
 
+  // Segment breakdown of that flush cost, per universe (Show::renderFlush()
+  // times each universe's IUniverseSink::send() call -- see
+  // lastFlushUsByUniverse's comment in show.h). This is what actually
+  // separates "DMX out" from "N x Art-Net sendto" instead of guessing from
+  // the lumped flush total: DMX_UNIVERSE_SIZE bytes at 250 kbaud plus
+  // dmx_wait_sent()'s synchronous wait (dmx_sink.cpp) looks nothing like an
+  // Art-Net sendto() on the wire, and this makes that visible per universe.
+  uint64_t flushUsByUniverseSum[MAX_UNIVERSES] = {0};
+
   while (true) {
     uint64_t now = esp_timer_get_time();
     glow::PaceResult r = glow::paceNextFrame(s_periodUs, now, prevDeadline);
@@ -111,6 +123,9 @@ static void render_loop(void*) {
       uint32_t flushUs = (uint32_t)(afterRender - t1);
       flushUsSum += flushUs;
       if (flushUs > flushUsMax) flushUsMax = flushUs;
+      for (uint8_t u = 0; u < s_show->universeCount() && u < MAX_UNIVERSES; ++u) {
+        flushUsByUniverseSum[u] += s_show->lastFlushUsByUniverse[u];
+      }
     } else {
       afterRender = esp_timer_get_time();
     }
@@ -150,11 +165,26 @@ static void render_loop(void*) {
                (unsigned)frames, (unsigned)behindCount,
                (unsigned long)renderAvgUs, (unsigned long)flushAvgUs,
                (unsigned long)flushUsMax);
+
+      // Segment breakdown: same 5s window, one avg per universe, so a
+      // 24 ms flush total is traceable to a specific universe's sink->send()
+      // instead of split evenly across "network" by assumption.
+      if (s_show) {
+        char buf[MAX_UNIVERSES * 24 + 16] = "flush by universe (avg us):";
+        size_t off = strlen(buf);
+        for (uint8_t u = 0; u < s_show->universeCount() && u < MAX_UNIVERSES; ++u) {
+          uint32_t avgUs = frames ? (uint32_t)(flushUsByUniverseSum[u] / frames) : 0;
+          off += (size_t)snprintf(buf + off, sizeof(buf) - off, " u%u=%lu", (unsigned)u, (unsigned long)avgUs);
+        }
+        ESP_LOGI(TAG, "%s", buf);
+      }
+
       frames = 0;
       behindCount = 0;
       renderUsSum = 0;
       flushUsSum = 0;
       flushUsMax = 0;
+      for (uint8_t u = 0; u < MAX_UNIVERSES; ++u) flushUsByUniverseSum[u] = 0;
       lastReport = now;
     }
   }

@@ -32,6 +32,12 @@ bool WledUdpSink::begin() {
   int flags = fcntl(sock_, F_GETFL, 0);
   fcntl(sock_, F_SETFL, flags | O_NONBLOCK);
 
+  // Proof-of-fix, not just intent -- see ArtNetSink::begin()'s identical
+  // readback for the rationale (a pre-fix binary won't print this line at
+  // all; a post-fix one that's still blocking would print nonblock=0).
+  int verifyFlags = fcntl(sock_, F_GETFL, 0);
+  ESP_LOGI(TAG, "wled socket fd=%d nonblock=%d", sock_, (verifyFlags & O_NONBLOCK) ? 1 : 0);
+
   // WLED targets are addressed by name/IP at send time (unlike ArtNetSink's
   // single connect()ed bridge), so broadcast is enabled unconditionally --
   // any target whose .show IP is 255.255.255.255 needs it, and it's a no-op

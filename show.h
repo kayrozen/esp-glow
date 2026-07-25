@@ -137,6 +137,14 @@ public:
   void renderCompute(float t);  // steps 1-4: resolve intents into universe buffers
   void renderFlush();           // step 5: send every configured universe to its sink
 
+  // Diagnostic: microseconds spent inside universe u's IUniverseSink::send()
+  // during the last renderFlush() call (device builds only -- see
+  // renderFlush()'s ESP_PLATFORM-gated timing; always 0 on a host build).
+  // Lets a caller (render_task.cpp) tell a DMX universe's flush cost apart
+  // from an Art-Net universe's, and each Art-Net universe's sendto from the
+  // next, instead of only seeing renderFlush()'s lumped total.
+  uint32_t lastFlushUsByUniverse[MAX_UNIVERSES] = {0};
+
   // Read-only access to a universe's current 512-byte DMX buffer (the
   // state as of the last renderFrame/writeRawUniverse). nullptr if idx is
   // out of range. Mirrors PixelMatrix::universeData's naming (pixel_matrix.h)

@@ -1,5 +1,9 @@
 #include "show.h"
 
+#ifdef ESP_PLATFORM
+#include "esp_timer.h"
+#endif
+
 void MockSink::send(uint8_t idx, const uint8_t* data, uint16_t len) {
   sendCount++;
   lastIndex = idx;
@@ -160,6 +164,12 @@ void Show::renderFlush() {
   for (uint8_t u = 0; u < universeCount_; ++u) {
     Universe& uni = universes_[u];
     if (!uni.configured || !uni.sink) continue;
+#ifdef ESP_PLATFORM
+    int64_t t0 = esp_timer_get_time();
     uni.sink->send(u, uni.data, DMX_UNIVERSE_SIZE);
+    lastFlushUsByUniverse[u] = (uint32_t)(esp_timer_get_time() - t0);
+#else
+    uni.sink->send(u, uni.data, DMX_UNIVERSE_SIZE);
+#endif
   }
 }
