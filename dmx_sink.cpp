@@ -16,6 +16,19 @@
 //   dmx_write_offset(dmx_num, offset, data, size) -> size_t
 //   dmx_send(dmx_num, size) -> size_t
 //   dmx_wait_sent(dmx_num, wait_ticks) -> bool
+//
+// dmx_send() is asynchronous -- it starts the break/MAB + slot transmission
+// (double-buffered by the driver: it allocates 2x the buffer you configure)
+// and returns immediately. dmx_wait_sent() is the synchronous half, and
+// esp_dmx's own documented pattern is dmx_write -> dmx_send -> (do other
+// work) -> dmx_wait_sent, called in that order every frame -- wait_sent
+// guards against overwriting a frame still in flight, not against starting
+// the next one too soon. send() below places the PREVIOUS frame's
+// dmx_wait_sent() at the top of THIS call, before this frame's write/send,
+// so DMX's ~23ms wire time overlaps with the rest of the render loop
+// (Art-Net flush + the next renderCompute()) instead of stalling it: by the
+// time this runs again, a full ~22ms frame period later, the previous
+// transmission has normally already finished, so the wait is near-instant.
 #ifdef ESP_PLATFORM
 
 #include "dmx_sink.h"
@@ -48,6 +61,18 @@ void DmxSink::send(uint8_t universeIndex, const uint8_t* data, uint16_t len) {
   if (!ready_) return;
   if (len > DMX_UNIVERSE_SIZE) len = DMX_UNIVERSE_SIZE;
 
+  // Wait for the PREVIOUS call's transmission to finish before touching the
+  // driver's buffer -- see the file header for why this goes FIRST, not
+  // after this frame's own dmx_send() (that placement is what used to make
+  // every send() pay DMX's full ~23ms wire time synchronously). On the very
+  // first call this returns immediately (nothing in flight yet). If this
+  // ever measures close to the full ~23ms instead of near-zero, that means
+  // the render loop isn't leaving DMX enough of the frame period to finish
+  // transmitting -- the driver correctly throttling to DMX's physical
+  // ~43Hz limit for 512 slots, not a bug -- see render_task.cpp's
+  // per-universe flush timing.
+  dmx_wait_sent(port_, pdMS_TO_TICKS(30));
+
   // DMX start code (slot 0) is 0x00 for DMX data.
   uint8_t startCode = 0x00;
   dmx_write_offset(port_, 0, &startCode, 1);
@@ -60,15 +85,14 @@ void DmxSink::send(uint8_t universeIndex, const uint8_t* data, uint16_t len) {
     dmx_write_offset(port_, 1 + len, zeros, DMX_UNIVERSE_SIZE - len);
   }
 
-  // dmx_send() returns the number of bytes sent. size=0 is clamped to 512.
+  // Asynchronous: starts transmission and returns immediately. dmx_send()
+  // returns the number of bytes sent; size=0 is clamped to 512. THIS
+  // frame's dmx_wait_sent() happens at the top of the next send() call, not
+  // here.
   size_t sent = dmx_send(port_, 0);
   if (sent == 0) {
     ESP_LOGW(TAG, "dmx_send(port=%d, u=%u) failed", port_, universeIndex);
-    return;
   }
-  // Block until the frame is on the wire so the next call doesn't queue.
-  // DMX at 250 kbaud takes ~23 ms for 512 slots; allow 30 ms.
-  dmx_wait_sent(port_, pdMS_TO_TICKS(30));
 }
 
 #endif  // ESP_PLATFORM

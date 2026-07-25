@@ -56,6 +56,14 @@ bool ArtNetSink::begin() {
   int flags = fcntl(sock_, F_GETFL, 0);
   fcntl(sock_, F_SETFL, flags | O_NONBLOCK);
 
+  // Proof-of-fix, not just intent: read the flag back instead of trusting
+  // the fcntl() call above returned what we asked for. A binary built
+  // before this fix landed will not print this line at all, and one built
+  // after it but somehow still blocking would print nonblock=0 -- either
+  // way this settles it without inspecting a build hash.
+  int verifyFlags = fcntl(sock_, F_GETFL, 0);
+  ESP_LOGI(TAG, "artnet socket fd=%d nonblock=%d", sock_, (verifyFlags & O_NONBLOCK) ? 1 : 0);
+
   // Always enabled: any universe can resolve to broadcast (an unrouted
   // universe with fallbackIp==0), and ArtSync itself is always broadcast
   // (see frameEnd/sendTo) -- there is no destination this socket sends to
