@@ -100,6 +100,11 @@ const uint8_t* Show::universeData(uint8_t idx) const {
 }
 
 void Show::renderFrame(float t) {
+  renderCompute(t);
+  renderFlush();
+}
+
+void Show::renderCompute(float t) {
   // 1. Reset Fixture-mode universes.
   for (uint8_t u = 0; u < universeCount_; ++u) {
     if (universes_[u].mode == UniverseMode::Fixture) {
@@ -148,7 +153,9 @@ void Show::renderFrame(float t) {
       applyCapability(f->profile, ci.cap, ci.norm01, buf, f->base);
     }
   }
+}
 
+void Show::renderFlush() {
   // 5. Flush.
   for (uint8_t u = 0; u < universeCount_; ++u) {
     Universe& uni = universes_[u];

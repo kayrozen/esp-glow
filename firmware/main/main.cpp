@@ -38,6 +38,7 @@
 #include "sdkconfig.h"
 #include "nvs_flash.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 
 #include "led_status.h"
 #include "render_task.h"
@@ -631,6 +632,16 @@ enum class RenderTickPhase { Pre, Post };
 // case -- needs it in scope first.
 static float g_lastRenderT = 0.0f;
 
+// Diagnostic: same hypothesis as render_task.cpp's render/flush split, but
+// for the one Art-Net sendto per frame that call doesn't cover -- the
+// ArtSync broadcast in frameEnd() below, which happens after renderFlush()
+// on this same core-1 task. If lwIP's core-0 TX path is the thing stalling
+// httpd, this send is as much a suspect as the per-universe ones. Reported
+// once/sec alongside selftest stats (RenderTickPhase::Post below), reset
+// together.
+static uint64_t g_artSyncUsSum = 0;
+static uint32_t g_artSyncUsMax = 0;
+
 static void render_tick_hooks(RenderTickPhase phase, float t, uint32_t slack_us) {
   switch (phase) {
     case RenderTickPhase::Pre:
@@ -695,6 +706,11 @@ static void render_tick_hooks(RenderTickPhase phase, float t, uint32_t slack_us)
       if (++frameCounter >= 44) {  // ~once/sec at the render task's 44 Hz
         frameCounter = 0;
         send_blackout_status_to_ws();
+
+        ESP_LOGI(TAG, "artsync: avg=%lu us max=%lu us (last ~1s)",
+                 (unsigned long)(g_artSyncUsSum / 44), (unsigned long)g_artSyncUsMax);
+        g_artSyncUsSum = 0;
+        g_artSyncUsMax = 0;
 #ifdef CONFIG_GLOW_SELFTEST
         uint32_t frames = 0, behind = 0, dropped = 0;
         render_task_get_and_reset_stats(&frames, &behind, &dropped);
@@ -755,7 +771,13 @@ static void on_post_render(void* /*ctx*/, uint32_t slack_us) {
   // whenever its own packet happens to arrive (visible tearing on a
   // matrix spanning multiple universes otherwise). A safe no-op before
   // g_artnet->begin() (socket not open yet).
-  if (g_artnet) g_artnet->frameEnd();
+  if (g_artnet) {
+    uint64_t t0 = esp_timer_get_time();
+    g_artnet->frameEnd();
+    uint32_t artSyncUs = (uint32_t)(esp_timer_get_time() - t0);
+    g_artSyncUsSum += artSyncUs;
+    if (artSyncUs > g_artSyncUsMax) g_artSyncUsMax = artSyncUs;
+  }
 
   render_tick_hooks(RenderTickPhase::Post, 0.0f, slack_us);
 }

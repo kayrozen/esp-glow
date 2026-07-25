@@ -3,7 +3,10 @@
 // Each iteration:
 //   1. read esp_timer_get_time() (monotonic us)
 //   2. glow::paceNextFrame() -> (nowSec, sleepUs, nextDeadline)  [host-tested]
-//   3. show->renderFrame(nowSec)
+//   3. show->renderCompute(nowSec) then show->renderFlush() — split from
+//      renderFrame() so this loop can time compute apart from flush (DMX +
+//      Art-Net sendto per universe); see the render/flush timing below and
+//      its 5s ESP_LOGI report.
 //   4. post_render(remaining slack) — F6: the Lua VM's only chance to run
 //      bounded GC steps (see render_task.h). The clock is re-read after
 //      this call, specifically because step 4 can take a variable, non-
@@ -77,22 +80,44 @@ static void render_loop(void*) {
   uint32_t behindCount = 0;
   uint64_t lastReport = esp_timer_get_time();
 
+  // Diagnostic: is a frame's cost in the pure computation (renderCompute)
+  // or in flushing universes to their sinks (renderFlush -- DMX + Art-Net
+  // sendto)? Suspected because httpd (core 0) starves in lockstep with
+  // Art-Net universe count: a blocking sendto() in the flush path would
+  // stall lwIP's core-0 TX processing, not just eat render-task budget.
+  // Summed per 5s report window alongside the existing frames/behind
+  // stats, reset together. Not exposed via render_task_get_and_reset_stats
+  // -- purely for this log line while the hypothesis is under test.
+  uint64_t renderUsSum = 0;
+  uint64_t flushUsSum = 0;
+  uint32_t flushUsMax = 0;
+
   while (true) {
     uint64_t now = esp_timer_get_time();
     glow::PaceResult r = glow::paceNextFrame(s_periodUs, now, prevDeadline);
     s_behind = r.behind;
     prevDeadline = r.nextDeadlineUs;
 
+    uint64_t afterRender;
     if (s_show) {
       // F2: let the caller populate Raw universes before the render+flush.
       if (s_pre_render) s_pre_render(s_pre_render_ctx, r.nowSec, s_show);
-      s_show->renderFrame(r.nowSec);
+      uint64_t t0 = esp_timer_get_time();
+      s_show->renderCompute(r.nowSec);     // pure computation
+      uint64_t t1 = esp_timer_get_time();
+      s_show->renderFlush();               // DMX + Art-Net sendto per universe
+      afterRender = esp_timer_get_time();
+      renderUsSum += (t1 - t0);
+      uint32_t flushUs = (uint32_t)(afterRender - t1);
+      flushUsSum += flushUs;
+      if (flushUs > flushUsMax) flushUsMax = flushUs;
+    } else {
+      afterRender = esp_timer_get_time();
     }
 
     // F6: spend whatever slack is actually left (not the pre-render
     // estimate) on bounded GC work, then re-measure before deciding how
     // long to sleep -- see the file header comment for why.
-    uint64_t afterRender = esp_timer_get_time();
     int64_t slackUs = r.behind ? 0 : (int64_t)r.nextDeadlineUs - (int64_t)afterRender;
     if (slackUs < 0) slackUs = 0;
     if (s_post_render) s_post_render(s_post_render_ctx, (uint32_t)slackUs);
@@ -118,10 +143,18 @@ static void render_loop(void*) {
     s_statDropped += r.droppedFrames;
 
     if (now - lastReport >= 5'000'000u) {
-      ESP_LOGI(TAG, "stats: %u frames, %u behind in last 5s",
-               (unsigned)frames, (unsigned)behindCount);
+      uint32_t renderAvgUs = frames ? (uint32_t)(renderUsSum / frames) : 0;
+      uint32_t flushAvgUs = frames ? (uint32_t)(flushUsSum / frames) : 0;
+      ESP_LOGI(TAG, "stats: %u frames, %u behind in last 5s "
+                    "(render avg=%lu us, flush avg=%lu us, flush max=%lu us)",
+               (unsigned)frames, (unsigned)behindCount,
+               (unsigned long)renderAvgUs, (unsigned long)flushAvgUs,
+               (unsigned long)flushUsMax);
       frames = 0;
       behindCount = 0;
+      renderUsSum = 0;
+      flushUsSum = 0;
+      flushUsMax = 0;
       lastReport = now;
     }
   }
