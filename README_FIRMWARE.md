@@ -247,6 +247,10 @@ optional SoftAP (`WifiStaConfig::ap_fallback`, mode APSTA) comes up
 alongside the still-retrying STA link so the console stays reachable even
 when the venue's WiFi is gone — **flagged, not HIL-verified**: SoftAP + DMX
 timing coexistence needs a real soak test before being trusted at a gig.
+`sdkconfig.defaults` also disables AMPDU RX
+(`CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n`) — a WiFi 6 AP interaction that reads
+like packet loss but isn't the power-save issue above; see
+`BENCH_RUNBOOK.md`.
 
 **Task watchdog**: the render task subscribes itself
 (`esp_task_wdt_add`, `render_task.cpp`) and is fed once per frame from

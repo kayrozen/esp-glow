@@ -112,6 +112,10 @@ static void on_event(void* arg, esp_event_base_t base, int32_t id, void* data) {
     // which reads as intermittent packet loss that varies by router. Disable
     // it here (post-association) rather than before connecting, since an
     // early call can be overwritten by the association itself.
+    //
+    // A second, unrelated router-interaction issue (WiFi 6 APs + AMPDU RX)
+    // is fixed at compile time instead -- see sdkconfig.defaults and
+    // BENCH_RUNBOOK.md -- because there's no runtime esp_wifi_* call for it.
     esp_wifi_set_ps(WIFI_PS_NONE);
     xEventGroupSetBits(s_evt, BIT_GOT_IP);
     ESP_LOGI(TAG, "got ip: " IPSTR, IP2STR(&ev->ip_info.ip));

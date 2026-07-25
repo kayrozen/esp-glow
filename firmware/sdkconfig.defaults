@@ -41,6 +41,20 @@ CONFIG_ESP_WIFI_STA_DISCONNECTED_PM=y
 CONFIG_ESP_WIFI_NVS_ENABLED=y
 CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
 
+# AMPDU RX (block-ack aggregation) has been observed to cause stalls and
+# intermittent Art-Net/OSC UDP loss against 802.11ax (WiFi 6) access points
+# -- the ESP32-S3 driver's reorder-buffer handling doesn't line up with some
+# WiFi 6 APs' aggregation behavior, and the symptom (packets stop, then
+# resume in a burst) reads just like the modem-sleep issue this project
+# already works around in wifi_manager.cpp's WIFI_PS_NONE call, but with no
+# reconnect telemetry to point at it. AMPDU RX is compile-time only (no
+# runtime esp_wifi_* toggle exists), so it's disabled here rather than in
+# code. This is a field-robustness fix, not a home-network workaround --
+# the whole point is not knowing in advance what router a venue runs. See
+# BENCH_RUNBOOK.md's "Known constraints" for the field notes. AMPDU TX is
+# left enabled; only RX reassembly was implicated.
+CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n
+
 # --- lwIP / sockets ---
 CONFIG_LWIP_TCP=y
 CONFIG_LWIP_UDP=y

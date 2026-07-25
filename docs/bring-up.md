@@ -51,3 +51,7 @@ whether a moving head physically aims right, and colour.
 
 Documented choices, not accidents — revisit as a block before shipping a product: WiFi
 password stored in plaintext in flash, no console auth, unsigned OTA images.
+
+See `BENCH_RUNBOOK.md` for field/bench constraints discovered after bring-up (WiFi 6 AP
+interaction, SoftAP+DMX coexistence) — those affect behavior on hardware, not design choices
+made up front, so they're tracked separately from the list above.
