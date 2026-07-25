@@ -30,7 +30,10 @@ public:
   // Create the UDP socket. Call once. Returns false on failure. The socket
   // is unconnected -- every send is a sendto() to that packet's own
   // resolved destination, so one socket serves every node (no per-node
-  // sockets to open/track).
+  // sockets to open/track) -- and non-blocking (O_NONBLOCK), so a busy
+  // WiFi TX path drops the packet (EWOULDBLOCK) instead of stalling the
+  // render loop; see artnet_sink.cpp's begin() for the measurement behind
+  // that choice.
   bool begin();
 
   // Route universeIndex to d (from the loaded bundle; later, from ArtPoll

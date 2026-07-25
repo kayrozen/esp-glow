@@ -13,8 +13,9 @@
 //
 // Coexistence: lwIP lives on core 0 (sdkconfig). send()/frameEnd() from
 // core 1 (the render task) are thread-safe under ESP-IDF's sockets layer.
-// A short SO_SNDTIMEO bounds any back-pressure so a flood does not stall
-// DMX timing on core 1.
+// The socket is non-blocking (O_NONBLOCK, set in begin()) so a busy WiFi TX
+// path never stalls DMX timing on core 1 -- see the comment there for the
+// measurement that motivated it.
 #ifdef ESP_PLATFORM
 
 #include "artnet_sink.h"
@@ -22,6 +23,7 @@
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
 #include "lwip/ip4_addr.h"
+#include <fcntl.h>
 
 static const char* TAG = "artnet_sink";
 
@@ -42,11 +44,17 @@ bool ArtNetSink::begin() {
     return false;
   }
 
-  // Bound send timeout so a stalled node cannot stall the render loop.
-  // 5 ms is generous for a LAN UDP send; if it fires we log and drop.
-  struct timeval tv = {};
-  tv.tv_usec = 5 * 1000;
-  setsockopt(sock_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+  // Non-blocking: a stalled node or a WiFi TX path that's momentarily busy
+  // must never stall the render loop. Measured on hardware, a blocking
+  // sendto() here (even with a bounded SO_SNDTIMEO) waits for the driver to
+  // actually get the packet on the air -- tens to hundreds of us per call,
+  // and much worse under contention -- which the render task pays for on
+  // every universe, every frame. Non-blocking turns a busy TX path into an
+  // immediate EWOULDBLOCK (packet dropped, logged at debug in sendTo())
+  // instead of a wait; at Art-Net's frame rate the next packet is only ~23
+  // ms away, so an occasional drop is invisible.
+  int flags = fcntl(sock_, F_GETFL, 0);
+  fcntl(sock_, F_SETFL, flags | O_NONBLOCK);
 
   // Always enabled: any universe can resolve to broadcast (an unrouted
   // universe with fallbackIp==0), and ArtSync itself is always broadcast
@@ -81,9 +89,10 @@ void ArtNetSink::sendTo(uint32_t ip, uint16_t port, const uint8_t* data, uint16_
 
   int n = ::sendto(sock_, data, len, 0, (struct sockaddr*)&dst, sizeof(dst));
   if (n < 0) {
-    // EAGAIN on a bounded-timeout send just means this node/broadcast was
-    // slow this frame; log at debug to avoid flooding. Other errors are
-    // real (e.g. a genuinely unreachable unicast destination).
+    // EWOULDBLOCK on a non-blocking send just means the WiFi TX path was
+    // busy this frame and the packet got dropped; not worth a warning-level
+    // log every occurrence. Other errors are real (e.g. a genuinely
+    // unreachable unicast destination).
     int e = errno;
     if (e != EAGAIN && e != EWOULDBLOCK) {
       ip4_addr_t addr = {htonl(ip)};

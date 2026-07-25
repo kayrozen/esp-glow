@@ -79,6 +79,6 @@ See `wled_packet.h`/`wled_packet.cpp` for the builder (host-tested, `test_wled.c
 
 ## Architecture notes
 
-- **No background task, no queue.** Every `glow.wled.*` call builds one packet on the caller's stack and hands it to a UDP socket (`WledUdpSink`, `#ifdef ESP_PLATFORM` guarded) with a bounded `SO_SNDTIMEO`, same discipline as `artnet_sink.cpp`. A slow/unreachable WLED device can never stall the render loop.
+- **No background task, no queue.** Every `glow.wled.*` call builds one packet on the caller's stack and hands it to a UDP socket (`WledUdpSink`, `#ifdef ESP_PLATFORM` guarded) that's non-blocking (`O_NONBLOCK`), same discipline as `artnet_sink.cpp`. A slow/unreachable WLED device, or a WiFi TX path that's momentarily busy, drops that packet instead of stalling the render loop.
 - **One socket for every target.** Unlike `ArtNetSink` (one `connect()`ed bridge), `WledUdpSink` uses `sendto()` per call since a show's WLED targets are typically different IPs plus the broadcast address.
 - **Host-testable core.** `WledManager`/`buildWledPacket` have zero ESP-IDF dependency -- they take an injected `IWledSink` (mirroring `show.h`'s `IUniverseSink`), so `test_wled.cpp`/`test_apply_loaded_show.cpp`/`test_glow_lua_api.cpp` exercise the real packet bytes without a socket.
