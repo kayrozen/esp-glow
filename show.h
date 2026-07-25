@@ -126,8 +126,16 @@ public:
   // for Fixture-mode universes.
   void writeRawUniverse(uint8_t idx, const uint8_t* data, uint16_t len);
 
-  // One render pass (see algorithm). Deterministic given t.
+  // One render pass (see algorithm). Deterministic given t. Exactly
+  // renderCompute(t) followed by renderFlush().
   void renderFrame(float t);
+
+  // renderFrame split in two, so a caller that wants to time compute
+  // separately from network flush (render_task.cpp, chasing a suspected
+  // blocking sendto() on the render path) can call these directly instead.
+  // Nothing else needs the split -- keep calling renderFrame(t).
+  void renderCompute(float t);  // steps 1-4: resolve intents into universe buffers
+  void renderFlush();           // step 5: send every configured universe to its sink
 
   // Read-only access to a universe's current 512-byte DMX buffer (the
   // state as of the last renderFrame/writeRawUniverse). nullptr if idx is
