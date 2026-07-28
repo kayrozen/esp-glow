@@ -57,6 +57,7 @@
 #include "control_queue.h"
 #include "effects.h"  // DimmerEffect -- used by setup_selftest_fixture() (CONFIG_GLOW_SELFTEST)
 #include "dmx_sink.h"
+#include "dmx_tx_task.h"
 #include "artnet_sink.h"
 #include "artnet_discovery_task.h"
 #include "artnet_nodes_web.h"
@@ -1161,6 +1162,16 @@ extern "C" void app_main(void) {
   g_dmx = new DmxSink(DMX_NUM_1, cfg.dmxTxGpio, cfg.dmxRxGpio, cfg.dmxRtsGpio);
   if (!g_dmx->begin()) {
     ESP_LOGE(TAG, "DMX bring-up failed; halting.");
+    led_status_set(LED_ERROR);
+    return;
+  }
+  // B2: the dedicated DMX transmit task (core 0) -- must start only AFTER
+  // begin() has installed the driver (its pumpTx()/sendBlackoutNow() calls
+  // assume that). Started here, not from start_network_services: DMX is
+  // local hardware, it does not depend on WiFi/network coming up (see
+  // start_network_services' own header comment on why it stays last).
+  if (!dmx_tx_task_start(g_dmx)) {
+    ESP_LOGE(TAG, "dmx_tx task start failed; halting.");
     led_status_set(LED_ERROR);
     return;
   }
