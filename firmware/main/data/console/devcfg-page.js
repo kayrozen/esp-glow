@@ -19,6 +19,7 @@ function fillForm(cfg) {
   $("wifiPass").value = cfg.wifiPass || "";
   $("artnetFallbackIp").value = formatIPv4(cfg.artnetFallbackIp || 0);
   $("artnetPort").value = cfg.artnetPort || 6454;
+  $("artnetSyncBroadcast").checked = !!cfg.artnetSyncBroadcast;
   $("dmxTxGpio").value = cfg.dmxTxGpio;
   $("dmxRxGpio").value = cfg.dmxRxGpio;
   $("dmxRtsGpio").value = cfg.dmxRtsGpio;
@@ -33,6 +34,7 @@ function readForm() {
     wifiPass: $("wifiPass").value,
     artnetFallbackIp: parseIPv4($("artnetFallbackIp").value),
     artnetPort: Number($("artnetPort").value) || 6454,
+    artnetSyncBroadcast: $("artnetSyncBroadcast").checked,
     dmxTxGpio: Number($("dmxTxGpio").value) & 0xff,
     dmxRxGpio: Number($("dmxRxGpio").value) & 0xff,
     dmxRtsGpio: Number($("dmxRtsGpio").value) & 0xff,

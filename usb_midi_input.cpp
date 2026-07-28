@@ -340,7 +340,10 @@ void usb_midi_host_task(void* /*ctx*/) {
     return;
   }
 
-  xTaskCreatePinnedToCore(usb_lib_daemon_task, "usb_daemon", 4096 / sizeof(StackType_t),
+  // xTaskCreatePinnedToCore's stack-depth parameter is in BYTES on
+  // ESP-IDF, not words -- `/ sizeof(StackType_t)` quietly requested a
+  // 1024-byte stack (on this target) instead of the intended 4096.
+  xTaskCreatePinnedToCore(usb_lib_daemon_task, "usb_daemon", 4096,
                           nullptr, 5, nullptr, 0);
 
   ESP_LOGI(TAG, "host stack up, waiting for a class-compliant USB-MIDI device");

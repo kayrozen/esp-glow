@@ -20,6 +20,7 @@
 
 #include "artnet_sink.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
 #include "lwip/ip4_addr.h"
@@ -27,8 +28,8 @@
 
 static const char* TAG = "artnet_sink";
 
-ArtNetSink::ArtNetSink(uint16_t port, uint32_t fallbackIp)
-    : router_(fallbackIp, port) {}
+ArtNetSink::ArtNetSink(uint16_t port, uint32_t fallbackIp, bool syncBroadcast)
+    : router_(fallbackIp, port, syncBroadcast) {}
 
 ArtNetSink::~ArtNetSink() {
   if (sock_ >= 0) {
@@ -97,16 +98,42 @@ void ArtNetSink::sendTo(uint32_t ip, uint16_t port, const uint8_t* data, uint16_
 
   int n = ::sendto(sock_, data, len, 0, (struct sockaddr*)&dst, sizeof(dst));
   if (n < 0) {
-    // EWOULDBLOCK on a non-blocking send just means the WiFi TX path was
-    // busy this frame and the packet got dropped; not worth a warning-level
-    // log every occurrence. Other errors are real (e.g. a genuinely
-    // unreachable unicast destination).
+    // A per-packet ESP_LOGW here (the previous behavior) is exactly what
+    // turned an ENOMEM storm into a debugging dead end: at ~176 dropped
+    // packets/s, ip4addr_ntoa()+vsnprintf() that many times a second is
+    // itself real CPU/UART cost stacked on top of the WiFi driver already
+    // being out of TX buffers. Count instead; logStatsIfDue() flushes an
+    // aggregated line at most once a second.
     int e = errno;
-    if (e != EAGAIN && e != EWOULDBLOCK) {
-      ip4_addr_t addr = {htonl(ip)};
-      ESP_LOGW(TAG, "sendto(%s:%u): errno %d", ip4addr_ntoa(&addr), (unsigned)port, e);
+    stats_.lastErrno = e;
+    if (e == EAGAIN || e == EWOULDBLOCK) {
+      ++stats_.dropWouldBlock;
+    } else if (e == ENOMEM) {
+      ++stats_.dropNoMem;
+    } else {
+      ++stats_.dropOther;
     }
+  } else {
+    ++stats_.ok;
   }
+
+  logStatsIfDue();
+}
+
+void ArtNetSink::logStatsIfDue() {
+  int64_t now = esp_timer_get_time();
+  if (now - lastLogUs_ < 1000000) return;  // at most once per second
+  lastLogUs_ = now;
+
+  if (stats_.ok == lastLogged_.ok && stats_.dropWouldBlock == lastLogged_.dropWouldBlock &&
+      stats_.dropNoMem == lastLogged_.dropNoMem && stats_.dropOther == lastLogged_.dropOther) {
+    return;  // nothing moved since the last line -- an idle second logs nothing
+  }
+
+  ESP_LOGI(TAG, "artnet tx: ok=%lu wouldblock=%lu nomem=%lu other=%lu (last errno=%d)",
+           (unsigned long)stats_.ok, (unsigned long)stats_.dropWouldBlock,
+           (unsigned long)stats_.dropNoMem, (unsigned long)stats_.dropOther, stats_.lastErrno);
+  lastLogged_ = stats_;
 }
 
 #endif  // ESP_PLATFORM

@@ -38,6 +38,7 @@
 #include "sdkconfig.h"
 #include "nvs_flash.h"
 #include "esp_heap_caps.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 
 #include "led_status.h"
@@ -58,6 +59,7 @@
 #include "dmx_sink.h"
 #include "artnet_sink.h"
 #include "artnet_discovery_task.h"
+#include "artnet_nodes_web.h"
 #include "pixel_matrix.h"
 #include "pixel_patterns.h"
 #include "show_bundle.h"
@@ -711,6 +713,18 @@ static void render_tick_hooks(RenderTickPhase phase, float t, uint32_t slack_us)
                  (unsigned long)(g_artSyncUsSum / 44), (unsigned long)g_artSyncUsMax);
         g_artSyncUsSum = 0;
         g_artSyncUsMax = 0;
+
+        // PR3 (observability): a monotonically decreasing free-heap trend
+        // here across many of these once/sec lines signals an actual leak;
+        // a low-but-stable value instead signals the buffer-pool
+        // saturation this whole fix targets (ENOMEM with heap otherwise
+        // healthy) -- distinguishing the two needed this line. Internal
+        // (MALLOC_CAP_INTERNAL) specifically because that's the pool
+        // CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM/lwIP pbufs come from, not
+        // the PSRAM heap frame buffers/SHW1 use.
+        ESP_LOGI(TAG, "heap: free=%u internal_free=%u",
+                 (unsigned)esp_get_free_heap_size(),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 #ifdef CONFIG_GLOW_SELFTEST
         uint32_t frames = 0, behind = 0, dropped = 0;
         render_task_get_and_reset_stats(&frames, &behind, &dropped);
@@ -981,7 +995,16 @@ static void start_network_services(void) {
     // comment); a node vanishing reverts its universes to
     // fallback/broadcast, never darkness.
     artnet_discovery_task_init(g_artnet, g_artnetShowDest, g_artnetUniverseCount);
-    xTaskCreatePinnedToCore(artnet_discovery_task, "artnet_disc", 4096 / sizeof(StackType_t),
+    // xTaskCreatePinnedToCore's stack-depth parameter is in BYTES on
+    // ESP-IDF, not words (unlike vanilla FreeRTOS) -- every bare "4096"
+    // literal below this comment (artnet_disc, osc, djlink_beat,
+    // djlink_status, selftest_query, midi, usb_midi) used to read
+    // "4096 / sizeof(StackType_t)", a vanilla-FreeRTOS idiom that quietly
+    // requested a 1024-byte stack (on this target, 4-byte StackType_t)
+    // for each of these tasks instead of the intended 4096. See the CI
+    // guard in .github/workflows/qemu-boot.yml, which now fails the build
+    // if this pattern reappears anywhere task-creation arguments are built.
+    xTaskCreatePinnedToCore(artnet_discovery_task, "artnet_disc", 4096,
                             nullptr, 5, nullptr, 0);
   }
 
@@ -1009,7 +1032,7 @@ static void start_network_services(void) {
   web_server_task(nullptr);  // starts httpd; not a FreeRTOS task itself (see web_input.h)
 
   osc_input_init(*g_controlQueue, g_oscMap, static_cast<uint16_t>(CONFIG_GLOW_OSC_UDP_PORT));
-  xTaskCreatePinnedToCore(osc_server_task, "osc", 4096 / sizeof(StackType_t),
+  xTaskCreatePinnedToCore(osc_server_task, "osc", 4096,
                           nullptr, 5, nullptr, 0);
 
   // Musical time: passive Pro DJ Link listener (Afterglow's signature
@@ -1017,9 +1040,9 @@ static void start_network_services(void) {
   // beat packets (50001, the actual sync source) and CDJ status's
   // tempo-master flag (50002, gates which player's beats get accepted).
   djlink_input_init(*g_beatQueue);
-  xTaskCreatePinnedToCore(djlink_beat_task, "djlink_beat", 4096 / sizeof(StackType_t),
+  xTaskCreatePinnedToCore(djlink_beat_task, "djlink_beat", 4096,
                           nullptr, 5, nullptr, 0);
-  xTaskCreatePinnedToCore(djlink_status_task, "djlink_status", 4096 / sizeof(StackType_t),
+  xTaskCreatePinnedToCore(djlink_status_task, "djlink_status", 4096,
                           nullptr, 5, nullptr, 0);
 }
 
@@ -1068,11 +1091,18 @@ extern "C" void app_main(void) {
   // structured GLOW-TEST: line the QEMU/HIL harnesses assert on. A corrupt
   // or missing devcfg falling back silently would be a debugging nightmare
   // the first time someone's WiFi doesn't come up -- this is that report.
+  // artnet_fallback: 0 means an unrouted universe is now DROPPED, not
+  // broadcast (see artnet_router.h) -- only an explicit 0xFFFFFFFF still
+  // broadcasts. Getting this log string wrong here is exactly the kind of
+  // thing that hides the fix from a serial log.
+  const char* fallbackDesc = cfg.artnetFallbackIp == 0 ? "dropped"
+                             : cfg.artnetFallbackIp == 0xFFFFFFFFu ? "broadcast"
+                                                                    : "unicast";
   ESP_LOGI(TAG, "cfg: source=%s dmx_tx=%u dmx_rx=%u dmx_rts=%u led=%u usb_midi=%d skip_wifi=%d "
-                "artnet_fallback=%s:%u ssid=\"%s\"",
+                "artnet_fallback=%s:%u artnet_sync_broadcast=%d ssid=\"%s\"",
            cfgSource, (unsigned)cfg.dmxTxGpio, (unsigned)cfg.dmxRxGpio, (unsigned)cfg.dmxRtsGpio,
            (unsigned)cfg.ledGpio, (int)cfg.usbMidiHost, (int)cfg.skipWifi,
-           cfg.artnetFallbackIp == 0 ? "broadcast" : "unicast", (unsigned)cfg.artnetPort, cfg.wifiSsid);
+           fallbackDesc, (unsigned)cfg.artnetPort, (int)cfg.artnetSyncBroadcast, cfg.wifiSsid);
 #ifdef CONFIG_GLOW_SELFTEST
   printf("GLOW-TEST: cfg source=%s dmx_tx=%u usb_midi=%d skip_wifi=%d\n",
          cfgSource, (unsigned)cfg.dmxTxGpio, (int)cfg.usbMidiHost, (int)cfg.skipWifi);
@@ -1155,7 +1185,12 @@ extern "C" void app_main(void) {
   // this fallback, which wins over broadcast. ArtNetSink resolves that
   // precedence itself (via ArtNetRouter) every send -- ip=0 on a
   // per-universe route means "use this fallback."
-  g_artnet = new ArtNetSink(cfg.artnetPort, cfg.artnetFallbackIp);
+  g_artnet = new ArtNetSink(cfg.artnetPort, cfg.artnetFallbackIp, cfg.artnetSyncBroadcast);
+  // PR3 (observability): lets GET /artnet_nodes report ArtNetSink's TX
+  // counters (artnet_nodes_web.cpp) -- safe to call this early, well
+  // before the httpd server (and web_input.cpp's registration call for
+  // that same endpoint) ever starts.
+  artnet_nodes_web_set_sink(g_artnet);
 
   // --- F5: always keep at least one DMX universe configured and
   // streaming, independent of whether a show bundle loads -- "safe
@@ -1268,7 +1303,7 @@ extern "C" void app_main(void) {
   // a serial query is never more urgent than real-time rendering or
   // network input, and this task spends nearly all its time blocked on
   // fgetc(stdin) waiting for a byte.
-  xTaskCreatePinnedToCore(selftest_query_task, "selftest_query", 4096 / sizeof(StackType_t),
+  xTaskCreatePinnedToCore(selftest_query_task, "selftest_query", 4096,
                           nullptr, 5, nullptr, 0);
 #endif
 
@@ -1330,7 +1365,7 @@ extern "C" void app_main(void) {
   // init table.
   midi_input_init(*g_controlQueue, g_beatQueue, CONFIG_GLOW_MIDI_UART_NUM, CONFIG_GLOW_MIDI_RX_GPIO,
                   CONFIG_GLOW_MIDI_TX_GPIO, g_hasController ? &g_controllerProfile : nullptr);
-  xTaskCreatePinnedToCore(midi_uart_task, "midi", 4096 / sizeof(StackType_t),
+  xTaskCreatePinnedToCore(midi_uart_task, "midi", 4096,
                           nullptr, 5, nullptr, 0);
 
 #ifdef CONFIG_GLOW_USB_MIDI_HOST
@@ -1347,7 +1382,7 @@ extern "C" void app_main(void) {
     // P1.1: same g_controllerProfile as the DIN wiring above -- INIT SYSEX
     // fires on hot-plug here (usb_midi_input.cpp), not just at boot.
     usb_midi_input_init(*g_controlQueue, g_hasController ? &g_controllerProfile : nullptr);
-    xTaskCreatePinnedToCore(usb_midi_host_task, "usb_midi", 4096 / sizeof(StackType_t),
+    xTaskCreatePinnedToCore(usb_midi_host_task, "usb_midi", 4096,
                             nullptr, 5, nullptr, 0);
   } else {
     ESP_LOGI(TAG, "USB-MIDI host compiled in but disabled (cfg.usbMidiHost=false) -- "

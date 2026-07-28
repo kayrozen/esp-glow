@@ -20,8 +20,12 @@ export const DEVCFG_CRC_OFFSET = 146;
 export const DEVCFG_SSID_MAX = 32;
 export const DEVCFG_PASS_MAX = 64;
 
+export const DEVCFG_VERSION_CURRENT = 2; // always written by encodeDeviceConfig
+export const DEVCFG_VERSION_MIN = 1; // oldest version decodeDeviceConfig accepts
+
 export const DEVCFG_FLAG_USB_MIDI_HOST = 0x01;
 export const DEVCFG_FLAG_SKIP_WIFI = 0x02;
+export const DEVCFG_FLAG_ARTNET_SYNC_BROADCAST = 0x04; // version >= 2 only
 
 // Standard CRC-32 (IEEE 802.3 / zlib / PNG): poly 0xEDB88320 (reflected),
 // init 0xFFFFFFFF, final XOR 0xFFFFFFFF. Bitwise (no lookup table) --
@@ -47,8 +51,9 @@ export function defaultDeviceConfig() {
     skipWifi: false,
     wifiSsid: "",
     wifiPass: "",
-    artnetFallbackIp: 0, // 0 = broadcast
+    artnetFallbackIp: 0, // 0 = no destination (dropped), never an implicit broadcast
     artnetPort: 6454,
+    artnetSyncBroadcast: false, // version >= 2 only; see device_config.h
     dmxTxGpio: 17,
     dmxRxGpio: 18,
     dmxRtsGpio: 8,
@@ -107,10 +112,11 @@ export function encodeDeviceConfig(cfg) {
   bytes[1] = 0x46; // 'F'
   bytes[2] = 0x47; // 'G'
   bytes[3] = 0x31; // '1'
-  bytes[4] = 1; // version
+  bytes[4] = DEVCFG_VERSION_CURRENT; // version
   let flags = 0;
   if (c.usbMidiHost) flags |= DEVCFG_FLAG_USB_MIDI_HOST;
   if (c.skipWifi) flags |= DEVCFG_FLAG_SKIP_WIFI;
+  if (c.artnetSyncBroadcast) flags |= DEVCFG_FLAG_ARTNET_SYNC_BROADCAST;
   bytes[5] = flags;
   view.setUint16(6, 0, true); // reserved
 
@@ -151,7 +157,7 @@ export function decodeDeviceConfig(bytes) {
     return { ok: false, error: "bad magic (expected \"CFG1\")" };
   }
   const version = bytes[4];
-  if (version !== 1) {
+  if (version < DEVCFG_VERSION_MIN || version > DEVCFG_VERSION_CURRENT) {
     return { ok: false, error: `unsupported version ${version}` };
   }
 
@@ -173,6 +179,11 @@ export function decodeDeviceConfig(bytes) {
   off += 4;
   const artnetPort = view.getUint16(off, true);
   off += 2;
+  // artnetSyncBroadcast is a version-2 addition; force false for a v1
+  // blob rather than trust an unset-but-technically-readable bit -- an
+  // old blob must never surface a new behavior it was never written to
+  // request (mirrors device_config.cpp's parseDeviceConfig).
+  const artnetSyncBroadcast = version >= 2 && (flags & DEVCFG_FLAG_ARTNET_SYNC_BROADCAST) !== 0;
 
   const dmxTxGpio = bytes[off++];
   const dmxRxGpio = bytes[off++];
@@ -188,6 +199,7 @@ export function decodeDeviceConfig(bytes) {
       wifiPass,
       artnetFallbackIp,
       artnetPort,
+      artnetSyncBroadcast,
       dmxTxGpio,
       dmxRxGpio,
       dmxRtsGpio,

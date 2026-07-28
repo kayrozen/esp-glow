@@ -13,8 +13,13 @@
 //
 // Header (8 bytes):
 //   magic          4 bytes "CFG1"
-//   version        u8  = 1
-//   flags          u8   (bit0: usbMidiHost, bit1: skipWifi)
+//   version        u8  = 2 (encoder always writes current; parser also
+//                            accepts 1 for backward compatibility -- a
+//                            v1 blob already in flash must keep booting.
+//                            See "Version history" below.)
+//   flags          u8   (bit0: usbMidiHost, bit1: skipWifi,
+//                         bit2: artnetSyncBroadcast -- version >= 2 only,
+//                         ignored/forced false when version == 1)
 //   reserved       u16 = 0
 // Network (102 bytes):
 //   wifiSsid       32 bytes, NUL-padded
@@ -31,16 +36,31 @@
 //                                  version bump needed to use them)
 //   crc32          u32 over every byte above (offsets 0..145)
 //
-// Total blob size: 150 bytes. The "devcfg" partition is 4 KB, so there is
-// plenty of headroom beyond this for a future version bump too -- 150
-// bytes is just what CFG1 v1 currently defines.
+// Total blob size: 150 bytes, unchanged since v1 -- artnetSyncBroadcast
+// (below) fit in an already-reserved flags bit, so v2 needed no layout
+// change, only a version bump to make the new bit meaningful. The
+// "devcfg" partition is 4 KB, so there is plenty of headroom beyond this
+// for a future version bump too.
+//
+// Version history:
+//   1: original layout, as above minus artnetSyncBroadcast.
+//   2: adds flags bit2 (artnetSyncBroadcast). A v1 blob has that bit
+//      always 0 (it was reserved-but-unvalidated, and no v1 encoder ever
+//      set it) -- parseDeviceConfig still accepts version == 1 and simply
+//      reports artnetSyncBroadcast == false for it, so a devcfg partition
+//      written before this version bump keeps booting exactly as before,
+//      not rejected.
 constexpr size_t DEVCFG_BLOB_SIZE = 150;
 
 // Byte offset of the crc32 field; also the number of bytes the CRC covers.
 constexpr size_t DEVCFG_CRC_OFFSET = 146;
 
+constexpr uint8_t DEVCFG_VERSION_CURRENT = 2;  // always written by the encoder
+constexpr uint8_t DEVCFG_VERSION_MIN = 1;      // oldest version parseDeviceConfig accepts
+
 constexpr uint8_t DEVCFG_FLAG_USB_MIDI_HOST = 0x01;
 constexpr uint8_t DEVCFG_FLAG_SKIP_WIFI = 0x02;
+constexpr uint8_t DEVCFG_FLAG_ARTNET_SYNC_BROADCAST = 0x04;  // version >= 2 only
 
 constexpr size_t DEVCFG_SSID_MAX = 32;
 constexpr size_t DEVCFG_PASS_MAX = 64;
@@ -70,8 +90,15 @@ struct DeviceConfig {
   char wifiSsid[DEVCFG_SSID_MAX + 1] = {};
   char wifiPass[DEVCFG_PASS_MAX + 1] = {};
 
-  uint32_t artnetFallbackIp = 0;  // 0 = broadcast
+  uint32_t artnetFallbackIp = 0;  // 0 = no destination (dropped), never an implicit broadcast
   uint16_t artnetPort = 6454;
+
+  // version >= 2 only; always false for a v1 blob (see "Version history"
+  // above). false (default): ArtNetRouter::frameEnd() sends ArtSync
+  // unicast to each distinct routed node, or nothing if none are routed.
+  // true: keep the spec-literal unconditional broadcast, for a node that
+  // requires it.
+  bool artnetSyncBroadcast = false;
 
   uint8_t dmxTxGpio = 0;
   uint8_t dmxRxGpio = 0;

@@ -231,7 +231,13 @@ bool wifi_start_sta(const WifiStaConfig* cfg) {
   // registered a callback (main.cpp does, unconditionally, before this
   // call, whenever cfg.skipWifi is false).
   if (s_on_got_ip) {
-    xTaskCreatePinnedToCore(net_start_task, "net_start", 4096 / sizeof(StackType_t),
+    // xTaskCreatePinnedToCore's stack-depth parameter is in BYTES on
+    // ESP-IDF, not words -- `/ sizeof(StackType_t)` here was a vanilla-
+    // FreeRTOS idiom that instead quietly requested a 1024-byte stack (on
+    // this target) for a task that runs httpd_start() plus ~15
+    // httpd_register_uri_handler() calls synchronously, hence the bump to
+    // 8192 alongside the unit fix.
+    xTaskCreatePinnedToCore(net_start_task, "net_start", 8192,
                             nullptr, tskIDLE_PRIORITY + 1, nullptr, 0);
   }
   return true;

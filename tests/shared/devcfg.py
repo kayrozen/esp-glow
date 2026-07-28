@@ -20,8 +20,12 @@ DEVCFG_CRC_OFFSET = 146
 DEVCFG_SSID_MAX = 32
 DEVCFG_PASS_MAX = 64
 
+DEVCFG_VERSION_CURRENT = 2  # always written by encode_devcfg
+DEVCFG_VERSION_MIN = 1  # oldest version device_config.cpp's parser accepts
+
 DEVCFG_FLAG_USB_MIDI_HOST = 0x01
 DEVCFG_FLAG_SKIP_WIFI = 0x02
+DEVCFG_FLAG_ARTNET_SYNC_BROADCAST = 0x04  # version >= 2 only
 
 
 def _padded(s: str, width: int) -> bytes:
@@ -41,6 +45,7 @@ def encode_devcfg(
     led_gpio: int = 2,
     usb_midi_host: bool = False,
     skip_wifi: bool = False,
+    artnet_sync_broadcast: bool = False,
 ) -> bytes:
     """Builds a valid DEVCFG_BLOB_SIZE-byte CFG1 blob, CRC included."""
     flags = 0
@@ -48,10 +53,12 @@ def encode_devcfg(
         flags |= DEVCFG_FLAG_USB_MIDI_HOST
     if skip_wifi:
         flags |= DEVCFG_FLAG_SKIP_WIFI
+    if artnet_sync_broadcast:
+        flags |= DEVCFG_FLAG_ARTNET_SYNC_BROADCAST
 
     body = bytearray()
     body += b"CFG1"
-    body += bytes([1])  # version
+    body += bytes([DEVCFG_VERSION_CURRENT])  # version
     body += bytes([flags])
     body += struct.pack("<H", 0)  # reserved
     body += _padded(wifi_ssid, DEVCFG_SSID_MAX)

@@ -23,7 +23,39 @@ CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
-CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+# Was =y. On hardware (ESP32-S3, IDF v5.1) this forced the WiFi driver's TX
+# buffers into a hard-capped 16-entry STATIC internal pool ("wifi:Init
+# static tx buffer num: 16" at boot) instead of letting them come from the
+# larger, elastic PSRAM-backed pool -- CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM
+# below only takes effect with this off. Under the broadcast storm PR1/PR2
+# fixed (unrouted Art-Net universes + ArtSync broadcasting unconditionally
+# at ~44 Hz with no listener), that 16-buffer pool emptied and stayed
+# empty: lwIP could no longer allocate a pbuf for anything, including ARP
+# replies, and the device dropped off L2 entirely (serial log:
+# "artnet_sink: sendto(255.255.255.255:6454): errno 12" == ENOMEM). PR1/PR2
+# remove the packet flood that exhausts the pool; this setting removes the
+# pool's PSRAM ceiling as defense in depth, since a boot's free internal
+# DRAM was measured at ~197 KB, comfortably more than a 32-entry static TX
+# pool needs. If a future build overflows the internal DRAM budget because
+# of this, the fix is to revert this one line back to =y and rely on
+# PR1/PR2 alone -- not to force it through.
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=n
+
+# WiFi TX buffer count. Doubled from the (implicit) default of 16 now that
+# they're guaranteed to come out of internal DRAM (see
+# CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP above) instead of a PSRAM-backed pool
+# whose actual ceiling was never obvious from this file alone -- headroom
+# against the same class of TX-buffer-starvation bug, on top of removing
+# its cause in PR1/PR2.
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=32
+
+# UDP receive mailbox depth per socket. Widened from lwIP's default (6) so
+# a burst of inbound ArtPollReply/OSC/DJ-Link packets arriving faster than
+# their task can drain them gets queued instead of dropped at the socket
+# layer -- cheap insurance (a few dozen bytes of pointer-sized mailbox
+# slots) against the same "WiFi TX path under pressure" conditions that
+# motivated this whole fix, applied to the RX side too.
+CONFIG_LWIP_UDP_RECVMBOX_SIZE=16
 
 # --- C++ runtime ---
 # The core modules were written for -fno-exceptions -fno-rtti (std::vector on

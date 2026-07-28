@@ -42,8 +42,8 @@ uint16_t buildArtSyncPacket(uint8_t* out) {
   return static_cast<uint16_t>(ARTNET_SYNC_PACKET_SIZE);
 }
 
-ArtNetRouter::ArtNetRouter(uint32_t fallbackIp, uint16_t port)
-    : fallbackIp_(fallbackIp), port_(port) {
+ArtNetRouter::ArtNetRouter(uint32_t fallbackIp, uint16_t port, bool syncBroadcast)
+    : fallbackIp_(fallbackIp), port_(port), syncBroadcast_(syncBroadcast) {
   for (uint8_t i = 0; i < MAX_UNIVERSES; ++i) {
     dest_[i].ip = 0;
     dest_[i].wireUniverse = i;
@@ -68,8 +68,7 @@ ArtNetDest ArtNetRouter::destFor(uint8_t universeIndex) const {
 
 uint32_t ArtNetRouter::resolveIp(const ArtNetDest& d) const {
   if (d.ip != 0) return d.ip;
-  if (fallbackIp_ != 0) return fallbackIp_;
-  return 0xFFFFFFFFu;
+  return fallbackIp_;  // 0 here means "no destination" -- see ctor's doc.
 }
 
 void ArtNetRouter::send(uint8_t universeIndex, const uint8_t* data, uint16_t len,
@@ -80,16 +79,63 @@ void ArtNetRouter::send(uint8_t universeIndex, const uint8_t* data, uint16_t len
   ArtNetDest dest = dest_[universeIndex];
   portEXIT_CRITICAL(&destMux_);
 
+  uint32_t ip = resolveIp(dest);
+  if (ip == 0) {
+    // No route and no fallback: drop rather than broadcast. Do not touch
+    // the sequence counter -- it must not advance for a packet that was
+    // never sent (see send()'s doc). Also not "active" for frameEnd()'s
+    // ArtSync targeting -- nothing was sent for this universe.
+    ++unroutedDrops_;
+    activeThisFrame_[universeIndex] = false;
+    return;
+  }
+
   uint8_t pkt[ARTNET_DMX_PACKET_MAX];
   uint16_t pktLen = buildArtDmxPacket(pkt, dest.wireUniverse,
                                       seq_[universeIndex], data, len);
   if (++seq_[universeIndex] == 0) seq_[universeIndex] = 1;
 
-  transport.sendTo(resolveIp(dest), port_, pkt, pktLen);
+  activeThisFrame_[universeIndex] = true;
+  transport.sendTo(ip, port_, pkt, pktLen);
 }
 
 void ArtNetRouter::frameEnd(IArtNetTransport& transport) {
   uint8_t pkt[ARTNET_SYNC_PACKET_SIZE];
   uint16_t pktLen = buildArtSyncPacket(pkt);
-  transport.sendTo(0xFFFFFFFFu, port_, pkt, pktLen);
+
+  if (syncBroadcast_) {
+    transport.sendTo(0xFFFFFFFFu, port_, pkt, pktLen);
+    return;
+  }
+
+  // Snapshot the routing table once under the lock, then dedup outside it
+  // -- keeps the critical section as short as send()'s (no I/O or O(n^2)
+  // work while it's held).
+  portENTER_CRITICAL(&destMux_);
+  ArtNetDest snapshot[MAX_UNIVERSES];
+  std::memcpy(snapshot, dest_, sizeof(dest_));
+  portEXIT_CRITICAL(&destMux_);
+
+  // No dynamic allocation: MAX_UNIVERSES is small (8) and fixed, so a
+  // linear-scan dedup into a stack array costs nothing this doesn't
+  // already pay for per-frame elsewhere. Only universes send() actually
+  // sent data for THIS frame are considered -- see activeThisFrame_'s doc
+  // for why a fixed-size-array-wide scan would have been wrong.
+  uint32_t distinctIps[MAX_UNIVERSES];
+  uint8_t distinctCount = 0;
+  for (uint8_t i = 0; i < MAX_UNIVERSES; ++i) {
+    if (!activeThisFrame_[i]) continue;
+    uint32_t ip = resolveIp(snapshot[i]);
+    if (ip == 0) continue;  // defensive; send() already excludes this case
+    bool seen = false;
+    for (uint8_t j = 0; j < distinctCount; ++j) {
+      if (distinctIps[j] == ip) { seen = true; break; }
+    }
+    if (!seen) distinctIps[distinctCount++] = ip;
+  }
+  std::memset(activeThisFrame_, 0, sizeof(activeThisFrame_));
+
+  for (uint8_t i = 0; i < distinctCount; ++i) {
+    transport.sendTo(distinctIps[i], port_, pkt, pktLen);
+  }
 }

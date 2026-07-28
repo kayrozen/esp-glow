@@ -58,6 +58,7 @@ int main(int argc, char* argv[]) {
   printf("\"wifiPass\":"); printJsonString(cfg.wifiPass); printf(",");
   printf("\"artnetFallbackIp\":%u,", (unsigned)cfg.artnetFallbackIp);
   printf("\"artnetPort\":%u,", (unsigned)cfg.artnetPort);
+  printf("\"artnetSyncBroadcast\":%s,", cfg.artnetSyncBroadcast ? "true" : "false");
   printf("\"dmxTxGpio\":%u,", (unsigned)cfg.dmxTxGpio);
   printf("\"dmxRxGpio\":%u,", (unsigned)cfg.dmxRxGpio);
   printf("\"dmxRtsGpio\":%u,", (unsigned)cfg.dmxRtsGpio);

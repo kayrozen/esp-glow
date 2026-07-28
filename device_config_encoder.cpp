@@ -33,11 +33,12 @@ std::vector<uint8_t> encodeDeviceConfig(const DeviceConfig& cfg) {
   b[1] = 'F';
   b[2] = 'G';
   b[3] = '1';
-  b[4] = 1;  // version
+  b[4] = DEVCFG_VERSION_CURRENT;
 
   uint8_t flags = 0;
   if (cfg.usbMidiHost) flags |= DEVCFG_FLAG_USB_MIDI_HOST;
   if (cfg.skipWifi) flags |= DEVCFG_FLAG_SKIP_WIFI;
+  if (cfg.artnetSyncBroadcast) flags |= DEVCFG_FLAG_ARTNET_SYNC_BROADCAST;
   b[5] = flags;
   writeU16LE(b, 6, 0);  // reserved
 
