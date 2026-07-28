@@ -1405,7 +1405,20 @@ extern "C" void app_main(void) {
   ESP_LOGI(TAG, "Reflash the 'show' partition and reboot to change the patch.");
 
   while (true) {
-    led_status_set(wifi_is_connected() ? LED_BLINK_DOUBLE : LED_BLINK_FAST);
+    bool netUp = wifi_is_connected();
+    // A3: a distinct pattern for "network is fine, but the web console
+    // never came up" -- httpd_start() failing after its retries
+    // (web_input.cpp) otherwise has NO visible indication besides a serial
+    // log line, and the device is still pingable/OSC/DJ-Link/Art-Net-
+    // capable, so LED_BLINK_DOUBLE alone would read as "everything's
+    // fine." Only checked while the network is actually up: with no
+    // network, web_server_task never even runs (see start_network_services),
+    // so web_console_is_up() would read false for an unrelated reason and
+    // LED_BLINK_FAST (below) is already the correct signal for that case.
+    led_pattern_t p = (netUp && !web_console_is_up()) ? LED_WEB_DOWN
+                      : netUp                        ? LED_BLINK_DOUBLE
+                                                       : LED_BLINK_FAST;
+    led_status_set(p);
     vTaskDelay(pdMS_TO_TICKS(2000));
   }
 }

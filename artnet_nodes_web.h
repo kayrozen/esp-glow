@@ -4,6 +4,12 @@
 // network." Reads artnet_discovery_task's thread-safe snapshot; registers
 // onto the same httpd server web_input.cpp already runs (same pattern as
 // ota_manager.h/device_config_web.h).
+//
+// A3: also carries a top-level "webConsoleUp" bool (web_console_is_up()) --
+// no dedicated GET /health exists yet, so this is the stand-in per that
+// spec's own fallback note. Trivially true whenever this endpoint is
+// reachable at all; the real out-of-band signal for "httpd itself is down"
+// is the status LED (LED_WEB_DOWN), not this JSON -- see web_input.h.
 #pragma once
 
 #ifdef ESP_PLATFORM

@@ -40,8 +40,10 @@
 
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -63,6 +65,16 @@ static size_t                g_nScenes      = 0;
 static bool                  g_hasMaster    = false;
 
 static httpd_handle_t g_server = nullptr;
+
+// A3: see web_console_is_up's header comment. Written only from
+// web_server_task (app_main's own task, called synchronously -- not a
+// FreeRTOS task of its own, see web_server_task's doc), read from
+// main.cpp's idle loop; a plain bool is fine (single writer, benign torn
+// read at worst -- same reasoning as web_input.cpp's g_stateBroadcastForced
+// above).
+static bool g_webConsoleUp = false;
+
+bool web_console_is_up() { return g_webConsoleUp; }
 
 // P1.3: see web_input.h's header comment on web_input_note_new_client --
 // a plain volatile flag, set from the httpd (WS) task on a new connection,
@@ -489,10 +501,38 @@ void web_server_task(void* /*ctx*/) {
   // small console requests, not that.
   config.recv_wait_timeout = 30;
 
-  if (httpd_start(&g_server, &config) != ESP_OK) {
-    ESP_LOGE(TAG, "httpd_start failed");
+  // A3: httpd_start() was observed failing outright on real hardware --
+  // internal DRAM measured ~4 KB free right before the call, because
+  // esp_http_server allocates its socket pool and worker-task stacks from
+  // internal DRAM and nothing had reclaimed the budget WiFi association
+  // still had a hold on yet. Retrying with a bounded delay, re-measuring
+  // internal_free each time, covers a DRAM budget that's still settling
+  // seconds after IP_EVENT_STA_GOT_IP (see A2's sdkconfig.defaults comment
+  // for the actual root cause and fix -- this retry is a robustness
+  // backstop on top of that, not a substitute for it).
+  constexpr int kMaxHttpdStartAttempts = 3;
+  constexpr uint32_t kHttpdStartRetryDelayMs = 500;
+  esp_err_t startErr = ESP_FAIL;
+  for (int attempt = 1; attempt <= kMaxHttpdStartAttempts; ++attempt) {
+    size_t internalFree = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    ESP_LOGI(TAG, "httpd_start attempt %d/%d: internal_free=%u",
+             attempt, kMaxHttpdStartAttempts, (unsigned)internalFree);
+    startErr = httpd_start(&g_server, &config);
+    if (startErr == ESP_OK) break;
+    ESP_LOGW(TAG, "httpd_start attempt %d/%d failed: %s",
+             attempt, kMaxHttpdStartAttempts, esp_err_to_name(startErr));
+    if (attempt < kMaxHttpdStartAttempts) {
+      vTaskDelay(pdMS_TO_TICKS(kHttpdStartRetryDelayMs));
+    }
+  }
+  if (startErr != ESP_OK) {
+    ESP_LOGE(TAG, "httpd_start failed after %d attempts; web console "
+                  "unavailable this boot (DMX/OSC/DJ-Link/Art-Net continue "
+                  "unaffected).", kMaxHttpdStartAttempts);
+    g_webConsoleUp = false;
     return;
   }
+  g_webConsoleUp = true;
 
   httpd_uri_t wsUri = {};
   wsUri.uri = "/ws";
