@@ -23,30 +23,36 @@ CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
-# Was =y. On hardware (ESP32-S3, IDF v5.1) this forced the WiFi driver's TX
-# buffers into a hard-capped 16-entry STATIC internal pool ("wifi:Init
-# static tx buffer num: 16" at boot) instead of letting them come from the
-# larger, elastic PSRAM-backed pool -- CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM
-# below only takes effect with this off. Under the broadcast storm PR1/PR2
-# fixed (unrouted Art-Net universes + ArtSync broadcasting unconditionally
-# at ~44 Hz with no listener), that 16-buffer pool emptied and stayed
-# empty: lwIP could no longer allocate a pbuf for anything, including ARP
-# replies, and the device dropped off L2 entirely (serial log:
-# "artnet_sink: sendto(255.255.255.255:6454): errno 12" == ENOMEM). PR1/PR2
-# remove the packet flood that exhausts the pool; this setting removes the
-# pool's PSRAM ceiling as defense in depth, since a boot's free internal
-# DRAM was measured at ~197 KB, comfortably more than a 32-entry static TX
-# pool needs. If a future build overflows the internal DRAM budget because
-# of this, the fix is to revert this one line back to =y and rely on
-# PR1/PR2 alone -- not to force it through.
-CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=n
+# Reverted back to =y (PR4a briefly set this to =n; see git history). PR4a's
+# reasoning was real: with this off, lwIP's pbufs (and the WiFi driver's TX
+# buffers) come out of internal DRAM instead of the elastic PSRAM-backed
+# pool, which looked like defense in depth against the broadcast-storm
+# ENOMEM bug PR1/PR2 actually fixed (unrouted Art-Net universes + ArtSync
+# broadcasting unconditionally at ~44 Hz with no listener -- see FORMAT.md).
+# But a reflash on real hardware (build 381dcb1, IDF v5.1) after PR1/PR2
+# landed showed the actual cost of that "defense in depth": esp_http_server
+# allocates its socket pool and worker-task stacks from internal DRAM too,
+# and with pbufs also pinned there, only ~4 KB of internal DRAM was left by
+# the time httpd_start() ran -- "E (5493) web_input: httpd_start failed"
+# every boot, console permanently dead. The PR1/PR2 fix already removes the
+# packet flood that exhausted the WiFi TX buffer pool in the first place;
+# this setting was pure ceiling-removal on top of that, and here it costs
+# more (starves httpd) than it buys (a PSRAM-backed pool PR1/PR2 no longer
+# lets run dry). Keeping pbufs in PSRAM leaves internal DRAM to httpd. If a
+# future build reintroduces the TX-buffer-starvation class of bug this was
+# meant to guard against, re-measure internal_free right before
+# httpd_start() (see web_input.cpp's retry-with-heap-logging) before
+# flipping this back to =n -- don't reapply it speculatively.
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 
-# WiFi TX buffer count. Doubled from the (implicit) default of 16 now that
-# they're guaranteed to come out of internal DRAM (see
-# CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP above) instead of a PSRAM-backed pool
-# whose actual ceiling was never obvious from this file alone -- headroom
-# against the same class of TX-buffer-starvation bug, on top of removing
-# its cause in PR1/PR2.
+# WiFi TX buffer count. Doubled from the (implicit) default of 16 --
+# confirmed at boot ("wifi:Init static tx buffer num: 32"). This pool is
+# independent of CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP above (that flag only
+# steers lwIP's pbufs, not the WiFi driver's own static TX buffers, which
+# are always internal DRAM) -- kept from PR4a as headroom against the same
+# class of TX-buffer-starvation bug, on top of removing its actual cause in
+# PR1/PR2. Not implicated in the httpd regression this file's other change
+# fixes (see CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP's comment above).
 CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=32
 
 # UDP receive mailbox depth per socket. Widened from lwIP's default (6) so

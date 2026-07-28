@@ -88,8 +88,16 @@ idf_component_register(
         # F5: host-tested safe-blackout core (stop every cue, zero every
         # Raw universe) -- see safe_blackout.h
         ${GLOW_ROOT}/safe_blackout.cpp
-        # device-only DMX sink (#ifdef ESP_PLATFORM guarded; filled in F1)
+        # B2 (SPEC-esp-glow-spiram-dmx): latest-wins single-slot mailbox the
+        # render task and the dmx_tx task share (host-tested; see
+        # dmx_frame_buffer.h) + the device-only DMX sink that wraps it
+        # (#ifdef ESP_PLATFORM guarded; filled in F1, decoupled from the
+        # render loop in B2) + the dedicated DMX transmit task that now
+        # owns the actual dmx_write/dmx_send/dmx_wait_sent cycle (#ifdef
+        # ESP_PLATFORM guarded; see dmx_tx_task.h)
+        ${GLOW_ROOT}/dmx_frame_buffer.cpp
         ${GLOW_ROOT}/dmx_sink.cpp
+        ${GLOW_ROOT}/dmx_tx_task.cpp
         # Wave 3: portable Art-Net packet building + per-universe routing/
         # sequencing/ArtSync (host-tested; see artnet_router.h)
         ${GLOW_ROOT}/artnet_router.cpp

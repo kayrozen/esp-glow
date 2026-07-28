@@ -96,6 +96,16 @@ int web_input_poll_fx_error(GlowLuaApi& api, FxErrorReplyFn onFxError, void* ctx
 // matches the other transports' entry points; it's unused).
 void web_server_task(void* ctx);
 
+// A3: whether the httpd server (console static files + /ws + /ota + /devcfg
+// + /artnet_nodes) is up. False until web_server_task's httpd_start()
+// succeeds; permanently false for the rest of this boot if it still fails
+// after its retries (see web_server_task's header comment) -- DMX/OSC/DJ
+// Link/Art-Net are unaffected either way. Checked by main.cpp's idle loop
+// to drive a distinct "network up, console down" LED pattern (LED_WEB_DOWN),
+// since a dead httpd can't report its own outage over the endpoint it would
+// otherwise be reachable on.
+bool web_console_is_up();
+
 // Sends `json` (`len` bytes) to every currently-connected WS client.
 // Called from the render task (post-render, alongside gcStepSlack/
 // web_input_poll_fx_error) for fx_error and eval_result -- both need every

@@ -20,6 +20,10 @@ typedef enum {
   LED_BLINK_FAST,    // 4 Hz: running the render loop
   LED_BLINK_DOUBLE,  // double-pulse: WiFi connected
   LED_ERROR,         // 5 Hz error: no bundle / corrupt / OTA fail
+  LED_WEB_DOWN,      // triple-pulse: network up, web console down (httpd_start
+                     // failed after retries -- see web_input.cpp). Distinct
+                     // from LED_BLINK_DOUBLE (network up, console fine) so
+                     // this failure is visible without a serial connection.
 } led_pattern_t;
 
 // Initialise the status LED on the given GPIO. Safe to call once from app_main.

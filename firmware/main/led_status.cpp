@@ -29,6 +29,7 @@ static void blinker_task(void*) {
     [LED_BLINK_FAST]   = { 125, 125, 0 },
     [LED_BLINK_DOUBLE] = { 120, 120, 0 },   // handled specially below
     [LED_ERROR]        = { 100, 100, 0 },
+    [LED_WEB_DOWN]     = { 100, 100, 0 },   // handled specially below
   };
 
   while (true) {
@@ -41,6 +42,19 @@ static void blinker_task(void*) {
       set_led(0); vTaskDelay(pdMS_TO_TICKS(120));
       set_led(1); vTaskDelay(pdMS_TO_TICKS(120));
       set_led(0); vTaskDelay(pdMS_TO_TICKS(640));
+      continue;
+    }
+
+    if (p == LED_WEB_DOWN) {
+      // Triple-pulse: distinct rhythm (3 blinks) and cycle length from
+      // LED_BLINK_DOUBLE's 2-blink pattern, so "network up, console fine"
+      // and "network up, console down" are never ambiguous at a glance.
+      set_led(1); vTaskDelay(pdMS_TO_TICKS(100));
+      set_led(0); vTaskDelay(pdMS_TO_TICKS(100));
+      set_led(1); vTaskDelay(pdMS_TO_TICKS(100));
+      set_led(0); vTaskDelay(pdMS_TO_TICKS(100));
+      set_led(1); vTaskDelay(pdMS_TO_TICKS(100));
+      set_led(0); vTaskDelay(pdMS_TO_TICKS(700));
       continue;
     }
 

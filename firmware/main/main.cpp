@@ -57,6 +57,7 @@
 #include "control_queue.h"
 #include "effects.h"  // DimmerEffect -- used by setup_selftest_fixture() (CONFIG_GLOW_SELFTEST)
 #include "dmx_sink.h"
+#include "dmx_tx_task.h"
 #include "artnet_sink.h"
 #include "artnet_discovery_task.h"
 #include "artnet_nodes_web.h"
@@ -1164,6 +1165,16 @@ extern "C" void app_main(void) {
     led_status_set(LED_ERROR);
     return;
   }
+  // B2: the dedicated DMX transmit task (core 0) -- must start only AFTER
+  // begin() has installed the driver (its pumpTx()/sendBlackoutNow() calls
+  // assume that). Started here, not from start_network_services: DMX is
+  // local hardware, it does not depend on WiFi/network coming up (see
+  // start_network_services' own header comment on why it stays last).
+  if (!dmx_tx_task_start(g_dmx)) {
+    ESP_LOGE(TAG, "dmx_tx task start failed; halting.");
+    led_status_set(LED_ERROR);
+    return;
+  }
   ota_manager_note_dmx_ready();  // F5: one of the three self-validation criteria
 #ifdef CONFIG_GLOW_SELFTEST
   printf("GLOW-TEST: dmx begin=ok\n");
@@ -1405,7 +1416,20 @@ extern "C" void app_main(void) {
   ESP_LOGI(TAG, "Reflash the 'show' partition and reboot to change the patch.");
 
   while (true) {
-    led_status_set(wifi_is_connected() ? LED_BLINK_DOUBLE : LED_BLINK_FAST);
+    bool netUp = wifi_is_connected();
+    // A3: a distinct pattern for "network is fine, but the web console
+    // never came up" -- httpd_start() failing after its retries
+    // (web_input.cpp) otherwise has NO visible indication besides a serial
+    // log line, and the device is still pingable/OSC/DJ-Link/Art-Net-
+    // capable, so LED_BLINK_DOUBLE alone would read as "everything's
+    // fine." Only checked while the network is actually up: with no
+    // network, web_server_task never even runs (see start_network_services),
+    // so web_console_is_up() would read false for an unrelated reason and
+    // LED_BLINK_FAST (below) is already the correct signal for that case.
+    led_pattern_t p = (netUp && !web_console_is_up()) ? LED_WEB_DOWN
+                      : netUp                        ? LED_BLINK_DOUBLE
+                                                       : LED_BLINK_FAST;
+    led_status_set(p);
     vTaskDelay(pdMS_TO_TICKS(2000));
   }
 }

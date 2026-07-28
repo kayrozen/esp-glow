@@ -3,6 +3,7 @@
 #include "artnet_nodes_web.h"
 #include "artnet_discovery_task.h"
 #include "artnet_sink.h"
+#include "web_input.h"  // A3: web_console_is_up() -- see the "webConsoleUp" field below
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -100,7 +101,16 @@ esp_err_t artnet_nodes_get_handler(httpd_req_t* req) {
   written = appendUInt(buf, sizeof(buf), written, tx.dropOther);
   written = appendRaw(buf, sizeof(buf), written, ",\"lastErrno\":");
   written = appendUInt(buf, sizeof(buf), written, static_cast<unsigned>(tx.lastErrno));
-  written = appendRaw(buf, sizeof(buf), written, "}}");
+  written = appendRaw(buf, sizeof(buf), written, "},\"webConsoleUp\":");
+  // A3: trivially true whenever this response is actually reachable --
+  // httpd has to be up to serve this GET at all. Included anyway (not
+  // hardcoded true) so the field stays honest if this handler is ever
+  // called before web_server_task finishes bringing the server up, and so
+  // this JSON's shape matches what a future GET /health would report --
+  // see web_console_is_up's header comment on why the LED is the real
+  // out-of-band signal when httpd itself is the thing that's down.
+  written = appendRaw(buf, sizeof(buf), written, web_console_is_up() ? "true" : "false");
+  written = appendRaw(buf, sizeof(buf), written, "}");
 
   if (written >= sizeof(buf)) {
     ESP_LOGW(TAG, "response truncated (%u nodes)", static_cast<unsigned>(n));
