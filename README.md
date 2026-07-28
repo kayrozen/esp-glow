@@ -131,7 +131,7 @@ config boots on compiled-in defaults and says so.
 
 **Build** (ESP-IDF v5.1+): Lua 5.4.6 (`luaconf.h` **must** set `LUA_32BITS 1` — edit the file,
 not `-D`) + Fennel 1.6.1 (generated single file via `scripts/vendor_fennel.sh`). See
-`BENCH_RUNBOOK.md` for the full bring-up ladder.
+`docs/bring-up.md` for the full bring-up ladder.
 
 ---
 
@@ -172,7 +172,7 @@ feedback and `INIT SYSEX` · CFG1 flash-time config · multi-node Art-Net + ArtS
 browser provisioner, fixture importers, and USB flasher · the QEMU + HIL harnesses.
 
 **Not done: it has never run on real hardware.** That is the next and only real step. The
-bring-up ladder (`BENCH_RUNBOOK.md`): boot → **DMX out** (the milestone) → WiFi/Art-Net → console
+bring-up ladder (`docs/bring-up.md`): boot → **DMX out** (the milestone) → WiFi/Art-Net → console
 → live-coding → HIL → **the soak** — the one unvalidated risk in the whole stack: whether the Lua
 GC, paced in the frame slack, ever drops a DMX frame under load. No host or QEMU test can answer
 that.
