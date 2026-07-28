@@ -206,7 +206,12 @@ bool render_task_start(const RenderTaskConfig* cfg) {
   uint32_t stack = cfg->stackBytes ? cfg->stackBytes : glow::RENDER_TASK_STACK;
   UBaseType_t prio = cfg->priority ? cfg->priority : glow::RENDER_TASK_PRIORITY;
 
-  BaseType_t ok = xTaskCreatePinnedToCore(render_loop, "render", stack / sizeof(StackType_t),
+  // xTaskCreatePinnedToCore's stack-depth parameter is in BYTES on
+  // ESP-IDF, not words (unlike vanilla FreeRTOS) -- `stack` already comes
+  // from cfg->stackBytes (glow::RENDER_TASK_STACK), so dividing by
+  // sizeof(StackType_t) here quietly created the render task with 1/4 the
+  // requested stack (4 on this target). Pass it straight through.
+  BaseType_t ok = xTaskCreatePinnedToCore(render_loop, "render", stack,
                                           nullptr, prio, &s_task, core);
   if (ok != pdPASS) {
     ESP_LOGE(TAG, "xTaskCreatePinnedToCore failed");

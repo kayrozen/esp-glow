@@ -382,6 +382,47 @@ provision <show.show> <output.shw1>
 
 Reads `<show.show>`, resolves `.fdef` files from the filesystem, and writes the compiled bundle to `<output.shw1>`.
 
+## Reconfiguring `devcfg` Without Network Access
+
+The normal way to change CFG1 (`device_config.h` -- WiFi SSID/password, `artnetFallbackIp`,
+`artnetSyncBroadcast`, DMX GPIOs, USB-MIDI/skip-WiFi flags) is the device console's `POST /devcfg`
+(see FORMAT.md's "Reconfiguring Without Reflashing"). That requires the device to already be
+reachable on the network -- which is exactly what is NOT true for a board stuck in the
+network-wide ENOMEM/ARP-death bug (unrouted Art-Net universes broadcasting unconditionally
+starves the WiFi driver's TX buffer pool until even ARP stops working -- see FORMAT.md) or a
+board that never joined WiFi in the first place (wrong SSID/password, no AP in range).
+
+`scripts/flash_devcfg.py` is the escape hatch: it builds a CFG1 blob on the host (the same
+encoder `tests/shared/devcfg.py` uses for the QEMU/HIL suite -- see device_config.h for the
+byte-exact spec all of C++/JS/Python encoders implement) and writes it straight to the board's
+`devcfg` partition over USB with `esptool.py`, no WiFi and no running firmware required.
+
+```bash
+# Requires esptool.py on PATH (pip install esptool if you don't have an ESP-IDF
+# environment set up).
+
+# See exactly what would be written and the esptool.py command, without touching the board:
+python3 scripts/flash_devcfg.py --dry-run --wifi-ssid MyNetwork --wifi-pass hunter2 \
+    --artnet-fallback-ip 192.168.1.50
+
+# Actually write it, then read the partition back and confirm it matches byte-for-byte:
+python3 scripts/flash_devcfg.py --port /dev/ttyACM0 --verify \
+    --wifi-ssid MyNetwork --wifi-pass hunter2 --artnet-fallback-ip 192.168.1.50
+
+# Read the board's current devcfg blob back and decode it (no write):
+python3 scripts/flash_devcfg.py --port /dev/ttyACM0 --read-only
+```
+
+`--artnet-fallback-ip` takes a dotted IPv4, `broadcast` (255.255.255.255, an explicit opt-in),
+or blank/`0` for "no destination" -- the safe default that stops an unrouted universe from
+being sent anywhere, rather than broadcast (see FORMAT.md's `artnetFallbackIp` field writeup for
+why blank no longer means broadcast). `--artnet-sync-broadcast` sets the CFG1 flag that restores
+the old spec-literal unconditional-broadcast ArtSync behavior, for a node that requires it (see
+FORMAT.md's ArtSync targeting section) -- leave it off unless you actually need that.
+
+Power-cycle or reset the board after writing for the new config to take effect (same as after a
+`POST /devcfg`-triggered reboot).
+
 ## Testing
 
 Run tests with:

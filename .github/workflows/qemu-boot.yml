@@ -34,6 +34,32 @@ jobs:
           fi
           echo "OK: no bare xTaskCreate( in tracked sources."
 
+      # Unit guard: xTaskCreate()/xTaskCreatePinnedToCore()'s stack-depth
+      # argument is in BYTES on ESP-IDF, not words like vanilla FreeRTOS.
+      # `N / sizeof(StackType_t)` is the vanilla-FreeRTOS idiom for
+      # converting a byte figure into a word count for THAT API's
+      # word-counted argument -- applied here, it silently divides the
+      # requested stack by sizeof(StackType_t) (4 on this target), e.g. a
+      # task meant to get 4096 bytes instead got 1024. This actually
+      # shipped on several tasks (artnet_disc, osc, djlink_beat/status,
+      # midi, usb_midi, usb_daemon, net_start, render) before being caught
+      # and fixed -- see FORMAT.md/git history for the PR that fixed it.
+      # Scoped to lines that also mention xTaskCreate so a comment
+      # explaining this exact history (like this one, and the ones left at
+      # each fixed call site) doesn't trip the guard on itself.
+      - name: Guard - no sizeof(StackType_t) in a task-creation argument (bytes, not words)
+        shell: bash
+        run: |
+          hits="$(git ls-files '*.cpp' '*.c' '*.h' '*.hpp' \
+                    | grep -vE '^third_party/|(^|/)tests/' \
+                    | xargs grep -nE 'xTaskCreate[A-Za-z]*\(.*sizeof\(StackType_t\)' || true)"
+          if [ -n "$hits" ]; then
+            echo "$hits"
+            echo "::error::sizeof(StackType_t) found in a task-creation argument -- xTaskCreate()/xTaskCreatePinnedToCore()'s stack-depth parameter is in BYTES on ESP-IDF, not words. Pass the byte count directly; do not divide by sizeof(StackType_t)."
+            exit 1
+          fi
+          echo "OK: no sizeof(StackType_t) in a task-creation argument."
+
       - name: Cache ESP Component Manager packages
         uses: actions/cache@v4
         with:

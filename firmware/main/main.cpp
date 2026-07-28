@@ -995,7 +995,16 @@ static void start_network_services(void) {
     // comment); a node vanishing reverts its universes to
     // fallback/broadcast, never darkness.
     artnet_discovery_task_init(g_artnet, g_artnetShowDest, g_artnetUniverseCount);
-    xTaskCreatePinnedToCore(artnet_discovery_task, "artnet_disc", 4096 / sizeof(StackType_t),
+    // xTaskCreatePinnedToCore's stack-depth parameter is in BYTES on
+    // ESP-IDF, not words (unlike vanilla FreeRTOS) -- every bare "4096"
+    // literal below this comment (artnet_disc, osc, djlink_beat,
+    // djlink_status, selftest_query, midi, usb_midi) used to read
+    // "4096 / sizeof(StackType_t)", a vanilla-FreeRTOS idiom that quietly
+    // requested a 1024-byte stack (on this target, 4-byte StackType_t)
+    // for each of these tasks instead of the intended 4096. See the CI
+    // guard in .github/workflows/qemu-boot.yml, which now fails the build
+    // if this pattern reappears anywhere task-creation arguments are built.
+    xTaskCreatePinnedToCore(artnet_discovery_task, "artnet_disc", 4096,
                             nullptr, 5, nullptr, 0);
   }
 
@@ -1023,7 +1032,7 @@ static void start_network_services(void) {
   web_server_task(nullptr);  // starts httpd; not a FreeRTOS task itself (see web_input.h)
 
   osc_input_init(*g_controlQueue, g_oscMap, static_cast<uint16_t>(CONFIG_GLOW_OSC_UDP_PORT));
-  xTaskCreatePinnedToCore(osc_server_task, "osc", 4096 / sizeof(StackType_t),
+  xTaskCreatePinnedToCore(osc_server_task, "osc", 4096,
                           nullptr, 5, nullptr, 0);
 
   // Musical time: passive Pro DJ Link listener (Afterglow's signature
@@ -1031,9 +1040,9 @@ static void start_network_services(void) {
   // beat packets (50001, the actual sync source) and CDJ status's
   // tempo-master flag (50002, gates which player's beats get accepted).
   djlink_input_init(*g_beatQueue);
-  xTaskCreatePinnedToCore(djlink_beat_task, "djlink_beat", 4096 / sizeof(StackType_t),
+  xTaskCreatePinnedToCore(djlink_beat_task, "djlink_beat", 4096,
                           nullptr, 5, nullptr, 0);
-  xTaskCreatePinnedToCore(djlink_status_task, "djlink_status", 4096 / sizeof(StackType_t),
+  xTaskCreatePinnedToCore(djlink_status_task, "djlink_status", 4096,
                           nullptr, 5, nullptr, 0);
 }
 
@@ -1294,7 +1303,7 @@ extern "C" void app_main(void) {
   // a serial query is never more urgent than real-time rendering or
   // network input, and this task spends nearly all its time blocked on
   // fgetc(stdin) waiting for a byte.
-  xTaskCreatePinnedToCore(selftest_query_task, "selftest_query", 4096 / sizeof(StackType_t),
+  xTaskCreatePinnedToCore(selftest_query_task, "selftest_query", 4096,
                           nullptr, 5, nullptr, 0);
 #endif
 
@@ -1356,7 +1365,7 @@ extern "C" void app_main(void) {
   // init table.
   midi_input_init(*g_controlQueue, g_beatQueue, CONFIG_GLOW_MIDI_UART_NUM, CONFIG_GLOW_MIDI_RX_GPIO,
                   CONFIG_GLOW_MIDI_TX_GPIO, g_hasController ? &g_controllerProfile : nullptr);
-  xTaskCreatePinnedToCore(midi_uart_task, "midi", 4096 / sizeof(StackType_t),
+  xTaskCreatePinnedToCore(midi_uart_task, "midi", 4096,
                           nullptr, 5, nullptr, 0);
 
 #ifdef CONFIG_GLOW_USB_MIDI_HOST
@@ -1373,7 +1382,7 @@ extern "C" void app_main(void) {
     // P1.1: same g_controllerProfile as the DIN wiring above -- INIT SYSEX
     // fires on hot-plug here (usb_midi_input.cpp), not just at boot.
     usb_midi_input_init(*g_controlQueue, g_hasController ? &g_controllerProfile : nullptr);
-    xTaskCreatePinnedToCore(usb_midi_host_task, "usb_midi", 4096 / sizeof(StackType_t),
+    xTaskCreatePinnedToCore(usb_midi_host_task, "usb_midi", 4096,
                             nullptr, 5, nullptr, 0);
   } else {
     ESP_LOGI(TAG, "USB-MIDI host compiled in but disabled (cfg.usbMidiHost=false) -- "
