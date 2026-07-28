@@ -1068,11 +1068,18 @@ extern "C" void app_main(void) {
   // structured GLOW-TEST: line the QEMU/HIL harnesses assert on. A corrupt
   // or missing devcfg falling back silently would be a debugging nightmare
   // the first time someone's WiFi doesn't come up -- this is that report.
+  // artnet_fallback: 0 means an unrouted universe is now DROPPED, not
+  // broadcast (see artnet_router.h) -- only an explicit 0xFFFFFFFF still
+  // broadcasts. Getting this log string wrong here is exactly the kind of
+  // thing that hides the fix from a serial log.
+  const char* fallbackDesc = cfg.artnetFallbackIp == 0 ? "dropped"
+                             : cfg.artnetFallbackIp == 0xFFFFFFFFu ? "broadcast"
+                                                                    : "unicast";
   ESP_LOGI(TAG, "cfg: source=%s dmx_tx=%u dmx_rx=%u dmx_rts=%u led=%u usb_midi=%d skip_wifi=%d "
-                "artnet_fallback=%s:%u ssid=\"%s\"",
+                "artnet_fallback=%s:%u artnet_sync_broadcast=%d ssid=\"%s\"",
            cfgSource, (unsigned)cfg.dmxTxGpio, (unsigned)cfg.dmxRxGpio, (unsigned)cfg.dmxRtsGpio,
            (unsigned)cfg.ledGpio, (int)cfg.usbMidiHost, (int)cfg.skipWifi,
-           cfg.artnetFallbackIp == 0 ? "broadcast" : "unicast", (unsigned)cfg.artnetPort, cfg.wifiSsid);
+           fallbackDesc, (unsigned)cfg.artnetPort, (int)cfg.artnetSyncBroadcast, cfg.wifiSsid);
 #ifdef CONFIG_GLOW_SELFTEST
   printf("GLOW-TEST: cfg source=%s dmx_tx=%u usb_midi=%d skip_wifi=%d\n",
          cfgSource, (unsigned)cfg.dmxTxGpio, (int)cfg.usbMidiHost, (int)cfg.skipWifi);
@@ -1155,7 +1162,7 @@ extern "C" void app_main(void) {
   // this fallback, which wins over broadcast. ArtNetSink resolves that
   // precedence itself (via ArtNetRouter) every send -- ip=0 on a
   // per-universe route means "use this fallback."
-  g_artnet = new ArtNetSink(cfg.artnetPort, cfg.artnetFallbackIp);
+  g_artnet = new ArtNetSink(cfg.artnetPort, cfg.artnetFallbackIp, cfg.artnetSyncBroadcast);
 
   // --- F5: always keep at least one DMX universe configured and
   // streaming, independent of whether a show bundle loads -- "safe

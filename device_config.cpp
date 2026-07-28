@@ -48,7 +48,7 @@ bool parseDeviceConfig(const uint8_t* data, size_t len, DeviceConfig& out) {
   }
 
   uint8_t version = data[4];
-  if (version != 1) return false;
+  if (version < DEVCFG_VERSION_MIN || version > DEVCFG_VERSION_CURRENT) return false;
 
   uint8_t flags = data[5];
   // reserved u16 at [6..7] -- parsed over, not validated (forward-
@@ -62,6 +62,12 @@ bool parseDeviceConfig(const uint8_t* data, size_t len, DeviceConfig& out) {
   DeviceConfig parsed;
   parsed.usbMidiHost = (flags & DEVCFG_FLAG_USB_MIDI_HOST) != 0;
   parsed.skipWifi = (flags & DEVCFG_FLAG_SKIP_WIFI) != 0;
+  // artnetSyncBroadcast is a version-2 addition; a v1 blob never set this
+  // bit (it was reserved-but-unvalidated), but force it false explicitly
+  // rather than trust that -- an old blob must never surface a new
+  // behavior it was never written to request.
+  parsed.artnetSyncBroadcast =
+      (version >= 2) && (flags & DEVCFG_FLAG_ARTNET_SYNC_BROADCAST) != 0;
 
   size_t off = 8;
   readPaddedString(data + off, DEVCFG_SSID_MAX, parsed.wifiSsid);

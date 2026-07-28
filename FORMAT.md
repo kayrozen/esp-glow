@@ -587,8 +587,8 @@ The format is little-endian throughout, like every other format in this document
 | Offset | Size | Name     | Type    | Description |
 |--------|------|----------|---------|--------------|
 | 0      | 4    | magic    | uint8[] | ASCII "CFG1" |
-| 4      | 1    | version  | uint8   | Format version: 1 |
-| 5      | 1    | flags    | uint8   | bit0: usbMidiHost, bit1: skipWifi. Bits 2-7 reserved, parsed over but not validated (forward-compatible) |
+| 4      | 1    | version  | uint8   | Format version: encoder always writes `DEVCFG_VERSION_CURRENT` (2); parser accepts any version in `[DEVCFG_VERSION_MIN, DEVCFG_VERSION_CURRENT]` (currently `[1, 2]`). See "Version History" below. |
+| 5      | 1    | flags    | uint8   | bit0: usbMidiHost, bit1: skipWifi, bit2: artnetSyncBroadcast (version >= 2 only; a v1 blob always reports this as `false`, whatever the bit's raw value happens to be). Bits 3-7 reserved, parsed over but not validated (forward-compatible) |
 | 6      | 2    | reserved | uint16  | Must be 0 on encode; parsed over, not validated, on decode |
 
 ### Network (102 bytes, offset 8)
@@ -597,7 +597,7 @@ The format is little-endian throughout, like every other format in this document
 |--------|------|------------------|---------|--------------|
 | 8      | 32   | wifiSsid         | uint8[] | UTF-8, NUL-padded (not necessarily NUL-terminated if it fills all 32 bytes) |
 | 40     | 64   | wifiPass         | uint8[] | UTF-8, NUL-padded |
-| 104    | 4    | artnetFallbackIp | uint32  | Packed host-byte-order IPv4 (same convention as the old `GLOW_ARTNET_BRIDGE_IP` Kconfig value, e.g. `192.168.1.50` => `(192<<24)\|(168<<16)\|(1<<8)\|50`). **0 = broadcast.** See "The `artnetFallbackIp` field" below for what this value means and does *not* mean. |
+| 104    | 4    | artnetFallbackIp | uint32  | Packed host-byte-order IPv4 (same convention as the old `GLOW_ARTNET_BRIDGE_IP` Kconfig value, e.g. `192.168.1.50` => `(192<<24)\|(168<<16)\|(1<<8)\|50`). **0 = no destination (the universe is dropped, not broadcast).** An explicit `0xFFFFFFFF` still broadcasts -- that is a deliberate operator choice, never an implicit default. See "The `artnetFallbackIp` field" below for what this value means and does *not* mean. |
 | 108    | 2    | artnetPort       | uint16  | Art-Net UDP port |
 
 ### Pins (4 bytes, offset 110)
@@ -616,7 +616,14 @@ The format is little-endian throughout, like every other format in this document
 | 114    | 32   | reserved2 | uint8[] | Must be 0. Room for the next few options -- a future field can be added here with **no version bump needed**, since existing parsers already skip over it as padding. |
 | 146    | 4    | crc32     | uint32  | CRC-32 (IEEE 802.3 / zlib / PNG: poly `0xEDB88320` reflected, init `0xFFFFFFFF`, final XOR `0xFFFFFFFF`) over every byte from offset 0 up to (not including) this field |
 
-**Total blob size: 150 bytes** (`DEVCFG_BLOB_SIZE`).
+**Total blob size: 150 bytes** (`DEVCFG_BLOB_SIZE`), unchanged since v1.
+
+## Version History
+
+| Version | Adds |
+|---------|------|
+| 1 | Original layout, as documented above minus `artnetSyncBroadcast`. |
+| 2 | `artnetSyncBroadcast` (flags bit2). Fits an already-reserved flags bit, so the blob layout is unchanged -- only the version bump makes the new bit meaningful. A v1 blob has that bit always 0 (reserved-but-unvalidated, and no v1 encoder ever set it); `parseDeviceConfig`/`decodeDeviceConfig` (the JS twin) both still accept version 1 and report `artnetSyncBroadcast == false` for it -- a `devcfg` partition written before this bump keeps booting exactly as before, never rejected. |
 
 ## The `artnetFallbackIp` Field
 
@@ -624,13 +631,13 @@ This field's name and scope were deliberate from the start, specifically so Wave
 
 The obvious name -- `artnetIp`, "the bridge IP" -- would have collided with Wave 3, which moves per-universe Art-Net routing into the `.show` itself (a `(IP, wire-universe)` table, so different universes can go to different Art-Net nodes; see "Art-Net Wire Universe & Destination Routing" below). If this field meant "the" Art-Net destination, that meaning would have had to be walked back or overloaded the moment Wave 3 landed.
 
-So it's defined as: **the destination used for Art-Net universes the loaded `.show` does not route explicitly.** `0` means broadcast (`255.255.255.255`). Precedence, stated once and for all:
+So it's defined as: **the destination used for Art-Net universes the loaded `.show` does not route explicitly.** `0` means **no destination -- the universe is dropped**, not broadcast (an unrouted universe with no fallback configured broadcasting unconditionally at frame rate is exactly the root cause of the network-wide ENOMEM/ARP-death bug this field's semantics were tightened to prevent; see `artnet_router.h`). An explicit `0xFFFFFFFF` is still honored as broadcast -- only the implicit default changed. Precedence, stated once and for all:
 
 ```
-explicit route in the .show   >   CFG1 artnetFallbackIp   >   broadcast
+explicit route in the .show   >   CFG1 artnetFallbackIp   >   dropped (or broadcast, if artnetFallbackIp is explicitly 0xFFFFFFFF)
 ```
 
-Now that Wave 3 has shipped, this is exactly the second tier of that precedence chain: a `.show` with no explicit Art-Net routes still behaves exactly as before (every Art-Net universe goes to `artnetFallbackIp`, or broadcasts if that's 0); a `.show` with explicit routes uses this field only for the universes it left unspecified.
+Now that Wave 3 has shipped, this is exactly the second tier of that precedence chain: a `.show` with no explicit Art-Net routes still behaves exactly as before (every Art-Net universe goes to `artnetFallbackIp`), except that "before" now means dropped rather than broadcast when that field is left at its default `0`; a `.show` with explicit routes uses this field only for the universes it left unspecified.
 
 ## Validation Rules
 
@@ -638,7 +645,7 @@ Now that Wave 3 has shipped, this is exactly the second tier of that precedence 
 
 1. Buffer must be at least `DEVCFG_BLOB_SIZE` (150) bytes.
 2. Magic must be `"CFG1"`. This alone rejects an erased/all-`0xFF` partition (the common case on a fresh, never-configured board) and a half-written one, long before any field -- a GPIO byte of `0xFF`/255, for instance -- would ever be read as a real value.
-3. Version must be 1 (the only version defined today).
+3. Version must be in `[DEVCFG_VERSION_MIN, DEVCFG_VERSION_CURRENT]` (currently `[1, 2]` -- see "Version History" above).
 4. The stored `crc32` must equal the CRC computed over bytes `[0, 146)`. This catches any single flipped bit anywhere in the blob, including a magic/version that happens to survive corruption elsewhere in the payload.
 
 If any rule is violated, the parser returns `false` and does not modify the output struct. **A bad CRC is not a partial config with some fields honored -- it's a total rejection, and the caller falls back to the compiled-in Kconfig defaults.** This is reported loudly, not silently: `main.cpp` logs both a human-readable line (serial) and, under `CONFIG_GLOW_SELFTEST`, a structured `GLOW-TEST: cfg source=devcfg|defaults ...` telemetry line the QEMU/HIL harnesses assert on. Neither line ever includes the WiFi password.
@@ -672,9 +679,9 @@ A real rig usually has several Art-Net nodes, and a node usually has several DMX
 
 Wave 3 fixes this in three parts, all in `ArtNetSink`/`ArtNetRouter` (`artnet_router.h`/`artnet_sink.h`) and the `.show` compiler (`provision.cpp`):
 
-1. **A destination is `(IP, wire universe)`, not just an IP.** Modeled as `ArtNetDest { uint32_t ip; uint16_t wireUniverse; }` (`show.h`) -- `ip == 0` is the "no explicit route" sentinel (falls back to `artnetFallbackIp`, or broadcast).
+1. **A destination is `(IP, wire universe)`, not just an IP.** Modeled as `ArtNetDest { uint32_t ip; uint16_t wireUniverse; }` (`show.h`) -- `ip == 0` is the "no explicit route" sentinel (falls back to `artnetFallbackIp`, or dropped if that's also `0` -- never an implicit broadcast; see "The `artnetFallbackIp` Field" above).
 2. **The `.show` carries an explicit per-universe routing table** (`UNIVERSE ... ARTNET <ip> <wireUniverse>`, below) -- this is rig topology, the same class of fact as a fixture's DMX address, not a device setting.
-3. **ArtSync (OpCode 0x5200)** is sent once per frame, after every Art-Net `send()`, so every node latches its outputs simultaneously instead of updating whenever its own packet happens to arrive -- without this, a pixel matrix spanning multiple universes shows visible tearing the instant it's split across more than one Art-Net destination.
+3. **ArtSync (OpCode 0x5200)** is sent once per frame, after every Art-Net `send()`, so every node latches its outputs simultaneously instead of updating whenever its own packet happens to arrive -- without this, a pixel matrix spanning multiple universes shows visible tearing the instant it's split across more than one Art-Net destination. **Targeting:** by default (`artnetSyncBroadcast == false`, CFG1), ArtSync is sent **unicast to each distinct destination IP a universe actually sent to this frame** (deduplicated -- two universes to the same node's two DMX outputs still get exactly one ArtSync), and not sent at all if nothing was routed. Art-Net 4 describes ArtSync as a broadcast packet; unicasting it is a deliberate, documented deviation, accepted by common node implementations, chosen because broadcasting it unconditionally every frame regardless of whether any node exists is exactly half of the measured root cause of the ENOMEM/ARP-death bug above. Setting `artnetSyncBroadcast = true` restores the spec-literal unconditional single broadcast, for a node that requires it.
 
 ## The Wire Universe: One `uint16_t`, Decomposed Net:SubNet:Universe
 

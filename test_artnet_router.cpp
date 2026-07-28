@@ -116,8 +116,100 @@ static void test_sequence_numbers_advance_independently_per_universe() {
   CHECK(sequenceOf(wrapTransport.calls[255]) == 1);
 }
 
-static void test_frameEnd_emits_exactly_one_artsync_after_data() {
-  printf("Test: frameEnd() emits exactly one ArtSync, after the data packets\n");
+static void test_frameEnd_emits_nothing_when_nothing_routed() {
+  printf("Test: frameEnd() sends no ArtSync at all when no universe resolves to a destination\n");
+  ArtNetRouter router(/*fallbackIp=*/0);  // no fallback -- every universe is unrouted
+  MockTransport transport;
+  router.frameEnd(transport);
+  CHECK(transport.calls.empty());
+}
+
+static void test_frameEnd_sends_one_unicast_artsync_per_distinct_ip() {
+  printf("Test: frameEnd() sends one unicast ArtSync per distinct routed IP, deduplicated\n");
+  ArtNetRouter router(/*fallbackIp=*/0);
+  router.setDest(0, ArtNetDest{0x0A000001, 0});
+  router.setDest(1, ArtNetDest{0x0A000001, 1});  // same node, second output -- dedup target
+  router.setDest(2, ArtNetDest{0x0A000002, 0});  // a different node
+
+  MockTransport transport;
+  auto data = makeUniverseData(0x33);
+  // frameEnd() targets only universes actually send() for THIS frame, not
+  // every setDest() call ever made -- mirrors the real per-frame call
+  // pattern (send() for every active universe, then frameEnd() once).
+  router.send(0, data.data(), (uint16_t)data.size(), transport);
+  router.send(1, data.data(), (uint16_t)data.size(), transport);
+  router.send(2, data.data(), (uint16_t)data.size(), transport);
+  transport.calls.clear();  // isolate frameEnd()'s own output from the sends above
+
+  router.frameEnd(transport);
+
+  CHECK(transport.calls.size() == 2);
+  for (const auto& p : transport.calls) {
+    CHECK(opcodeOf(p) == ARTNET_OP_SYNC);
+    CHECK(p.ip == 0x0A000001u || p.ip == 0x0A000002u);
+  }
+  CHECK(transport.calls[0].ip != transport.calls[1].ip);
+}
+
+static void test_frameEnd_ignores_universes_never_sent_this_frame() {
+  // Regression test for the bug this design point exists to prevent: a
+  // universe left at its default {ip=0, wireUniverse=index} slot (never
+  // setDest()'d, never send()'d -- e.g. a .show that only uses 2 of the
+  // 8 MAX_UNIVERSES slots) must not resolve through a non-zero fallbackIp_
+  // into a phantom ArtSync target. Only send()-touched universes count.
+  printf("Test: frameEnd() never targets a universe that had no send() this frame, "
+         "even with a non-zero fallback\n");
+  ArtNetRouter router(/*fallbackIp=*/0x0A000099);  // non-zero: every unused slot would
+                                                    // resolve through this if not for
+                                                    // the activeThisFrame_ tracking
+  router.setDest(0, ArtNetDest{0x0A000001, 0});
+
+  MockTransport transport;
+  auto data = makeUniverseData(0x11);
+  router.send(0, data.data(), (uint16_t)data.size(), transport);  // only universe 0 is active
+  transport.calls.clear();
+
+  router.frameEnd(transport);
+
+  CHECK(transport.calls.size() == 1);
+  CHECK(transport.calls[0].ip == 0x0A000001u);  // never 0x0A000099 (the fallback)
+}
+
+static void test_frameEnd_broadcast_mode_always_sends_one_broadcast() {
+  printf("Test: syncBroadcast=true -> exactly one broadcast ArtSync, regardless of routing\n");
+  ArtNetRouter router(/*fallbackIp=*/0, ARTNET_PORT, /*syncBroadcast=*/true);
+  router.setDest(0, ArtNetDest{0x0A000001, 0});
+  router.setDest(1, ArtNetDest{0x0A000002, 0});
+
+  MockTransport transport;
+  router.frameEnd(transport);
+
+  CHECK(transport.calls.size() == 1);
+  CHECK(transport.calls[0].ip == 0xFFFFFFFFu);
+  CHECK(opcodeOf(transport.calls[0]) == ARTNET_OP_SYNC);
+
+  // Even with nothing routed at all, broadcast mode still sends its one
+  // unconditional ArtSync -- this is the spec-literal behavior, kept
+  // available for a node that requires it.
+  ArtNetRouter emptyRouter(/*fallbackIp=*/0, ARTNET_PORT, /*syncBroadcast=*/true);
+  MockTransport emptyTransport;
+  emptyRouter.frameEnd(emptyTransport);
+  CHECK(emptyTransport.calls.size() == 1);
+  CHECK(emptyTransport.calls[0].ip == 0xFFFFFFFFu);
+}
+
+static void test_frameEnd_emits_targeted_artsync_after_data() {
+  // Was test_frameEnd_emits_exactly_one_artsync_after_data, asserting
+  // ArtSync always broadcasts unconditionally. That is exactly the other
+  // half of the root cause this test file guards against (see PR1's
+  // rewrite of test_dest_and_fallback_both_zero_broadcasts above): ~44
+  // unconditional broadcasts/s on top of the per-universe ones, with no
+  // node needing a broadcast when its unicast address is already known.
+  // Rewritten to assert the fixed default (syncBroadcast=false): one
+  // ArtSync per distinct routed IP, not one broadcast for all of them.
+  // See test_frameEnd_broadcast_mode_always_sends_one_broadcast above for
+  // the still-available opt-in spec-literal broadcast behavior.
+  printf("Test: frameEnd() emits one targeted ArtSync per distinct IP, after the data packets\n");
   ArtNetRouter router(/*fallbackIp=*/0xC0A80101);
   router.setDest(0, ArtNetDest{0xC0A80150, 0});
   router.setDest(1, ArtNetDest{0xC0A80151, 0});
@@ -128,20 +220,23 @@ static void test_frameEnd_emits_exactly_one_artsync_after_data() {
   router.send(1, data.data(), (uint16_t)data.size(), transport);
   router.frameEnd(transport);
 
-  CHECK(transport.calls.size() == 3);
+  CHECK(transport.calls.size() == 4);
   CHECK(opcodeOf(transport.calls[0]) == ARTNET_OP_DMX);
   CHECK(opcodeOf(transport.calls[1]) == ARTNET_OP_DMX);
   CHECK(opcodeOf(transport.calls[2]) == ARTNET_OP_SYNC);
+  CHECK(opcodeOf(transport.calls[3]) == ARTNET_OP_SYNC);
   CHECK(transport.calls[2].bytes.size() == ARTNET_SYNC_PACKET_SIZE);
-  // ArtSync always broadcasts -- it must reach every node regardless of
-  // each universe's own (possibly unicast) destination.
-  CHECK(transport.calls[2].ip == 0xFFFFFFFFu);
+  CHECK(transport.calls[3].bytes.size() == ARTNET_SYNC_PACKET_SIZE);
+  // Each node's own unicast address, not a shared broadcast -- and never
+  // 0xFFFFFFFF, since every universe here has an explicit unicast route.
+  CHECK(transport.calls[2].ip == 0xC0A80150u);
+  CHECK(transport.calls[3].ip == 0xC0A80151u);
 
   int syncCount = 0;
   for (const auto& p : transport.calls) {
     if (opcodeOf(p) == ARTNET_OP_SYNC) syncCount++;
   }
-  CHECK(syncCount == 1);
+  CHECK(syncCount == 2);
 }
 
 static void test_dest_ip_zero_falls_back_to_configured_fallback() {
@@ -300,7 +395,11 @@ static void test_build_art_sync_packet_bytes() {
 int main() {
   test_send_stamps_wire_universe_not_internal_index();
   test_sequence_numbers_advance_independently_per_universe();
-  test_frameEnd_emits_exactly_one_artsync_after_data();
+  test_frameEnd_emits_nothing_when_nothing_routed();
+  test_frameEnd_sends_one_unicast_artsync_per_distinct_ip();
+  test_frameEnd_ignores_universes_never_sent_this_frame();
+  test_frameEnd_broadcast_mode_always_sends_one_broadcast();
+  test_frameEnd_emits_targeted_artsync_after_data();
   test_dest_ip_zero_falls_back_to_configured_fallback();
   test_dest_and_fallback_both_zero_drops_no_broadcast();
   test_explicit_broadcast_fallback_still_broadcasts();

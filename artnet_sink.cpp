@@ -27,8 +27,8 @@
 
 static const char* TAG = "artnet_sink";
 
-ArtNetSink::ArtNetSink(uint16_t port, uint32_t fallbackIp)
-    : router_(fallbackIp, port) {}
+ArtNetSink::ArtNetSink(uint16_t port, uint32_t fallbackIp, bool syncBroadcast)
+    : router_(fallbackIp, port, syncBroadcast) {}
 
 ArtNetSink::~ArtNetSink() {
   if (sock_ >= 0) {

@@ -34,6 +34,7 @@ DeviceConfig makeConfig() {
   std::snprintf(cfg.wifiPass, sizeof(cfg.wifiPass), "hunter2pass");
   cfg.artnetFallbackIp = 0xC0A80105u;  // 192.168.1.5
   cfg.artnetPort = 6454;
+  cfg.artnetSyncBroadcast = false;
   cfg.dmxTxGpio = 17;
   cfg.dmxRxGpio = 18;
   cfg.dmxRtsGpio = 8;
@@ -50,7 +51,7 @@ void test_roundtrip_all_fields() {
   std::vector<uint8_t> blob = encodeDeviceConfig(cfg);
   CHECK(blob.size() == DEVCFG_BLOB_SIZE);
   CHECK(blob[0] == 'C' && blob[1] == 'F' && blob[2] == 'G' && blob[3] == '1');
-  CHECK(blob[4] == 1);  // version
+  CHECK(blob[4] == DEVCFG_VERSION_CURRENT);  // version
 
   DeviceConfig out;
   CHECK(parseDeviceConfig(blob.data(), blob.size(), out));
@@ -61,6 +62,7 @@ void test_roundtrip_all_fields() {
   CHECK(std::strcmp(out.wifiPass, "hunter2pass") == 0);
   CHECK(out.artnetFallbackIp == 0xC0A80105u);
   CHECK(out.artnetPort == 6454);
+  CHECK(out.artnetSyncBroadcast == false);
   CHECK(out.dmxTxGpio == 17);
   CHECK(out.dmxRxGpio == 18);
   CHECK(out.dmxRtsGpio == 8);
@@ -118,13 +120,77 @@ void test_bad_magic() {
   CHECK(!parseDeviceConfig(blob.data(), blob.size(), out));
 }
 
-void test_bad_version() {
-  TEST("Unsupported version is rejected");
+// Recomputes and rewrites the CRC field after a test has hand-edited a
+// byte outside the CRC itself -- used below to simulate a version
+// downgrade/upgrade without also tripping the (unrelated) CRC check.
+void rewriteCrc(std::vector<uint8_t>& blob) {
+  uint32_t crc = devcfgCrc32(blob.data(), DEVCFG_CRC_OFFSET);
+  blob[DEVCFG_CRC_OFFSET] = static_cast<uint8_t>(crc & 0xFF);
+  blob[DEVCFG_CRC_OFFSET + 1] = static_cast<uint8_t>((crc >> 8) & 0xFF);
+  blob[DEVCFG_CRC_OFFSET + 2] = static_cast<uint8_t>((crc >> 16) & 0xFF);
+  blob[DEVCFG_CRC_OFFSET + 3] = static_cast<uint8_t>((crc >> 24) & 0xFF);
+}
+
+void test_version_above_current_is_rejected() {
+  TEST("A version newer than DEVCFG_VERSION_CURRENT is rejected (was: any version != 1)");
 
   std::vector<uint8_t> blob = encodeDeviceConfig(makeConfig());
-  blob[4] = 2;
+  blob[4] = DEVCFG_VERSION_CURRENT + 1;
+  rewriteCrc(blob);
   DeviceConfig out;
   CHECK(!parseDeviceConfig(blob.data(), blob.size(), out));
+}
+
+void test_version_below_min_is_rejected() {
+  TEST("Version 0 (below DEVCFG_VERSION_MIN) is rejected");
+
+  std::vector<uint8_t> blob = encodeDeviceConfig(makeConfig());
+  blob[4] = 0;
+  rewriteCrc(blob);
+  DeviceConfig out;
+  CHECK(!parseDeviceConfig(blob.data(), blob.size(), out));
+}
+
+void test_v1_blob_parses_with_sync_broadcast_defaulted_false() {
+  TEST("A CFG1 v1 blob (predates artnetSyncBroadcast) parses fine, defaulting it to false");
+
+  // Simulates a devcfg partition written before this version bump: same
+  // layout, version byte 1, flags bit2 never set by any v1 encoder.
+  std::vector<uint8_t> blob = encodeDeviceConfig(makeConfig());
+  blob[4] = 1;
+  rewriteCrc(blob);
+
+  DeviceConfig out;
+  CHECK(parseDeviceConfig(blob.data(), blob.size(), out));
+  CHECK(out.artnetSyncBroadcast == false);
+  CHECK(std::strcmp(out.wifiSsid, "TestNet") == 0);  // rest of the config unaffected
+}
+
+void test_v1_blob_ignores_reserved_bit_even_if_set() {
+  TEST("A v1 blob with flags bit2 set (never legitimately possible, but defensive) still "
+       "reports artnetSyncBroadcast == false");
+
+  std::vector<uint8_t> blob = encodeDeviceConfig(makeConfig());
+  blob[4] = 1;
+  blob[5] |= DEVCFG_FLAG_ARTNET_SYNC_BROADCAST;
+  rewriteCrc(blob);
+
+  DeviceConfig out;
+  CHECK(parseDeviceConfig(blob.data(), blob.size(), out));
+  CHECK(out.artnetSyncBroadcast == false);
+}
+
+void test_artnet_sync_broadcast_round_trips() {
+  TEST("artnetSyncBroadcast = true round-trips through a v2 blob");
+
+  DeviceConfig cfg = makeConfig();
+  cfg.artnetSyncBroadcast = true;
+  std::vector<uint8_t> blob = encodeDeviceConfig(cfg);
+  CHECK(blob[4] == DEVCFG_VERSION_CURRENT);
+
+  DeviceConfig out;
+  CHECK(parseDeviceConfig(blob.data(), blob.size(), out));
+  CHECK(out.artnetSyncBroadcast == true);
 }
 
 void test_bad_crc() {
@@ -207,7 +273,11 @@ int main() {
   test_broadcast_fallback_ip_zero();
   test_max_length_strings_no_overrun();
   test_bad_magic();
-  test_bad_version();
+  test_version_above_current_is_rejected();
+  test_version_below_min_is_rejected();
+  test_v1_blob_parses_with_sync_broadcast_defaulted_false();
+  test_v1_blob_ignores_reserved_bit_even_if_set();
+  test_artnet_sync_broadcast_round_trips();
   test_bad_crc();
   test_truncated_buffer();
   test_null_data();

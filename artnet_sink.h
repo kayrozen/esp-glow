@@ -21,9 +21,13 @@ public:
   // port: Art-Net UDP port, typically 6454 (ARTNET_PORT).
   // fallbackIp: destination for any universe whose ArtNetDest.ip is 0 (no
   //   explicit .show route, nothing discovered yet) -- CFG1's
-  //   artnetFallbackIp. 0 here means broadcast (255.255.255.255), same
-  //   convention as that field.
-  ArtNetSink(uint16_t port, uint32_t fallbackIp);
+  //   artnetFallbackIp. 0 here means "no destination" (dropped, not
+  //   broadcast) unless explicitly set to 0xFFFFFFFF -- see ArtNetRouter.
+  // syncBroadcast: CFG1's artnetSyncBroadcast. false (default) sends
+  //   ArtSync unicast to each distinct routed node, none if none are
+  //   routed; true keeps the spec-literal unconditional broadcast. See
+  //   ArtNetRouter::frameEnd()'s doc.
+  ArtNetSink(uint16_t port, uint32_t fallbackIp, bool syncBroadcast = false);
 
   ~ArtNetSink() override;
 

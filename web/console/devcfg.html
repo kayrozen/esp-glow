@@ -128,10 +128,19 @@
 
       <fieldset>
         <legend>Art-Net</legend>
-        <label for="artnetFallbackIp">Fallback destination (blank = broadcast)</label>
-        <input type="text" id="artnetFallbackIp" placeholder="e.g. 192.168.1.50, or leave blank" />
+        <label for="artnetFallbackIp">Fallback destination (blank = dropped, not broadcast)</label>
+        <input type="text" id="artnetFallbackIp" placeholder="e.g. 192.168.1.50, 255.255.255.255, or leave blank" />
+        <p class="warn-text">Blank/0 means an Art-Net universe with no explicit .show route is dropped rather than
+          sent anywhere -- broadcasting it unconditionally at frame rate is what previously starved the WiFi driver
+          and knocked the device off the network. Enter 255.255.255.255 here only if you deliberately want broadcast.</p>
         <label for="artnetPort">Port</label>
         <input type="number" id="artnetPort" min="1" max="65535" />
+        <div class="checkbox-row">
+          <input type="checkbox" id="artnetSyncBroadcast" />
+          <label for="artnetSyncBroadcast">Broadcast ArtSync (spec-literal; default sends it unicast per node)</label>
+        </div>
+        <p class="warn-text">Leave off unless a node requires ArtSync as a broadcast. Off (default) sends ArtSync
+          unicast to each node actually in use, or not at all if none are.</p>
       </fieldset>
 
       <fieldset>

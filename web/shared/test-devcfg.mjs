@@ -21,8 +21,10 @@ import { execFileSync } from "node:child_process";
 
 import {
   DEVCFG_BLOB_SIZE,
+  DEVCFG_CRC_OFFSET,
   encodeDeviceConfig,
   decodeDeviceConfig,
+  devcfgCrc32,
   parseIPv4,
   formatIPv4,
 } from "./devcfg.js";
@@ -58,6 +60,7 @@ const GOLDEN_CONFIG = {
   wifiPass: "hunter2pass",
   artnetFallbackIp: parseIPv4("192.168.1.5"),
   artnetPort: 6454,
+  artnetSyncBroadcast: false,
   dmxTxGpio: 17,
   dmxRxGpio: 18,
   dmxRtsGpio: 8,
@@ -129,8 +132,10 @@ section("JS decodeDeviceConfig round-trips its own encoder's output");
     dmxRxGpio: 5,
     dmxRtsGpio: 6,
     ledGpio: 48,
+    artnetSyncBroadcast: true,
   };
   const encoded = encodeDeviceConfig(cfg);
+  check("encoded version is DEVCFG_VERSION_CURRENT (2)", encoded[4] === 2, encoded[4]);
   const decoded = decodeDeviceConfig(encoded);
   check("decode ok", decoded.ok === true, decoded);
   if (decoded.ok) {
@@ -141,6 +146,33 @@ section("JS decodeDeviceConfig round-trips its own encoder's output");
 
   const devcfgCheckResult = runDevcfgCheck(encoded);
   check("C++ parser also accepts JS-encoded arbitrary config", devcfgCheckResult.ok === true, devcfgCheckResult);
+  check("C++ parser agrees artnetSyncBroadcast == true", devcfgCheckResult.artnetSyncBroadcast === true, devcfgCheckResult);
+}
+
+section("A version-1 blob (predates artnetSyncBroadcast) still decodes, defaulting the new field to false");
+{
+  // Hand-build a v1 blob: same encoder, but force the version byte back to
+  // 1 and recompute the CRC over the changed bytes -- simulates a devcfg
+  // partition written before this version bump, which must keep booting
+  // (never rejected) with the new field simply defaulted.
+  const encoded = encodeDeviceConfig({ ...GOLDEN_CONFIG, artnetSyncBroadcast: false });
+  const v1 = new Uint8Array(encoded);
+  v1[4] = 1; // downgrade version byte
+  const crc = devcfgCrc32(v1.subarray(0, DEVCFG_CRC_OFFSET));
+  const view = new DataView(v1.buffer);
+  view.setUint32(DEVCFG_CRC_OFFSET, crc, true);
+
+  const decoded = decodeDeviceConfig(v1);
+  check("JS: v1 blob decodes ok", decoded.ok === true, decoded);
+  if (decoded.ok) {
+    check("JS: v1 blob defaults artnetSyncBroadcast to false", decoded.cfg.artnetSyncBroadcast === false);
+  }
+
+  const devcfgCheckResult = runDevcfgCheck(v1);
+  check("C++: v1 blob accepted", devcfgCheckResult.ok === true, devcfgCheckResult);
+  if (devcfgCheckResult.ok) {
+    check("C++: v1 blob defaults artnetSyncBroadcast to false", devcfgCheckResult.artnetSyncBroadcast === false);
+  }
 }
 
 section("Corruption is rejected by both the JS decoder and the C++ parser");
