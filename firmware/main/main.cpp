@@ -38,6 +38,7 @@
 #include "sdkconfig.h"
 #include "nvs_flash.h"
 #include "esp_heap_caps.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 
 #include "led_status.h"
@@ -58,6 +59,7 @@
 #include "dmx_sink.h"
 #include "artnet_sink.h"
 #include "artnet_discovery_task.h"
+#include "artnet_nodes_web.h"
 #include "pixel_matrix.h"
 #include "pixel_patterns.h"
 #include "show_bundle.h"
@@ -711,6 +713,18 @@ static void render_tick_hooks(RenderTickPhase phase, float t, uint32_t slack_us)
                  (unsigned long)(g_artSyncUsSum / 44), (unsigned long)g_artSyncUsMax);
         g_artSyncUsSum = 0;
         g_artSyncUsMax = 0;
+
+        // PR3 (observability): a monotonically decreasing free-heap trend
+        // here across many of these once/sec lines signals an actual leak;
+        // a low-but-stable value instead signals the buffer-pool
+        // saturation this whole fix targets (ENOMEM with heap otherwise
+        // healthy) -- distinguishing the two needed this line. Internal
+        // (MALLOC_CAP_INTERNAL) specifically because that's the pool
+        // CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM/lwIP pbufs come from, not
+        // the PSRAM heap frame buffers/SHW1 use.
+        ESP_LOGI(TAG, "heap: free=%u internal_free=%u",
+                 (unsigned)esp_get_free_heap_size(),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 #ifdef CONFIG_GLOW_SELFTEST
         uint32_t frames = 0, behind = 0, dropped = 0;
         render_task_get_and_reset_stats(&frames, &behind, &dropped);
@@ -1163,6 +1177,11 @@ extern "C" void app_main(void) {
   // precedence itself (via ArtNetRouter) every send -- ip=0 on a
   // per-universe route means "use this fallback."
   g_artnet = new ArtNetSink(cfg.artnetPort, cfg.artnetFallbackIp, cfg.artnetSyncBroadcast);
+  // PR3 (observability): lets GET /artnet_nodes report ArtNetSink's TX
+  // counters (artnet_nodes_web.cpp) -- safe to call this early, well
+  // before the httpd server (and web_input.cpp's registration call for
+  // that same endpoint) ever starts.
+  artnet_nodes_web_set_sink(g_artnet);
 
   // --- F5: always keep at least one DMX universe configured and
   // streaming, independent of whether a show bundle loads -- "safe

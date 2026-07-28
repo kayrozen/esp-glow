@@ -822,7 +822,7 @@ Per output port `i` (`0..NumPorts-1`): `wireUniverse[i] = (NetSwitch & 0x7F) << 
 
 ### Web Console
 
-`GET /artnet_nodes` (see `artnet_nodes_web.h`) returns the currently-discovered nodes as JSON (`{"nodes":[{"ip":..., "shortName":..., "longName":..., "universes":[...]}]}`), read from a thread-safe snapshot published once per poll cycle. The device console's reconfigure page lists them -- this is the screen that turns "why is nothing lighting up" into "ah, the node isn't on the network."
+`GET /artnet_nodes` (see `artnet_nodes_web.h`) returns the currently-discovered nodes as JSON (`{"nodes":[{"ip":..., "shortName":..., "longName":..., "universes":[...]}], "tx":{"ok":..., "wouldblock":..., "nomem":..., "other":..., "lastErrno":...}}`), read from a thread-safe snapshot published once per poll cycle. The device console's reconfigure page lists them -- this is the screen that turns "why is nothing lighting up" into "ah, the node isn't on the network." `tx` is `ArtNetSink`'s cumulative send-outcome counters (`ArtNetTxStats`, `artnet_sink.h`) -- `nomem` climbing is exactly the WiFi-driver-TX-buffer-starvation signature the ENOMEM/ARP-death bug this format section documents produces; `ok`/`wouldblock`/`other` are zero if no sink has been registered yet (`artnet_nodes_web_set_sink`), never omitted.
 
 ## Testing Reality
 

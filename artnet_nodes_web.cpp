@@ -2,6 +2,7 @@
 
 #include "artnet_nodes_web.h"
 #include "artnet_discovery_task.h"
+#include "artnet_sink.h"
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -12,6 +13,8 @@
 static const char* TAG = "artnet_nodes_web";
 
 namespace {
+
+ArtNetSink* g_sink = nullptr;
 
 // Appends a JSON string literal (quoted, minimally escaped -- node names
 // are short ASCII in practice, but an untrusted reply's name field is not
@@ -82,7 +85,22 @@ esp_err_t artnet_nodes_get_handler(httpd_req_t* req) {
     }
     written = appendRaw(buf, sizeof(buf), written, "]}");
   }
-  written = appendRaw(buf, sizeof(buf), written, "]}");
+  written = appendRaw(buf, sizeof(buf), written, "],\"tx\":");
+
+  // All-zero (default-constructed) if no sink was ever registered -- the
+  // JSON stays valid either way, never omits the field.
+  ArtNetTxStats tx = g_sink ? g_sink->txStats() : ArtNetTxStats{};
+  written = appendRaw(buf, sizeof(buf), written, "{\"ok\":");
+  written = appendUInt(buf, sizeof(buf), written, tx.ok);
+  written = appendRaw(buf, sizeof(buf), written, ",\"wouldblock\":");
+  written = appendUInt(buf, sizeof(buf), written, tx.dropWouldBlock);
+  written = appendRaw(buf, sizeof(buf), written, ",\"nomem\":");
+  written = appendUInt(buf, sizeof(buf), written, tx.dropNoMem);
+  written = appendRaw(buf, sizeof(buf), written, ",\"other\":");
+  written = appendUInt(buf, sizeof(buf), written, tx.dropOther);
+  written = appendRaw(buf, sizeof(buf), written, ",\"lastErrno\":");
+  written = appendUInt(buf, sizeof(buf), written, static_cast<unsigned>(tx.lastErrno));
+  written = appendRaw(buf, sizeof(buf), written, "}}");
 
   if (written >= sizeof(buf)) {
     ESP_LOGW(TAG, "response truncated (%u nodes)", static_cast<unsigned>(n));
@@ -95,6 +113,10 @@ esp_err_t artnet_nodes_get_handler(httpd_req_t* req) {
 }
 
 }  // namespace
+
+void artnet_nodes_web_set_sink(ArtNetSink* sink) {
+  g_sink = sink;
+}
 
 void artnet_nodes_web_register_handlers(void* server) {
   httpd_handle_t handle = static_cast<httpd_handle_t>(server);

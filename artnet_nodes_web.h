@@ -12,6 +12,18 @@
 extern "C" {
 #endif
 
+class ArtNetSink;
+
+// PR3 (observability): the /artnet_nodes response includes a "tx" object
+// with ArtNetSink's cumulative send-outcome counters (see artnet_sink.h's
+// ArtNetTxStats) so "is the network actually starving this device" is a
+// GET away instead of only visible in the serial log. Borrowed pointer,
+// not copied -- must outlive the server. Safe to call before or after
+// artnet_nodes_web_register_handlers, and safe to never call at all (the
+// handler then reports an all-zero tx object rather than omitting it or
+// crashing).
+void artnet_nodes_web_set_sink(ArtNetSink* sink);
+
 // Registers GET /artnet_nodes on the already-running httpd server. `server`
 // is actually an httpd_handle_t (see device_config_web.h's header comment
 // for why it's typed void* here). Call after httpd_start.
