@@ -158,17 +158,88 @@ static void test_dest_ip_zero_falls_back_to_configured_fallback() {
   CHECK(wireUniverseOf(transport.calls[0]) == 9);
 }
 
-static void test_dest_and_fallback_both_zero_broadcasts() {
-  printf("Test: ip==0 and fallback==0 -> broadcast (precedence's last tier)\n");
+static void test_dest_and_fallback_both_zero_drops_no_broadcast() {
+  // Was test_dest_and_fallback_both_zero_broadcasts, asserting the old
+  // implicit-broadcast-by-default behavior. That behavior is exactly the
+  // root cause of the network-wide memory-leak/ENOMEM bug this test file
+  // now guards against (see FORMAT.md / the PR description): an unrouted
+  // universe with no fallback configured broadcast unconditionally,
+  // flooding the WiFi driver's static TX buffer pool at frame rate.
+  // Rewritten to assert the fixed contract -- ip==0 and fallback==0 now
+  // means "no destination," so the universe is dropped, not broadcast.
+  printf("Test: ip==0 and fallback==0 -> dropped, not broadcast\n");
   ArtNetRouter router(/*fallbackIp=*/0);
   router.setDest(0, ArtNetDest{0, 0});
 
   MockTransport transport;
   auto data = makeUniverseData(0x44);
+  CHECK(router.unroutedDropCount() == 0);
+  router.send(0, data.data(), (uint16_t)data.size(), transport);
+
+  CHECK(transport.calls.empty());
+  CHECK(router.unroutedDropCount() == 1);
+}
+
+static void test_explicit_broadcast_fallback_still_broadcasts() {
+  printf("Test: fallbackIp explicitly 0xFFFFFFFF -> broadcast is honored, not dropped\n");
+  ArtNetRouter router(/*fallbackIp=*/0xFFFFFFFFu);
+  router.setDest(0, ArtNetDest{0, 4});
+
+  MockTransport transport;
+  auto data = makeUniverseData(0x77);
   router.send(0, data.data(), (uint16_t)data.size(), transport);
 
   CHECK(transport.calls.size() == 1);
   CHECK(transport.calls[0].ip == 0xFFFFFFFFu);
+  CHECK(router.unroutedDropCount() == 0);
+}
+
+static void test_routed_universe_unaffected_by_drop_fix() {
+  printf("Test: a universe with an explicit unicast route is never dropped\n");
+  ArtNetRouter router(/*fallbackIp=*/0);
+  router.setDest(1, ArtNetDest{0x0A000005, 2});
+
+  MockTransport transport;
+  auto data = makeUniverseData(0x88);
+  router.send(1, data.data(), (uint16_t)data.size(), transport);
+
+  CHECK(transport.calls.size() == 1);
+  CHECK(transport.calls[0].ip == 0x0A000005);
+  CHECK(router.unroutedDropCount() == 0);
+}
+
+static void test_sequence_does_not_advance_on_drop() {
+  printf("Test: sequence number does not advance for a dropped (unrouted) universe\n");
+  ArtNetRouter router(/*fallbackIp=*/0);
+  MockTransport transport;
+  auto data = makeUniverseData(0x99);
+
+  // Universe 0 has no route and no fallback -- every send() drops.
+  router.send(0, data.data(), (uint16_t)data.size(), transport);
+  router.send(0, data.data(), (uint16_t)data.size(), transport);
+  router.send(0, data.data(), (uint16_t)data.size(), transport);
+  CHECK(transport.calls.empty());
+  CHECK(router.unroutedDropCount() == 3);
+
+  // Route now appears (mirrors ArtPoll discovery arriving mid-show): the
+  // very first packet sent must carry sequence 1, not 4 -- a jump here
+  // would look like 3 dropped frames to the node, when really none were
+  // ever sent under this route.
+  router.setDest(0, ArtNetDest{0x0A000001, 0});
+  router.send(0, data.data(), (uint16_t)data.size(), transport);
+  CHECK(transport.calls.size() == 1);
+  CHECK(sequenceOf(transport.calls[0]) == 1);
+}
+
+static void test_unrouted_drop_count_only_counts_drops() {
+  printf("Test: unroutedDropCount() only increments on drops, not on successful sends\n");
+  ArtNetRouter router(/*fallbackIp=*/0x0A000010);
+  MockTransport transport;
+  auto data = makeUniverseData(0xAA);
+
+  router.send(0, data.data(), (uint16_t)data.size(), transport);  // resolves via fallback
+  CHECK(router.unroutedDropCount() == 0);
+  CHECK(transport.calls.size() == 1);
 }
 
 static void test_unset_universe_defaults_to_internal_index_never_crashes() {
@@ -231,7 +302,11 @@ int main() {
   test_sequence_numbers_advance_independently_per_universe();
   test_frameEnd_emits_exactly_one_artsync_after_data();
   test_dest_ip_zero_falls_back_to_configured_fallback();
-  test_dest_and_fallback_both_zero_broadcasts();
+  test_dest_and_fallback_both_zero_drops_no_broadcast();
+  test_explicit_broadcast_fallback_still_broadcasts();
+  test_routed_universe_unaffected_by_drop_fix();
+  test_sequence_does_not_advance_on_drop();
+  test_unrouted_drop_count_only_counts_drops();
   test_unset_universe_defaults_to_internal_index_never_crashes();
   test_out_of_range_universe_is_a_safe_no_op();
   test_build_art_dmx_packet_header_bytes();

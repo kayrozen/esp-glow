@@ -65,22 +65,34 @@ class ArtNetRouter {
 public:
   // fallbackIp: destination used when a universe's ArtNetDest.ip == 0 (no
   // explicit .show route, and nothing discovered yet -- see Wave 3 Phase
-  // 3). 0 here means broadcast, same convention as CFG1's artnetFallbackIp.
+  // 3). 0 here means "no destination" -- an unrouted universe is dropped,
+  // never broadcast by default (see resolveIp()/send() and
+  // unroutedDropCount() below; a prior version of this router broadcast
+  // in this case, which flooded the network with ~44 unicast-shaped
+  // packets/s per universe with no listener and starved the WiFi driver's
+  // static TX buffer pool -- see FORMAT.md's `artnetFallbackIp` writeup).
+  // An operator can still opt into broadcast explicitly by setting
+  // fallbackIp to 0xFFFFFFFF -- only an *explicit* 0 means "nowhere."
   explicit ArtNetRouter(uint32_t fallbackIp, uint16_t port = ARTNET_PORT);
 
   // Route universeIndex to d. d.ip == 0 means "use the fallback" (see
   // ctor). Safe to call before any send() for that universe, and safe to
   // never call at all -- an unrouted universe defaults to
-  // {ip=0, wireUniverse=universeIndex}, i.e. today's implicit
-  // fallback/broadcast behavior, never a crash. universeIndex >=
-  // MAX_UNIVERSES is a no-op.
+  // {ip=0, wireUniverse=universeIndex}, resolved the same way as any other
+  // ip==0 destination (fallback, or dropped if the fallback is also 0).
+  // universeIndex >= MAX_UNIVERSES is a no-op.
   void setDest(uint8_t universeIndex, const ArtNetDest& d);
   ArtNetDest destFor(uint8_t universeIndex) const;
 
   // Builds and sends one ArtDMX packet for universeIndex via `transport`,
   // stamping the routed wire universe (not universeIndex) and incrementing
   // that universe's own sequence counter (cycles 1..255, never 0).
-  // universeIndex >= MAX_UNIVERSES is a no-op.
+  // universeIndex >= MAX_UNIVERSES is a no-op. If the universe resolves to
+  // no destination (ip==0 and fallbackIp==0), the packet is never built
+  // and transport.sendTo() is never called -- and the sequence counter
+  // does NOT advance, so the first packet once a route does appear looks
+  // like a fresh start, not a gap, to the receiving node. Counted in
+  // unroutedDropCount().
   void send(uint8_t universeIndex, const uint8_t* data, uint16_t len, IArtNetTransport& transport);
 
   // Broadcasts one ArtSync so every node latches simultaneously. Call
@@ -90,7 +102,18 @@ public:
   // spanning several universes) into "every node updates in lockstep."
   void frameEnd(IArtNetTransport& transport);
 
+  // Number of send() calls dropped because the universe resolved to no
+  // destination (see send()'s doc above). Monotonically increasing,
+  // wraps at 2^32; read without locking (approximate under concurrent
+  // increments is fine -- see artnet_sink's TX counters for the same
+  // convention).
+  uint32_t unroutedDropCount() const { return unroutedDrops_; }
+
 private:
+  // Resolves d to a destination IP, or 0 if there is none (see ctor's doc
+  // on the fallbackIp==0 sentinel). Never invents a broadcast address
+  // implicitly -- 0xFFFFFFFF only comes back when fallbackIp_ was set to
+  // that value explicitly.
   uint32_t resolveIp(const ArtNetDest& d) const;
 
   uint32_t fallbackIp_;
@@ -98,4 +121,5 @@ private:
   mutable portMUX_TYPE destMux_ = portMUX_INITIALIZER_UNLOCKED;
   ArtNetDest dest_[MAX_UNIVERSES];
   uint8_t seq_[MAX_UNIVERSES];
+  uint32_t unroutedDrops_ = 0;
 };

@@ -68,8 +68,7 @@ ArtNetDest ArtNetRouter::destFor(uint8_t universeIndex) const {
 
 uint32_t ArtNetRouter::resolveIp(const ArtNetDest& d) const {
   if (d.ip != 0) return d.ip;
-  if (fallbackIp_ != 0) return fallbackIp_;
-  return 0xFFFFFFFFu;
+  return fallbackIp_;  // 0 here means "no destination" -- see ctor's doc.
 }
 
 void ArtNetRouter::send(uint8_t universeIndex, const uint8_t* data, uint16_t len,
@@ -80,12 +79,21 @@ void ArtNetRouter::send(uint8_t universeIndex, const uint8_t* data, uint16_t len
   ArtNetDest dest = dest_[universeIndex];
   portEXIT_CRITICAL(&destMux_);
 
+  uint32_t ip = resolveIp(dest);
+  if (ip == 0) {
+    // No route and no fallback: drop rather than broadcast. Do not touch
+    // the sequence counter -- it must not advance for a packet that was
+    // never sent (see send()'s doc).
+    ++unroutedDrops_;
+    return;
+  }
+
   uint8_t pkt[ARTNET_DMX_PACKET_MAX];
   uint16_t pktLen = buildArtDmxPacket(pkt, dest.wireUniverse,
                                       seq_[universeIndex], data, len);
   if (++seq_[universeIndex] == 0) seq_[universeIndex] = 1;
 
-  transport.sendTo(resolveIp(dest), port_, pkt, pktLen);
+  transport.sendTo(ip, port_, pkt, pktLen);
 }
 
 void ArtNetRouter::frameEnd(IArtNetTransport& transport) {
